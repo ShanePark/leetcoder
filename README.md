@@ -40,9 +40,10 @@ not required.
 ### JDK for running repository tests
 
 The selected `ps` repository uses Java 11 source/target compatibility and its
-Gradle wrapper is Gradle **7.2**. Use a JDK 11 runtime when running a problem
-from leetcoder. JDK 17 or newer can fail before the Gradle 7.2 wrapper gets
-to the test task, even though the source target is Java 11.
+Gradle wrapper is Gradle **7.3.3**. Leetcoder prefers a JDK 17 runtime for
+running problems and falls back to JDK 11 when JDK 17 is not installed. Newer
+JDKs, such as JDK 25, are not selected because they are outside the supported
+range for this Gradle wrapper.
 
 Check the environment before opening the app:
 
@@ -52,16 +53,17 @@ java -version
 ```
 
 Both commands should use the intended JDK, and the wrapper should report
-Gradle 7.2. For example, on macOS with multiple JDKs installed:
+Gradle 7.3.3. For example, on macOS with multiple JDKs installed:
 
 ```bash
-export JAVA_HOME=$(/usr/libexec/java_home -v 11)
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 export PATH="$JAVA_HOME/bin:$PATH"
 ```
 
 The desktop app inherits this environment when it is started from that
-terminal. On Ubuntu, set `JAVA_HOME` to the JDK 11 installation and start the
-app from the same shell.
+terminal. If JDK 17 is unavailable, set `JAVA_HOME` to the JDK 11 installation
+and start the app from the same shell. The app also discovers installed JDKs
+and selects the highest supported version up to JDK 17 automatically.
 
 ## Install and run
 
@@ -190,7 +192,8 @@ temporary directory and invokes the repository wrapper approximately as:
 That temporary task uses the main source-set output, the test runtime
 classpath, and JUnit Platform, then the script is removed. The wrapper,
 dependencies, and JDK still come from the selected repository and local
-environment, so JDK 11 and Gradle 7.2 are important for reliable runs.
+environment, so Gradle 7.3.3 with JDK 17 (or the JDK 11 fallback) is important
+for reliable runs.
 
 ## CI
 
@@ -217,4 +220,5 @@ artifacts.
 - Completion is deliberately lightweight. There is no Java language server,
   full IntelliJ-style refactoring, formatter, debugger, or code submission.
 - Test execution depends on the repository's Gradle wrapper, downloaded
-  dependencies, and the inherited JDK 11 environment.
+  dependencies, and the inherited JDK 17 environment (with JDK 11 as a
+  fallback).

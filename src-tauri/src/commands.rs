@@ -1,10 +1,11 @@
 use crate::leetcode;
 use crate::models::{
     CreateProblemFileArgs, DailyProblem, ProblemFileArgs, ProblemFileContent, ProblemFileList,
-    ProblemTestResult, ProjectValidation, RunProblemTestArgs,
+    ProblemTestEvent, ProblemTestResult, ProjectValidation, RunProblemTestArgs,
 };
 use crate::repository;
 use crate::runner;
+use std::sync::Arc;
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn validate_project(repo_path: String) -> ProjectValidation {
@@ -56,12 +57,25 @@ pub fn save_problem_file(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn run_problem_test(
+pub async fn run_problem_test(
     repo_path: String,
     fully_qualified_class_name: String,
+    on_event: tauri::ipc::Channel<ProblemTestEvent>,
 ) -> Result<ProblemTestResult, String> {
-    runner::run_problem_test(RunProblemTestArgs {
-        project_root: repo_path,
-        fully_qualified_class_name,
+    let sink = Arc::new(move |event| {
+        // A disconnected webview should not turn an otherwise useful test
+        // result into a runner failure.
+        let _ = on_event.send(event);
+    });
+    tauri::async_runtime::spawn_blocking(move || {
+        runner::run_problem_test_with_sink(
+            RunProblemTestArgs {
+                project_root: repo_path,
+                fully_qualified_class_name,
+            },
+            Some(sink),
+        )
     })
+    .await
+    .map_err(|error| format!("Problem test worker stopped unexpectedly: {error}"))?
 }

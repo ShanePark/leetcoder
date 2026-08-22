@@ -74,6 +74,66 @@ pub struct ProblemTestResult {
     pub stderr: String,
 }
 
+/// An incremental update emitted while a problem test is running.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ProblemTestEvent {
+    Started,
+    Phase {
+        phase: ProblemTestProgressPhase,
+    },
+    Log {
+        stream: ProblemTestOutputStream,
+        text: String,
+    },
+    TestStarted {
+        test: ProblemTestProgressCase,
+    },
+    TestFinished {
+        test: ProblemTestProgressCase,
+    },
+}
+
+/// A phase reported before the authoritative final result is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProblemTestProgressPhase {
+    Starting,
+    Compiling,
+    RunningTests,
+    Finishing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProblemTestOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// The compact testcase shape used by live progress events.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemTestProgressCase {
+    pub class_name: String,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub status: ProblemTestProgressStatus,
+    pub duration_ms: Option<u64>,
+    pub message: Option<String>,
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProblemTestProgressStatus {
+    Running,
+    Passed,
+    Failed,
+    Skipped,
+    Error,
+}
+
 /// The broad stage at which a problem run finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

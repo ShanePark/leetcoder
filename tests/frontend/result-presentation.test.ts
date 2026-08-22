@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   presentTestResult,
+  summarizeLiveTests,
   testResultBannerMessage,
 } from '../../src/app'
 import type { TestResult } from '../../src/backend'
@@ -85,6 +86,34 @@ describe('test result failure presentation', () => {
       statusLabel: 'Passed',
       failureMessage: null,
       rawLogsOpen: false,
+    })
+  })
+
+  it('prefers an error diagnostic over an earlier warning', () => {
+    const run = result({
+      phase: 'compile',
+      diagnostics: [
+        { severity: 'warning', message: 'unused import' },
+        { severity: 'error', message: 'cannot find symbol' },
+      ],
+    })
+
+    expect(presentTestResult(run).failureMessage).toBe('cannot find symbol')
+    expect(testResultBannerMessage(run)).toBe('Compilation failed: cannot find symbol')
+  })
+
+  it('counts live error tests separately while keeping them failed', () => {
+    expect(summarizeLiveTests([
+      { name: 'pass()', status: 'passed' },
+      { name: 'error()', status: 'error' },
+      { name: 'skip()', status: 'skipped' },
+    ], 42)).toEqual({
+      total: 3,
+      passed: 1,
+      failed: 1,
+      skipped: 1,
+      errors: 1,
+      durationMs: 42,
     })
   })
 })

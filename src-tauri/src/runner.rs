@@ -1,29 +1,55 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use quick_xml::escape::unescape;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
+use serde::Deserialize;
 use tempfile::{Builder, TempDir};
 
 use crate::models::{
-    ProblemDiagnostic, ProblemDiagnosticSeverity, ProblemTestCase, ProblemTestPhase,
-    ProblemTestResult, ProblemTestStatus, ProblemTestSummary, RunProblemTestArgs,
+    ProblemDiagnostic, ProblemDiagnosticSeverity, ProblemTestCase, ProblemTestEvent,
+    ProblemTestOutputStream, ProblemTestPhase, ProblemTestProgressCase, ProblemTestProgressPhase,
+    ProblemTestProgressStatus, ProblemTestResult, ProblemTestStatus, ProblemTestSummary,
+    RunProblemTestArgs,
 };
 use crate::repository;
 use crate::security::canonical_project_root;
 
 const INIT_SCRIPT_PREFIX: &str = "leetcoder-init";
+const TEST_EVENT_MARKER: &str = "LEETCODER_TEST_EVENT_V1:";
 const MAX_JUNIT_XML_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_SUPPORTED_JAVA_MAJOR: u32 = 11;
 const TARGET_JAVA_MAJOR: u32 = 17;
 
+#[allow(dead_code)]
 pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestResult, String> {
+    run_problem_test_with_sink(args, None)
+}
+
+pub(crate) type ProblemTestEventSink = Arc<dyn Fn(ProblemTestEvent) + Send + Sync + 'static>;
+
+pub(crate) fn run_problem_test_with_sink(
+    args: RunProblemTestArgs,
+    sink: Option<ProblemTestEventSink>,
+) -> Result<ProblemTestResult, String> {
+    emit_event(&sink, ProblemTestEvent::Started);
+    emit_event(
+        &sink,
+        ProblemTestEvent::Phase {
+            phase: ProblemTestProgressPhase::Starting,
+        },
+    );
     let root = canonical_project_root(&args.project_root)?;
     validate_fully_qualified_class_name(&args.fully_qualified_class_name)?;
 
@@ -47,7 +73,14 @@ pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestRe
     };
 
     let run_temp = create_init_script()?;
-    let output = Command::new(&wrapper)
+    emit_event(
+        &sink,
+        ProblemTestEvent::Phase {
+            phase: ProblemTestProgressPhase::Compiling,
+        },
+    );
+    let mut command = Command::new(&wrapper);
+    command
         .current_dir(&root)
         .env("JAVA_HOME", &java.home)
         .env("PATH", path_with_java_home(&java.home))
@@ -69,25 +102,259 @@ pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestRe
         .arg("leetcoderProblemTest")
         .arg("--tests")
         .arg(&args.fully_qualified_class_name)
-        .output();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    let elapsed_ms = elapsed_millis(started);
-    match output {
-        Ok(output) => Ok(build_problem_test_result(
-            &run_temp.result_dir,
-            output.status.code(),
-            output.status.success(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-            elapsed_ms,
-        )),
-        Err(error) => Ok(runner_failure_result(
-            format!(
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let message = format!(
                 "Unable to run Gradle wrapper '{}': {error}",
                 wrapper.display()
-            ),
-            elapsed_ms,
-        )),
+            );
+            emit_event(
+                &sink,
+                ProblemTestEvent::Log {
+                    stream: ProblemTestOutputStream::Stderr,
+                    text: message.clone(),
+                },
+            );
+            emit_event(
+                &sink,
+                ProblemTestEvent::Phase {
+                    phase: ProblemTestProgressPhase::Finishing,
+                },
+            );
+            return Ok(runner_failure_result(message, elapsed_millis(started)));
+        }
+    };
+
+    let capture = capture_child_output(child, sink.clone());
+    let elapsed_ms = elapsed_millis(started);
+    emit_event(
+        &sink,
+        ProblemTestEvent::Phase {
+            phase: ProblemTestProgressPhase::Finishing,
+        },
+    );
+    Ok(build_problem_test_result(
+        &run_temp.result_dir,
+        capture.exit_code,
+        capture.process_success,
+        capture.stdout,
+        capture.stderr,
+        elapsed_ms,
+    ))
+}
+
+fn emit_event(sink: &Option<ProblemTestEventSink>, event: ProblemTestEvent) {
+    if let Some(sink) = sink {
+        sink(event);
+    }
+}
+
+#[derive(Debug, Default)]
+struct ChildOutputCapture {
+    exit_code: Option<i32>,
+    process_success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn capture_child_output(
+    mut child: Child,
+    sink: Option<ProblemTestEventSink>,
+) -> ChildOutputCapture {
+    let running_phase_emitted = Arc::new(AtomicBool::new(false));
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        spawn_stream_reader(
+            stdout,
+            ProblemTestOutputStream::Stdout,
+            sink.clone(),
+            running_phase_emitted.clone(),
+        )
+    });
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        spawn_stream_reader(
+            stderr,
+            ProblemTestOutputStream::Stderr,
+            sink.clone(),
+            running_phase_emitted,
+        )
+    });
+
+    let wait_result = child.wait();
+    let mut capture = ChildOutputCapture {
+        exit_code: wait_result.as_ref().ok().and_then(|status| status.code()),
+        process_success: wait_result
+            .as_ref()
+            .map(std::process::ExitStatus::success)
+            .unwrap_or(false),
+        stdout: join_stream_reader(stdout_handle),
+        stderr: join_stream_reader(stderr_handle),
+    };
+    if let Err(error) = wait_result {
+        let message = format!("Unable to wait for Gradle wrapper: {error}");
+        if !capture.stderr.is_empty() && !capture.stderr.ends_with('\n') {
+            capture.stderr.push('\n');
+        }
+        capture.stderr.push_str(&message);
+        emit_event(
+            &sink,
+            ProblemTestEvent::Log {
+                stream: ProblemTestOutputStream::Stderr,
+                text: message,
+            },
+        );
+    }
+    capture
+}
+
+fn spawn_stream_reader<R: Read + Send + 'static>(
+    reader: R,
+    stream: ProblemTestOutputStream,
+    sink: Option<ProblemTestEventSink>,
+    running_phase_emitted: Arc<AtomicBool>,
+) -> JoinHandle<String> {
+    thread::spawn(move || read_stream(reader, stream, sink, running_phase_emitted))
+}
+
+fn join_stream_reader(handle: Option<JoinHandle<String>>) -> String {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
+}
+
+fn read_stream<R: Read>(
+    reader: R,
+    stream: ProblemTestOutputStream,
+    sink: Option<ProblemTestEventSink>,
+    running_phase_emitted: Arc<AtomicBool>,
+) -> String {
+    let mut reader = BufReader::new(reader);
+    let mut output = String::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let bytes_read = match reader.read_until(b'\n', &mut line) {
+            Ok(bytes_read) => bytes_read,
+            Err(_) => break,
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        let text = String::from_utf8_lossy(&line).into_owned();
+        if stream == ProblemTestOutputStream::Stdout {
+            if let Some(marker) = parse_test_progress_marker(&text) {
+                match marker.kind.as_str() {
+                    "started" => {
+                        if !running_phase_emitted.swap(true, Ordering::AcqRel) {
+                            emit_event(
+                                &sink,
+                                ProblemTestEvent::Phase {
+                                    phase: ProblemTestProgressPhase::RunningTests,
+                                },
+                            );
+                        }
+                        emit_event(
+                            &sink,
+                            ProblemTestEvent::TestStarted {
+                                test: progress_case_from_marker(
+                                    &marker,
+                                    ProblemTestProgressStatus::Running,
+                                ),
+                            },
+                        );
+                    }
+                    "finished" => emit_event(
+                        &sink,
+                        ProblemTestEvent::TestFinished {
+                            test: progress_case_from_marker(&marker, marker_status(&marker)),
+                        },
+                    ),
+                    _ => emit_log(&sink, stream, &text),
+                }
+                continue;
+            }
+        }
+        output.push_str(&text);
+        emit_log(&sink, stream, &text);
+    }
+    output
+}
+
+fn emit_log(sink: &Option<ProblemTestEventSink>, stream: ProblemTestOutputStream, text: &str) {
+    if !text.is_empty() {
+        // Keep the line ending so consumers can append chunks directly to
+        // their live console without having to reconstruct line boundaries.
+        emit_event(
+            sink,
+            ProblemTestEvent::Log {
+                stream,
+                text: text.to_string(),
+            },
+        );
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestProgressMarker {
+    kind: String,
+    #[serde(default)]
+    class_name: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    details: Option<String>,
+}
+
+fn parse_test_progress_marker(line: &str) -> Option<TestProgressMarker> {
+    let line = line.trim_end_matches(&['\r', '\n'][..]);
+    let payload = line.strip_prefix(TEST_EVENT_MARKER)?;
+    serde_json::from_str(payload).ok()
+}
+
+fn marker_status(marker: &TestProgressMarker) -> ProblemTestProgressStatus {
+    match marker
+        .status
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "passed" | "success" | "successful" => ProblemTestProgressStatus::Passed,
+        "failed" | "failure" => ProblemTestProgressStatus::Failed,
+        "skipped" | "skip" => ProblemTestProgressStatus::Skipped,
+        "running" | "started" => ProblemTestProgressStatus::Running,
+        _ => ProblemTestProgressStatus::Error,
+    }
+}
+
+fn progress_case_from_marker(
+    marker: &TestProgressMarker,
+    default_status: ProblemTestProgressStatus,
+) -> ProblemTestProgressCase {
+    ProblemTestProgressCase {
+        class_name: marker.class_name.clone(),
+        name: marker.name.clone(),
+        display_name: marker.display_name.clone(),
+        status: if marker.status.is_some() {
+            marker_status(marker)
+        } else {
+            default_status
+        },
+        duration_ms: marker.duration_ms,
+        message: marker.message.clone(),
+        details: marker.details.clone(),
     }
 }
 
@@ -142,8 +409,8 @@ fn discover_compatible_java() -> Result<JavaInstallation, String> {
         detected.join(", ")
     };
     Err(format!(
-        "No compatible JDK was found for Gradle 7.2. Leetcoder requires a JDK between Java {} and Java {} (Java {} is preferred). Detected: {}. Install a compatible JDK or set JAVA_HOME before launching leetcoder.",
-        MIN_SUPPORTED_JAVA_MAJOR, TARGET_JAVA_MAJOR, TARGET_JAVA_MAJOR, detected
+        "No compatible JDK was found for Gradle 7.3.3. Leetcoder prefers Java {} and supports Java {}-{}. Detected: {}. Install a compatible JDK or set JAVA_HOME before launching leetcoder.",
+        TARGET_JAVA_MAJOR, MIN_SUPPORTED_JAVA_MAJOR, TARGET_JAVA_MAJOR, detected
     ))
 }
 
@@ -405,6 +672,8 @@ struct InitScript {
 
 pub(crate) fn build_gradle_init_script() -> &'static str {
     r#"// Generated temporarily by leetcoder. It is deleted after the run.
+import groovy.json.JsonOutput
+
 allprojects {
     plugins.withId('java') {
         def selectedClass = System.getProperty('leetcoderProblemClass')
@@ -449,11 +718,55 @@ allprojects {
             testClassesDirs = files(classesDir)
             classpath = files(classesDir, sourceSets.main.resources.srcDirs) + jarClasspath
             useJUnitPlatform()
+            testLogging.showStandardStreams = true
             def resultDir = System.getProperty('leetcoderResultDir')
             if (resultDir == null || resultDir.trim().isEmpty()) {
                 throw new GradleException('leetcoderResultDir was not provided')
             }
             reports.junitXml.outputLocation = project.file(resultDir)
+            def progressMarker = 'LEETCODER_TEST_EVENT_V1:'
+            def emitProgress = { payload ->
+                println(progressMarker + JsonOutput.toJson(payload))
+            }
+            beforeTest { descriptor ->
+                if (!descriptor.composite) {
+                    emitProgress([
+                        kind: 'started',
+                        className: descriptor.className ?: '',
+                        name: descriptor.name ?: '',
+                        displayName: descriptor.displayName ?: descriptor.name ?: '',
+                        status: 'running',
+                    ])
+                }
+            }
+            afterTest { descriptor, result ->
+                if (!descriptor.composite) {
+                    def resultType = result.resultType?.toString()?.toLowerCase()
+                    def status = resultType == 'success' ? 'passed' :
+                        resultType == 'failure' ? 'failed' :
+                        resultType == 'skipped' ? 'skipped' : 'error'
+                    def exceptions = result.exceptions ?: []
+                    def message = exceptions ? exceptions[0]?.message : null
+                    def details = exceptions
+                        .collect { exception -> exception?.toString() }
+                        .findAll { value -> value }
+                        .join('\n')
+                    def durationMs = null
+                    if (result.startTime != null && result.endTime != null) {
+                        durationMs = Math.max(0L, result.endTime - result.startTime)
+                    }
+                    emitProgress([
+                        kind: 'finished',
+                        className: descriptor.className ?: '',
+                        name: descriptor.name ?: '',
+                        displayName: descriptor.displayName ?: descriptor.name ?: '',
+                        status: status,
+                        durationMs: durationMs,
+                        message: message,
+                        details: details ?: null,
+                    ])
+                }
+            }
             outputs.upToDateWhen { false }
         }
     }
@@ -1234,6 +1547,8 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use std::fs;
+    use std::io::Cursor;
+    use std::sync::Mutex;
 
     const JUNIT_FIXTURE: &str = r#"
 <testsuites>
@@ -1269,9 +1584,74 @@ expected: <5>
         assert!(script.contains("sourceSets.main.resources.srcDirs"));
         assert!(script.contains("file.isFile() && file.name.toLowerCase().endsWith('.jar')"));
         assert!(script.contains("useJUnitPlatform()"));
+        assert!(script.contains("testLogging.showStandardStreams = true"));
         assert!(script.contains("junitXml.outputLocation"));
         assert!(script.contains("outputs.upToDateWhen { false }"));
         assert!(script.contains("leetcoderResultDir"));
+        assert!(script.contains(TEST_EVENT_MARKER));
+        assert!(script.contains("beforeTest"));
+        assert!(script.contains("afterTest"));
+        assert!(script.contains("descriptor.composite"));
+        assert!(script.contains("JsonOutput.toJson"));
+    }
+
+    #[test]
+    fn progress_marker_is_parsed_into_a_live_test_case() {
+        let marker = format!(
+            "{TEST_EVENT_MARKER}{{\"kind\":\"finished\",\"className\":\"sample.Q1\",\"name\":\"fails\",\"displayName\":\"fails()\",\"status\":\"failed\",\"durationMs\":12,\"message\":\"boom\",\"details\":\"stack\"}}\n"
+        );
+        let parsed = parse_test_progress_marker(&marker).expect("progress marker");
+        let test = progress_case_from_marker(&parsed, marker_status(&parsed));
+        assert_eq!(test.class_name, "sample.Q1");
+        assert_eq!(test.display_name.as_deref(), Some("fails()"));
+        assert_eq!(test.status, ProblemTestProgressStatus::Failed);
+        assert_eq!(test.duration_ms, Some(12));
+        assert_eq!(test.details.as_deref(), Some("stack"));
+    }
+
+    #[test]
+    fn stream_reader_filters_markers_but_emits_logs_and_test_events() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let event_sink: ProblemTestEventSink = {
+            let events = events.clone();
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        };
+        let output = format!(
+            "before\n{TEST_EVENT_MARKER}{{\"kind\":\"started\",\"className\":\"sample.Q1\",\"name\":\"passes\",\"status\":\"running\"}}\n{TEST_EVENT_MARKER}{{\"kind\":\"finished\",\"className\":\"sample.Q1\",\"name\":\"passes\",\"status\":\"passed\",\"durationMs\":3}}\nafter\n"
+        );
+        let captured = read_stream(
+            Cursor::new(output),
+            ProblemTestOutputStream::Stdout,
+            Some(event_sink),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(captured, "before\nafter\n");
+        let events = events.lock().unwrap();
+        assert!(matches!(events[0], ProblemTestEvent::Log { .. }));
+        if let ProblemTestEvent::Log { text, .. } = &events[0] {
+            assert_eq!(text, "before\n");
+        }
+        assert!(matches!(
+            events[1],
+            ProblemTestEvent::Phase {
+                phase: ProblemTestProgressPhase::RunningTests
+            }
+        ));
+        assert!(matches!(events[2], ProblemTestEvent::TestStarted { .. }));
+        assert!(matches!(events[3], ProblemTestEvent::TestFinished { .. }));
+        assert!(matches!(events[4], ProblemTestEvent::Log { .. }));
+    }
+
+    #[test]
+    fn progress_events_serialize_as_camel_case_tagged_messages() {
+        let event = ProblemTestEvent::Log {
+            stream: ProblemTestOutputStream::Stderr,
+            text: "warning".to_string(),
+        };
+        let value = serde_json::to_value(event).expect("event serializes");
+        assert_eq!(value["kind"], Value::String("log".to_string()));
+        assert_eq!(value["stream"], Value::String("stderr".to_string()));
+        assert_eq!(value["text"], Value::String("warning".to_string()));
     }
 
     #[test]
@@ -1292,7 +1672,7 @@ expected: <5>
     }
 
     #[test]
-    fn java_selection_prefers_target_and_rejects_too_new_or_old_jdks() {
+    fn java_selection_prefers_java_17_and_rejects_newer_jdks() {
         let candidates = vec![
             JavaInstallation {
                 home: PathBuf::from("/jdk-25"),
@@ -1319,6 +1699,28 @@ expected: <5>
             })
         );
         assert!(select_compatible_java(&candidates[..1]).is_none());
+    }
+
+    #[test]
+    fn java_selection_falls_back_to_java_11() {
+        let candidates = vec![
+            JavaInstallation {
+                home: PathBuf::from("/jdk-25"),
+                major_version: 25,
+            },
+            JavaInstallation {
+                home: PathBuf::from("/jdk-11"),
+                major_version: 11,
+            },
+        ];
+
+        assert_eq!(
+            select_compatible_java(&candidates),
+            Some(JavaInstallation {
+                home: PathBuf::from("/jdk-11"),
+                major_version: 11,
+            })
+        );
     }
 
     #[test]

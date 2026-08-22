@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { createBackendClient, normalizeTestResult, type Invoke } from '../../src/backend'
+import {
+  createBackendClient,
+  normalizeTestResult,
+  normalizeTestRunProgress,
+  type Invoke,
+} from '../../src/backend'
 
 describe('backend client', () => {
   it('keeps Kotlin files for collision detection while ignoring unrelated files', async () => {
@@ -135,6 +140,82 @@ describe('backend client', () => {
     })
   })
 
+  it('keeps testcase suite names and failure stack details', () => {
+    const result = normalizeTestResult({
+      success: false,
+      phase: 'test',
+      summary: { total: 1, passed: 0, failed: 0, errors: 1, skipped: 0 },
+      tests: [{
+        className: 'shane.leetcode.Q1Test',
+        name: 'fails()',
+        status: 'error',
+        details: 'java.lang.IllegalStateException\n  at Q1Test.fails(Q1Test.java:12)',
+      }],
+      diagnostics: [],
+      stdout: '',
+      stderr: '',
+    })
+
+    expect(result.tests[0]).toMatchObject({
+      className: 'shane.leetcode.Q1Test',
+      status: 'error',
+      details: expect.stringContaining('IllegalStateException'),
+    })
+    expect(result.summary).toMatchObject({ failed: 1, errors: 1 })
+  })
+
+  it('normalizes tagged progress events and ignores malformed payloads', () => {
+    expect(normalizeTestRunProgress({ kind: 'phase', phase: 'compilation' })).toEqual({
+      kind: 'phase',
+      phase: 'compile',
+    })
+    expect(normalizeTestRunProgress({ kind: 'log', stream: 'stderr', text: 'warning' })).toEqual({
+      kind: 'log',
+      stream: 'stderr',
+      text: 'warning',
+    })
+    expect(normalizeTestRunProgress({
+      kind: 'testStarted',
+      test: { className: 'Q1Test', name: 'fails()', status: 'unknown' },
+    })).toMatchObject({
+      kind: 'testStarted',
+      test: { className: 'Q1Test', name: 'fails()', status: 'running' },
+    })
+    expect(normalizeTestRunProgress({ kind: 'log', stream: 'console', text: 'ignored' })).toBeNull()
+    expect(normalizeTestRunProgress({ kind: 'testFinished', test: {} })).toBeNull()
+  })
+
+  it('passes a progress channel to the test command while keeping callback optional', async () => {
+    const events: unknown[] = []
+    const invoke: Invoke = async (command, args) => {
+      expect(command).toBe('run_problem_test')
+      const channel = args?.onEvent as { onmessage?: (event: unknown) => void }
+      channel.onmessage?.({ kind: 'started' })
+      channel.onmessage?.({ kind: 'log', stream: 'stdout', text: 'Gradle\n' })
+      return {
+        success: true,
+        phase: 'test',
+        summary: { total: 0, passed: 0, failed: 0, errors: 0, skipped: 0 },
+        tests: [],
+        diagnostics: [],
+        stdout: 'Gradle\n',
+        stderr: '',
+      }
+    }
+
+    const result = await createBackendClient(invoke).runProblemTest(
+      '/repo',
+      'shane.Q1',
+      (event) => events.push(event),
+    )
+
+    expect(result.success).toBe(true)
+    expect(events).toEqual([
+      { kind: 'started' },
+      { kind: 'log', stream: 'stdout', text: 'Gradle\n' },
+    ])
+  })
+
   it('preserves runtime errors and exposes them as failures to the existing UI summary', () => {
     const result = normalizeTestResult({
       phase: 'test',
@@ -147,6 +228,30 @@ describe('backend client', () => {
 
     expect(result.success).toBe(false)
     expect(result.summary).toMatchObject({ failed: 1, errors: 1 })
+  })
+
+  it('does not let an underspecified summary hide derived testcase counts', () => {
+    const result = normalizeTestResult({
+      success: false,
+      phase: 'test',
+      summary: { total: 0, passed: 0, failed: 0, errors: 0, skipped: 0 },
+      tests: [
+        { className: 'Q1Test', name: 'passes()', status: 'passed' },
+        { className: 'Q1Test', name: 'crashes()', status: 'error' },
+        { className: 'Q1Test', name: 'skips()', status: 'skipped' },
+      ],
+      diagnostics: [],
+      stdout: '',
+      stderr: '',
+    })
+
+    expect(result.summary).toMatchObject({
+      total: 3,
+      passed: 1,
+      failed: 1,
+      errors: 1,
+      skipped: 1,
+    })
   })
 
   it('uses a non-zero legacy exit code when success is absent', () => {

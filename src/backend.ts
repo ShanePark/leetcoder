@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from '@tauri-apps/api/core'
+import { Channel, invoke as tauriInvoke } from '@tauri-apps/api/core'
 
 import type { ProblemFilePlan } from './domain'
 
@@ -27,7 +27,7 @@ export interface ProjectValidation {
 
 export type TestPhase = 'compile' | 'test' | 'unknown' | string
 
-export type TestCaseStatus = 'passed' | 'failed' | 'skipped' | 'unknown' | string
+export type TestCaseStatus = 'passed' | 'failed' | 'error' | 'skipped' | 'running' | 'unknown' | string
 
 export interface TestSummary {
   total: number
@@ -40,10 +40,12 @@ export interface TestSummary {
 
 export interface TestCaseResult {
   name: string
+  className?: string
   displayName?: string
   status: TestCaseStatus
   durationMs?: number | null
   message?: string | null
+  details?: string | null
   expected?: string | null
   actual?: string | null
   file?: string | null
@@ -70,6 +72,15 @@ export interface TestResult {
   exitCode?: number | null
 }
 
+export type TestRunProgress =
+  | { kind: 'started' }
+  | { kind: 'phase'; phase: TestPhase }
+  | { kind: 'log'; stream: 'stdout' | 'stderr'; text: string }
+  | { kind: 'testStarted'; test: TestCaseResult }
+  | { kind: 'testFinished'; test: TestCaseResult }
+
+export type TestRunProgressHandler = (progress: TestRunProgress) => void
+
 export interface BackendClient {
   validateProject(repoPath: string): Promise<ProjectValidation>
   fetchDailyProblem(): Promise<DailyProblem>
@@ -77,10 +88,19 @@ export interface BackendClient {
   readProblemFile(repoPath: string, path: string): Promise<string>
   createProblemFile(repoPath: string, plan: ProblemFilePlan): Promise<void>
   saveProblemFile(repoPath: string, path: string, content: string): Promise<void>
-  runProblemTest(repoPath: string, fullyQualifiedClassName: string): Promise<TestResult>
+  runProblemTest(
+    repoPath: string,
+    fullyQualifiedClassName: string,
+    onProgress?: TestRunProgressHandler,
+  ): Promise<TestResult>
 }
 
 export type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
+
+interface ProgressChannelFallback {
+  onmessage: (event: unknown) => void
+  toJSON(): string
+}
 
 /**
  * Keep the Tauri bridge in one place.  The optional invoker makes this module
@@ -135,14 +155,38 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
       await invoke<unknown>('save_problem_file', { repoPath, path, content })
     },
 
-    async runProblemTest(repoPath, fullyQualifiedClassName) {
+    async runProblemTest(repoPath, fullyQualifiedClassName, onProgress) {
+      // The channel is intentionally passed even when the caller does not
+      // subscribe. Rust commands use it to report lifecycle events, and a
+      // no-op listener keeps the invoke contract identical for every caller.
+      const onEvent = createProgressChannel((event) => {
+        const progress = normalizeTestRunProgress(event)
+        if (progress) {
+          onProgress?.(progress)
+        }
+      })
       const response = await invoke<unknown>('run_problem_test', {
         repoPath,
         fullyQualifiedClassName,
+        onEvent,
       })
       return normalizeTestResult(response)
     },
   }
+}
+
+function createProgressChannel(handler: (event: unknown) => void): Channel<unknown> | ProgressChannelFallback {
+  // Unit tests and the browser preview do not expose Tauri's callback bridge.
+  // Keep the same callback-shaped argument there so custom Invoke mocks can
+  // exercise progress handling without requiring a desktop runtime.
+  const internals = (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+  if (!internals) {
+    return {
+      onmessage: handler,
+      toJSON: () => '',
+    }
+  }
+  return new Channel<unknown>(handler)
 }
 
 /** An error raised for a create race that can safely be retried. */
@@ -338,16 +382,29 @@ function normalizePhase(value: unknown): TestPhase {
 function normalizeSummary(value: unknown, tests: TestCaseResult[]): TestSummary {
   const summary = isRecord(value) ? value : {}
   const counts = deriveCounts(tests)
-  const errors = countValue(summary.errors) ?? 0
-  const failed = numberValue(summary.failed ?? summary.failing ?? summary.failures) ?? counts.failed
+  const errors = Math.max(countValue(summary.errors) ?? 0, counts.errors)
+  const failed = Math.max(
+    numberValue(summary.failed ?? summary.failing ?? summary.failures) ?? 0,
+    counts.failed,
+    errors,
+  )
   return {
-    total: numberValue(summary.total ?? summary.count ?? summary.testCount) ?? counts.total,
-    passed: numberValue(summary.passed ?? summary.passing ?? summary.successful) ?? counts.passed,
+    total: Math.max(
+      numberValue(summary.total ?? summary.count ?? summary.testCount) ?? 0,
+      counts.total,
+    ),
+    passed: Math.max(
+      numberValue(summary.passed ?? summary.passing ?? summary.successful) ?? 0,
+      counts.passed,
+    ),
     // Runtime errors are failures from the user's perspective. Preserve the
     // separate count while ensuring the existing UI cannot render "0 failed"
     // for an errored run.
-    failed: Math.max(failed, errors),
-    skipped: numberValue(summary.skipped ?? summary.ignored) ?? counts.skipped,
+    failed,
+    skipped: Math.max(
+      numberValue(summary.skipped ?? summary.ignored) ?? 0,
+      counts.skipped,
+    ),
     errors,
     durationMs: numberValue(
       summary.durationMs ?? summary.duration_ms ?? summary.duration,
@@ -379,10 +436,23 @@ function normalizeTestCase(value: unknown, index: number): TestCaseResult {
   )
   return {
     name: stringValue(entry.name) ?? stringValue(entry.id) ?? `Test ${index + 1}`,
+    className: stringValue(entry.className)
+      ?? stringValue(entry.class_name)
+      ?? stringValue(entry.testClass)
+      ?? stringValue(entry.test_class)
+      ?? stringValue(failure?.className)
+      ?? stringValue(failure?.class_name),
     displayName: stringValue(entry.displayName) ?? stringValue(entry.display_name) ?? stringValue(entry.name),
     status,
     durationMs: numberValue(entry.durationMs ?? entry.duration_ms ?? entry.duration),
     message: stringValue(entry.message) ?? stringValue(entry.errorMessage) ?? stringValue(failure?.message),
+    details: stringValue(entry.details)
+      ?? stringValue(entry.stackTrace)
+      ?? stringValue(entry.stack_trace)
+      ?? stringValue(entry.trace)
+      ?? stringValue(failure?.details)
+      ?? stringValue(failure?.stackTrace)
+      ?? stringValue(failure?.stack_trace),
     expected: stringValue(entry.expected) ?? stringValue(failure?.expected),
     actual: stringValue(entry.actual) ?? stringValue(failure?.actual),
     file: stringValue(entry.file)
@@ -403,6 +473,55 @@ function normalizeTestCase(value: unknown, index: number): TestCaseResult {
   }
 }
 
+/**
+ * Normalizes the small, tagged event stream emitted while a test run is in
+ * progress. Unknown or malformed events are ignored so a newer Rust build
+ * cannot take down an otherwise valid final result.
+ */
+export function normalizeTestRunProgress(value: unknown): TestRunProgress | null {
+  if (!isRecord(value)) {
+    return null
+  }
+  const rawKind = stringValue(value.kind) ?? stringValue(value.type)
+  const kind = rawKind?.trim().toLowerCase().replace(/[\s_-]/g, '')
+  switch (kind) {
+    case 'started':
+      return { kind: 'started' }
+    case 'phase': {
+      const phase = stringValue(value.phase)
+      return phase ? { kind: 'phase', phase: normalizePhase(phase) } : null
+    }
+    case 'log': {
+      const stream = stringValue(value.stream)?.trim().toLowerCase()
+      const text = stringValue(value.text)
+      if ((stream !== 'stdout' && stream !== 'stderr') || text === undefined) {
+        return null
+      }
+      return { kind: 'log', stream, text }
+    }
+    case 'teststarted':
+    case 'testfinished': {
+      const rawTest = value.test
+      if (!isRecord(rawTest)) {
+        return null
+      }
+      const name = stringValue(rawTest.name) ?? stringValue(rawTest.id)
+      if (!name) {
+        return null
+      }
+      const test = normalizeTestCase(rawTest, 0)
+      if (kind === 'teststarted' && test.status === 'unknown') {
+        test.status = 'running'
+      }
+      return kind === 'teststarted'
+        ? { kind: 'testStarted', test }
+        : { kind: 'testFinished', test }
+    }
+    default:
+      return null
+  }
+}
+
 function normalizeStatus(value: unknown): TestCaseStatus {
   const status = stringValue(value)?.trim().toLowerCase()
   if (!status) {
@@ -411,7 +530,10 @@ function normalizeStatus(value: unknown): TestCaseStatus {
   if (['pass', 'passed', 'success', 'successful', 'ok'].includes(status)) {
     return 'passed'
   }
-  if (['fail', 'failed', 'failure', 'error'].includes(status)) {
+  if (['error', 'errored', 'exception'].includes(status)) {
+    return 'error'
+  }
+  if (['fail', 'failed', 'failure'].includes(status)) {
     return 'failed'
   }
   if (['skip', 'skipped', 'ignored', 'pending'].includes(status)) {
@@ -455,14 +577,15 @@ function normalizeDiagnostics(value: unknown): TestDiagnostic[] {
   })
 }
 
-function deriveCounts(tests: TestCaseResult[]): Pick<TestSummary, 'total' | 'passed' | 'failed' | 'skipped'> {
+function deriveCounts(tests: TestCaseResult[]): Pick<TestSummary, 'total' | 'passed' | 'failed' | 'skipped' | 'errors'> {
   return tests.reduce((counts, test) => {
     counts.total += 1
     if (test.status === 'passed') counts.passed += 1
-    if (test.status === 'failed') counts.failed += 1
+    if (test.status === 'failed' || test.status === 'error') counts.failed += 1
+    if (test.status === 'error') counts.errors += 1
     if (test.status === 'skipped') counts.skipped += 1
     return counts
-  }, { total: 0, passed: 0, failed: 0, skipped: 0 })
+  }, { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0 })
 }
 
 function inferSuccess(value: Record<string, unknown>): boolean {

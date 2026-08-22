@@ -10,6 +10,7 @@ import {
   type TestCaseResult,
   type TestDiagnostic,
   type TestPhase,
+  type TestRunProgress,
 } from './backend'
 import { JavaEditor } from './editor'
 import { iconFor } from './icons'
@@ -51,6 +52,20 @@ export interface TestResultPresentation {
   rawLogsOpen: boolean
 }
 
+export type TestRunStatus = 'running' | 'completed' | 'error'
+
+export interface TestRunSnapshot {
+  id: number
+  status: TestRunStatus
+  phase: TestPhase
+  startedAt: number
+  tests: TestCaseResult[]
+  stdout: string
+  stderr: string
+  activeTest: TestCaseResult | null
+  error: string | null
+}
+
 /**
  * Turns a structured run result into the short, actionable copy used above
  * the detailed test rows. The full process output remains available below.
@@ -60,7 +75,11 @@ export function presentTestResult(result: TestResult): TestResultPresentation {
   const failureMessage = result.success ? null : testFailureMessage(result)
   return {
     phaseLabel,
-    statusLabel: result.success ? 'Passed' : `Failed · ${phaseLabel}`,
+    statusLabel: result.success
+      ? 'Passed'
+      : result.summary.errors > 0
+        ? `Error · ${phaseLabel}`
+        : `Failed · ${phaseLabel}`,
     failureMessage,
     rawLogsOpen: !result.success,
   }
@@ -88,6 +107,13 @@ export function testResultBannerMessage(result: TestResult): string {
 }
 
 function testPhaseLabel(phase: TestPhase): string {
+  const normalized = phase.trim().toLowerCase().replace(/[\s_-]/g, '')
+  if (normalized === 'starting') {
+    return 'Starting'
+  }
+  if (normalized === 'finishing') {
+    return 'Finishing'
+  }
   switch (normalizeTestPhase(phase)) {
     case 'compile':
       return 'Compilation'
@@ -116,14 +142,22 @@ function normalizeTestPhase(phase: TestPhase): 'compile' | 'runner' | 'noTests' 
   if (normalized === 'test' || normalized === 'tests') {
     return 'test'
   }
+  if (normalized === 'compiling') {
+    return 'compile'
+  }
+  if (normalized === 'runningtests') {
+    return 'test'
+  }
   return 'unknown'
 }
 
-function testFailureMessage(result: TestResult): string {
+export function testFailureMessage(result: TestResult): string {
   const phase = normalizeTestPhase(result.phase)
-  const diagnostic = result.diagnostics.find((entry) => entry.message.trim().length > 0)
+  const diagnostic = result.diagnostics.find(
+    (entry) => entry.message.trim().length > 0 && entry.severity.trim().toLowerCase() === 'error',
+  ) ?? result.diagnostics.find((entry) => entry.message.trim().length > 0)
   const failedTest = result.tests.find(
-    (test) => test.status === 'failed' && test.message?.trim().length,
+    (test) => (test.status === 'failed' || test.status === 'error') && test.message?.trim().length,
   )
   if (phase === 'compile' && diagnostic) {
     return shortenResultMessage(diagnostic.message)
@@ -170,6 +204,67 @@ function firstUsefulOutputLine(output: string): string | null {
 function shortenResultMessage(message: string, limit = 220): string {
   const compact = message.replace(/\s+/g, ' ').trim()
   return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact
+}
+
+export function summarizeLiveTests(
+  tests: TestCaseResult[],
+  durationMs: number | null = null,
+): TestResult['summary'] {
+  return tests.reduce((summary, test) => {
+    summary.total += 1
+    if (test.status === 'passed') summary.passed += 1
+    if (test.status === 'failed' || test.status === 'error') summary.failed += 1
+    if (test.status === 'error') summary.errors += 1
+    if (test.status === 'skipped') summary.skipped += 1
+    return summary
+  }, {
+    total: 0,
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    errors: 0,
+    durationMs,
+  })
+}
+
+export function liveSnapshotResult(run: TestRunSnapshot, now = Date.now()): TestResult {
+  return {
+    success: false,
+    phase: run.phase,
+    summary: summarizeLiveTests(run.tests, Math.max(0, now - run.startedAt)),
+    tests: run.tests,
+    diagnostics: [],
+    stdout: run.stdout,
+    stderr: run.stderr,
+    exitCode: null,
+  }
+}
+
+export function runnerFailureResult(
+  run: TestRunSnapshot,
+  message: string,
+): TestResult {
+  const detail = message.trim() || 'The test runner stopped unexpectedly.'
+  const tests = run.tests.map((test) => test.status === 'running'
+    ? { ...test, status: 'error', message: test.message ?? detail }
+    : test)
+  return {
+    success: false,
+    phase: 'runner',
+    summary: summarizeLiveTests(tests, Math.max(0, Date.now() - run.startedAt)),
+    tests,
+    diagnostics: [{ severity: 'error', message: detail }],
+    stdout: run.stdout,
+    stderr: run.stderr || detail,
+    exitCode: null,
+  }
+}
+
+function sameTest(left: TestCaseResult | null, right: TestCaseResult): boolean {
+  if (!left) {
+    return false
+  }
+  return left.name === right.name && (left.className ?? '') === (right.className ?? '')
 }
 
 /**
@@ -331,6 +426,7 @@ interface AppState {
   dailyProblem: DailyProblem | null
   dailyError: string | null
   testResult: TestResult | null
+  testRun: TestRunSnapshot | null
   busy: boolean
   fileSearch: string
   saveError: string | null
@@ -354,6 +450,7 @@ export class LeetcoderApp {
     dailyProblem: null,
     dailyError: null,
     testResult: null,
+    testRun: null,
     busy: false,
     fileSearch: '',
     saveError: null,
@@ -363,9 +460,12 @@ export class LeetcoderApp {
   private suppressEditorChange = false
   private repositoryGeneration = 0
   private refreshRequestId = 0
+  private testRunGeneration = 0
   private closePreparation: Promise<void> | null = null
   private destroyed = false
   private renderedTestResult: TestResult | null = null
+  private liveRenderFrame: number | null = null
+  private liveRenderToken = 0
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     FILE_GROUPS.map((group) => group.key),
   )
@@ -456,6 +556,7 @@ export class LeetcoderApp {
       return
     }
     await this.prepareToClose()
+    this.cancelScheduledLiveRender()
     this.editor.destroy()
     this.autosave.dispose()
     window.removeEventListener('keydown', this.handleGlobalKeydown)
@@ -518,10 +619,19 @@ export class LeetcoderApp {
               </div>
             </section>
 
-            <section class="results-card" aria-labelledby="results-heading">
+            <section class="results-card" aria-labelledby="results-heading" aria-busy="false">
               <div class="results-heading-row">
-                <h2 id="results-heading">Tests</h2>
-                <span id="result-status" class="result-status" aria-live="polite">No run yet</span>
+                <div class="results-heading-main">
+                  <span id="result-badge" class="result-badge" aria-hidden="true">·</span>
+                  <div class="results-heading-copy">
+                    <h2 id="results-heading">Tests</h2>
+                    <span id="result-phase" class="result-phase">No run yet</span>
+                  </div>
+                </div>
+                <div class="result-status-stack">
+                  <span id="result-status" class="result-status" aria-live="polite">No run yet</span>
+                  <span id="result-elapsed" class="result-elapsed"></span>
+                </div>
               </div>
               <div id="test-summary" class="test-summary" aria-live="polite">Run the current class to see results.</div>
               <div id="failure-panel" class="failure-panel" role="alert" hidden>
@@ -747,6 +857,8 @@ export class LeetcoderApp {
     }
     this.state.busy = true
     this.state.testResult = null
+    this.state.testRun = null
+    this.testRunGeneration += 1
     this.renderAll()
     try {
       if (!(await this.flushPendingSave())) {
@@ -835,6 +947,8 @@ export class LeetcoderApp {
     this.state.dirty = false
     this.state.saveError = null
     this.state.testResult = null
+    this.state.testRun = null
+    this.testRunGeneration += 1
     this.suppressEditorChange = true
     try {
       this.editor.setValue('')
@@ -888,30 +1002,158 @@ export class LeetcoderApp {
       return
     }
     this.state.busy = true
-    this.renderAll()
-    if (!(await this.flushPendingSave())) {
-      this.state.busy = false
-      this.renderAll()
-      return
+    const runId = ++this.testRunGeneration
+    const run: TestRunSnapshot = {
+      id: runId,
+      status: 'running',
+      phase: 'starting',
+      startedAt: Date.now(),
+      tests: [],
+      stdout: '',
+      stderr: '',
+      activeTest: null,
+      error: null,
     }
+    this.state.testRun = run
     this.state.testResult = null
     this.renderAll()
     this.setMessage(`Running ${this.state.selectedFqcn}…`, 'info')
     try {
-      this.state.testResult = await this.backend.runProblemTest(this.state.repoPath, this.state.selectedFqcn)
+      if (!(await this.flushPendingSave())) {
+        if (this.isCurrentTestRun(runId)) {
+          const failure = runnerFailureResult(
+            run,
+            this.state.saveError ?? 'The source file could not be saved before running tests.',
+          )
+          run.status = 'error'
+          run.error = testFailureMessage(failure)
+          this.state.testResult = failure
+          this.setMessage(`Could not save before running the test: ${run.error}`, 'error')
+        }
+        return
+      }
+      const result = await this.backend.runProblemTest(
+        this.state.repoPath,
+        this.state.selectedFqcn,
+        (progress) => this.applyTestRunProgress(runId, progress),
+      )
+      if (!this.isCurrentTestRun(runId)) {
+        return
+      }
+      this.state.testResult = result
+      run.status = 'completed'
+      run.phase = result.phase
+      run.tests = result.tests
+      run.stdout = result.stdout
+      run.stderr = result.stderr
+      run.activeTest = null
+      run.error = result.success ? null : testFailureMessage(result)
       this.setMessage(
-        testResultBannerMessage(this.state.testResult),
-        this.state.testResult.success ? 'success' : 'error',
+        testResultBannerMessage(result),
+        result.success ? 'success' : 'error',
       )
     } catch (error) {
-      this.setMessage(`Could not run the test: ${errorMessage(error)}`, 'error')
+      if (this.isCurrentTestRun(runId)) {
+        const failure = runnerFailureResult(run, errorMessage(error))
+        run.status = 'error'
+        run.phase = failure.phase
+        run.error = testFailureMessage(failure)
+        run.activeTest = null
+        this.state.testResult = failure
+        this.setMessage(`Could not run the test: ${run.error}`, 'error')
+      }
     } finally {
       this.state.busy = false
       this.renderAll()
     }
   }
 
+  private isCurrentTestRun(runId: number): boolean {
+    return this.state.testRun?.id === runId
+      && this.testRunGeneration === runId
+  }
+
+  private applyTestRunProgress(runId: number, progress: TestRunProgress): void {
+    if (!this.isCurrentTestRun(runId)) {
+      return
+    }
+    const run = this.state.testRun
+    if (!run || run.status !== 'running') {
+      return
+    }
+    switch (progress.kind) {
+      case 'started':
+        run.phase = 'starting'
+        break
+      case 'phase':
+        run.phase = progress.phase
+        break
+      case 'log':
+        run[progress.stream] += progress.text
+        break
+      case 'testStarted':
+        run.activeTest = progress.test
+        this.upsertLiveTest(run, { ...progress.test, status: 'running' })
+        break
+      case 'testFinished':
+        this.upsertLiveTest(run, progress.test)
+        if (sameTest(run.activeTest, progress.test)) {
+          run.activeTest = null
+        }
+        break
+    }
+    this.scheduleLiveResultRender()
+  }
+
+  private upsertLiveTest(run: TestRunSnapshot, test: TestCaseResult): void {
+    const index = run.tests.findIndex((entry) => sameTest(entry, test))
+    if (index < 0) {
+      run.tests.push(test)
+      return
+    }
+    run.tests[index] = { ...run.tests[index], ...test }
+  }
+
+  private scheduleLiveResultRender(): void {
+    if (this.destroyed || this.liveRenderFrame !== null) {
+      return
+    }
+    const token = ++this.liveRenderToken
+    const flush = (): void => {
+      if (token !== this.liveRenderToken || this.destroyed) {
+        return
+      }
+      this.liveRenderFrame = null
+      this.renderResult()
+    }
+    if (typeof window.requestAnimationFrame === 'function') {
+      this.liveRenderFrame = window.requestAnimationFrame(flush)
+    } else {
+      // The fallback keeps the same coalescing behavior in non-visual test
+      // environments where requestAnimationFrame is unavailable.
+      this.liveRenderFrame = -1
+      queueMicrotask(() => {
+        if (this.liveRenderFrame === -1) {
+          flush()
+        }
+      })
+    }
+  }
+
+  private cancelScheduledLiveRender(): void {
+    this.liveRenderToken += 1
+    if (
+      this.liveRenderFrame !== null
+      && this.liveRenderFrame !== -1
+      && typeof window.cancelAnimationFrame === 'function'
+    ) {
+      window.cancelAnimationFrame(this.liveRenderFrame)
+    }
+    this.liveRenderFrame = null
+  }
+
   private renderAll(): void {
+    this.cancelScheduledLiveRender()
     this.element<HTMLElement>('#repo-path').textContent = this.state.repoPath ?? 'Not selected'
     this.renderShortcutLabels()
     this.renderDailyProblem()
@@ -1132,7 +1374,11 @@ export class LeetcoderApp {
   }
 
   private renderResult(): void {
+    const resultsCard = this.element<HTMLElement>('.results-card')
     const status = this.element<HTMLElement>('#result-status')
+    const badge = this.element<HTMLElement>('#result-badge')
+    const phaseElement = this.element<HTMLElement>('#result-phase')
+    const elapsedElement = this.element<HTMLElement>('#result-elapsed')
     const summaryElement = this.element<HTMLElement>('#test-summary')
     const failurePanel = this.element<HTMLElement>('#failure-panel')
     const failurePanelTitle = this.element<HTMLElement>('#failure-panel-title')
@@ -1142,15 +1388,21 @@ export class LeetcoderApp {
     const stdout = this.element<HTMLElement>('#stdout')
     const stderr = this.element<HTMLElement>('#stderr')
     const rawLogs = this.element<HTMLDetailsElement>('#raw-logs')
-    const result = this.state.testResult
+    const liveRun = this.state.testRun?.status === 'running' ? this.state.testRun : null
+    const result = this.state.testResult ?? (liveRun ? liveSnapshotResult(liveRun) : null)
     status.className = 'result-status'
     status.removeAttribute('title')
+    badge.className = 'result-badge'
+    badge.textContent = '·'
+    phaseElement.textContent = 'No run yet'
+    elapsedElement.textContent = ''
     summaryElement.textContent = ''
     failurePanel.hidden = true
     failurePanelTitle.textContent = ''
     failurePanelMessage.textContent = ''
     testList.innerHTML = ''
     diagnosticsElement.innerHTML = ''
+    resultsCard.setAttribute('aria-busy', liveRun ? 'true' : 'false')
     if (!result) {
       status.textContent = 'No run yet'
       summaryElement.textContent = 'Run the current class to see results.'
@@ -1161,40 +1413,57 @@ export class LeetcoderApp {
       return
     }
     const presentation = presentTestResult(result)
-    status.classList.add(result.success ? 'is-success' : 'is-failure')
-    status.textContent = presentation.statusLabel
-    if (!result.success && presentation.failureMessage) {
+    const isRunning = liveRun !== null
+    const isRunnerError = this.state.testRun?.status === 'error'
+      || normalizeTestPhase(result.phase) === 'runner'
+    const hasFailure = !result.success || isRunnerError
+    const statusClass = isRunning ? 'is-running' : hasFailure ? 'is-failure' : 'is-success'
+    status.classList.add(statusClass)
+    badge.classList.add(statusClass)
+    badge.textContent = isRunning ? '◌' : !hasFailure ? '✓' : isRunnerError || result.summary.errors > 0 ? '!' : '×'
+    status.textContent = isRunning
+      ? 'Running'
+      : isRunnerError
+        ? `Error · ${testPhaseLabel(result.phase)}`
+        : presentation.statusLabel
+    phaseElement.textContent = isRunning
+      ? `· ${testPhaseLabel(result.phase)}`
+      : testPhaseLabel(result.phase)
+    if (isRunning) {
+      elapsedElement.textContent = formatDuration(result.summary.durationMs ?? 0)
+    } else if (result.summary.durationMs !== null && result.summary.durationMs !== undefined) {
+      elapsedElement.textContent = formatDuration(result.summary.durationMs)
+    }
+    if (!isRunning && !result.success && presentation.failureMessage) {
       status.title = presentation.failureMessage
     }
     const resultChanged = this.renderedTestResult !== result
-    if (resultChanged) {
-      rawLogs.open = presentation.rawLogsOpen
+    if (resultChanged || isRunning) {
+      rawLogs.open = isRunning || presentation.rawLogsOpen
     }
     this.renderedTestResult = result
     const summary = result.summary
-    const summaryParts = [
-      `${summary.passed} passed`,
-      `${summary.failed} failed`,
-      `${summary.skipped} skipped`,
-    ]
-    if (summary.total === 0 && result.phase === 'compile') {
-      summaryParts.unshift('Compilation failed')
-    } else {
-      summaryParts.unshift(`${summary.total} tests`)
-    }
-    if (summary.durationMs !== null && summary.durationMs !== undefined) {
-      summaryParts.push(formatDuration(summary.durationMs))
-    }
-    summaryElement.textContent = summaryParts.join(' · ')
+    this.renderSummaryBadges(summaryElement, summary, isRunning)
 
-    if (!result.success && presentation.failureMessage) {
+    if (!isRunning && !result.success && presentation.failureMessage) {
       failurePanel.hidden = false
-      failurePanelTitle.textContent = `${presentation.phaseLabel} failed`
+      failurePanelTitle.textContent = normalizeTestPhase(result.phase) === 'noTests'
+        ? 'No tests found'
+        : `${presentation.phaseLabel} failed`
       failurePanelMessage.textContent = presentation.failureMessage
     }
 
-    for (const test of result.tests) {
-      testList.append(this.renderTestCase(test))
+    this.renderTestGroups(testList, result.tests)
+    if (isRunning && result.tests.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'test-empty test-empty-running'
+      empty.textContent = `Running · ${testPhaseLabel(result.phase)}…`
+      testList.append(empty)
+    } else if (!isRunning && result.tests.length === 0 && result.phase !== 'compile') {
+      const empty = document.createElement('div')
+      empty.className = 'test-empty'
+      empty.textContent = 'No tests were reported.'
+      testList.append(empty)
     }
     if (result.diagnostics.length > 0) {
       const heading = document.createElement('h3')
@@ -1208,12 +1477,77 @@ export class LeetcoderApp {
     stderr.textContent = result.stderr || '(no stderr)'
   }
 
+  private renderSummaryBadges(
+    container: HTMLElement,
+    summary: TestResult['summary'],
+    isRunning: boolean,
+  ): void {
+    const parts: Array<{ label: string; value: number; className: string }> = [
+      { label: 'total', value: summary.total, className: 'summary-total' },
+      { label: 'passed', value: summary.passed, className: 'summary-passed' },
+      { label: 'failed', value: summary.failed, className: 'summary-failed' },
+      { label: 'errors', value: summary.errors, className: 'summary-errors' },
+      { label: 'skipped', value: summary.skipped, className: 'summary-skipped' },
+    ]
+    for (const part of parts) {
+      const badge = document.createElement('span')
+      badge.className = `summary-badge ${part.className}`
+      badge.textContent = `${part.value} ${part.label}`
+      container.append(badge)
+    }
+    if (summary.durationMs !== null && summary.durationMs !== undefined) {
+      const duration = document.createElement('span')
+      duration.className = 'summary-duration'
+      duration.textContent = isRunning ? `· ${formatDuration(summary.durationMs)}` : formatDuration(summary.durationMs)
+      container.append(duration)
+    }
+  }
+
+  private renderTestGroups(container: HTMLElement, tests: TestCaseResult[]): void {
+    const groups = new Map<string, TestCaseResult[]>()
+    for (const test of tests) {
+      const className = test.className || this.state.selectedFqcn || 'Tests'
+      const group = groups.get(className) ?? []
+      group.push(test)
+      groups.set(className, group)
+    }
+    for (const [className, group] of groups) {
+      const suite = document.createElement('details')
+      suite.className = 'test-suite'
+      suite.open = true
+      const heading = document.createElement('summary')
+      heading.className = 'test-suite-summary'
+      const suiteIcon = document.createElement('span')
+      suiteIcon.className = 'test-suite-icon'
+      suiteIcon.textContent = '▾'
+      suiteIcon.setAttribute('aria-hidden', 'true')
+      const suiteName = document.createElement('span')
+      suiteName.className = 'test-suite-name'
+      suiteName.textContent = className
+      const suiteCount = document.createElement('span')
+      suiteCount.className = 'test-suite-count'
+      suiteCount.textContent = `${group.length} test${group.length === 1 ? '' : 's'}`
+      heading.append(suiteIcon, suiteName, suiteCount)
+      suite.append(heading)
+      const children = document.createElement('div')
+      children.className = 'test-suite-children'
+      for (const test of group) {
+        children.append(this.renderTestCase(test))
+      }
+      suite.append(children)
+      container.append(suite)
+    }
+  }
+
   private renderTestCase(test: TestCaseResult): HTMLElement {
-    const failed = test.status === 'failed'
-    const row = failed ? document.createElement('details') : document.createElement('div')
+    const failed = test.status === 'failed' || test.status === 'error'
+    const hasDetail = failed || Boolean(
+      test.message || test.details || test.expected || test.actual || (test.file && test.line),
+    )
+    const row = hasDetail ? document.createElement('details') : document.createElement('div')
     row.className = `test-row test-row-${test.status}`
 
-    const summary = document.createElement(failed ? 'summary' : 'div')
+    const summary = document.createElement(hasDetail ? 'summary' : 'div')
     summary.className = 'test-row-summary'
     summary.append(this.statusIcon(test.status))
     const name = document.createElement('span')
@@ -1231,7 +1565,7 @@ export class LeetcoderApp {
     if (failed && row instanceof HTMLDetailsElement) {
       row.open = true
     }
-    if (test.message || test.expected || test.actual || (test.file && test.line)) {
+    if (hasDetail && row instanceof HTMLDetailsElement) {
       const detail = document.createElement('div')
       detail.className = 'test-failure-detail'
       if (test.message) {
@@ -1246,7 +1580,13 @@ export class LeetcoderApp {
       if (test.actual !== null && test.actual !== undefined) {
         detail.append(this.renderValue('Actual', test.actual, 'actual-value'))
       }
-      if (test.file && test.line) {
+      if (test.details) {
+        const stacktrace = document.createElement('pre')
+        stacktrace.className = 'test-stacktrace'
+        stacktrace.textContent = test.details
+        detail.append(stacktrace)
+      }
+      if (test.file && test.line !== null && test.line !== undefined) {
         detail.append(this.renderLocation(test.file, test.line, test.column))
       }
       row.append(detail)
@@ -1302,7 +1642,17 @@ export class LeetcoderApp {
   private statusIcon(status: string): HTMLElement {
     const icon = document.createElement('span')
     icon.className = `test-status-icon test-status-${status}`
-    icon.textContent = status === 'passed' ? '✓' : status === 'failed' ? '×' : status === 'skipped' ? '–' : '·'
+    icon.textContent = status === 'passed'
+      ? '✓'
+      : status === 'failed'
+        ? '×'
+        : status === 'error'
+          ? '!'
+          : status === 'skipped'
+            ? '–'
+            : status === 'running'
+              ? '◌'
+              : '·'
     icon.setAttribute('aria-label', status)
     return icon
   }
