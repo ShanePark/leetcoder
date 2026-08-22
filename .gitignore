@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+# Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# Local environment files
+.env
+.env.*
+!.env.example
