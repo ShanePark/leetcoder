@@ -319,8 +319,18 @@ function createTestResult(raw: RawTestResult): TestResult {
 
 function normalizePhase(value: unknown): TestPhase {
   const phase = stringValue(value)?.trim().toLowerCase()
-  if (phase === 'compilation') {
+  const compact = phase?.replace(/[\s_-]/g, '')
+  if (compact === 'compile' || compact === 'compilation') {
     return 'compile'
+  }
+  if (compact === 'runner' || compact === 'run' || compact === 'execution') {
+    return 'runner'
+  }
+  if (compact === 'notest' || compact === 'notests') {
+    return 'noTests'
+  }
+  if (compact === 'test' || compact === 'tests') {
+    return 'test'
   }
   return phase || 'unknown'
 }
@@ -456,6 +466,10 @@ function deriveCounts(tests: TestCaseResult[]): Pick<TestSummary, 'total' | 'pas
 }
 
 function inferSuccess(value: Record<string, unknown>): boolean {
+  const phase = normalizePhase(value.phase)
+  if (phase === 'compile' || phase === 'runner' || phase === 'noTests') {
+    return false
+  }
   const tests = normalizeTests(value.tests ?? value.testResults ?? value.test_results)
   const summary = normalizeSummary(value.summary, tests)
   return summary.failed === 0 && summary.errors === 0

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,8 @@ use crate::security::canonical_project_root;
 
 const INIT_SCRIPT_PREFIX: &str = "leetcoder-init";
 const MAX_JUNIT_XML_BYTES: u64 = 16 * 1024 * 1024;
+const MIN_SUPPORTED_JAVA_MAJOR: u32 = 11;
+const TARGET_JAVA_MAJOR: u32 = 17;
 
 pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestResult, String> {
     let root = canonical_project_root(&args.project_root)?;
@@ -36,16 +40,32 @@ pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestRe
         ));
     }
 
-    let run_temp = create_init_script()?;
     let started = Instant::now();
+    let java = match discover_compatible_java() {
+        Ok(java) => java,
+        Err(error) => return Ok(runner_failure_result(error, elapsed_millis(started))),
+    };
+
+    let run_temp = create_init_script()?;
     let output = Command::new(&wrapper)
         .current_dir(&root)
+        .env("JAVA_HOME", &java.home)
+        .env("PATH", path_with_java_home(&java.home))
         .arg("--init-script")
         .arg(&run_temp.path)
         .arg(format!(
             "-DleetcoderResultDir={}",
             run_temp.result_dir.display()
         ))
+        .arg(format!(
+            "-DleetcoderClassesDir={}",
+            run_temp.classes_dir.display()
+        ))
+        .arg(format!(
+            "-DleetcoderProblemClass={}",
+            args.fully_qualified_class_name
+        ))
+        .arg("--no-daemon")
         .arg("leetcoderProblemTest")
         .arg("--tests")
         .arg(&args.fully_qualified_class_name)
@@ -68,6 +88,262 @@ pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestRe
             ),
             elapsed_ms,
         )),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JavaInstallation {
+    home: PathBuf,
+    major_version: u32,
+}
+
+fn discover_compatible_java() -> Result<JavaInstallation, String> {
+    let mut homes = Vec::new();
+    for variable in ["JAVA_HOME", "JDK_HOME"] {
+        if let Some(home) = std::env::var_os(variable) {
+            homes.push(PathBuf::from(home));
+        }
+    }
+
+    if let Some(java) = executable_from_path("java") {
+        if let Some(home) = java_home_from_executable(&java) {
+            homes.push(home);
+        }
+    }
+    if let Some(javac) = executable_from_path("javac") {
+        if let Some(home) = java_home_from_executable(&javac) {
+            homes.push(home);
+        }
+    }
+    homes.extend(discover_environment_java_homes());
+
+    #[cfg(target_os = "macos")]
+    homes.extend(discover_macos_java_homes());
+
+    #[cfg(target_os = "linux")]
+    homes.extend(discover_linux_java_homes());
+
+    let homes = deduplicate_paths(homes);
+    let installations: Vec<JavaInstallation> = homes
+        .iter()
+        .filter_map(|home| probe_java_home(home))
+        .collect();
+    if let Some(java) = select_compatible_java(&installations) {
+        return Ok(java);
+    }
+
+    let detected = installations
+        .iter()
+        .map(|java| format!("{} (Java {})", java.home.display(), java.major_version))
+        .collect::<Vec<_>>();
+    let detected = if detected.is_empty() {
+        "none discovered".to_string()
+    } else {
+        detected.join(", ")
+    };
+    Err(format!(
+        "No compatible JDK was found for Gradle 7.2. Leetcoder requires a JDK between Java {} and Java {} (Java {} is preferred). Detected: {}. Install a compatible JDK or set JAVA_HOME before launching leetcoder.",
+        MIN_SUPPORTED_JAVA_MAJOR, TARGET_JAVA_MAJOR, TARGET_JAVA_MAJOR, detected
+    ))
+}
+
+fn select_compatible_java(candidates: &[JavaInstallation]) -> Option<JavaInstallation> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            (MIN_SUPPORTED_JAVA_MAJOR..=TARGET_JAVA_MAJOR).contains(&candidate.major_version)
+        })
+        .max_by_key(|candidate| candidate.major_version)
+        .cloned()
+}
+
+fn probe_java_home(home: &Path) -> Option<JavaInstallation> {
+    let java = home.join("bin").join(executable_name("java"));
+    let javac = home.join("bin").join(executable_name("javac"));
+    if !is_regular_file(&java) || !is_regular_file(&javac) {
+        return None;
+    }
+    let output = Command::new(&java).arg("-version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let major_version = parse_java_major_version(&version_output)?;
+    Some(JavaInstallation {
+        home: canonical_path(home),
+        major_version,
+    })
+}
+
+fn parse_java_major_version(output: &str) -> Option<u32> {
+    let version = output
+        .lines()
+        .find_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            let marker = lower.find("version")?;
+            let value = line[marker + "version".len()..]
+                .trim()
+                .split_whitespace()
+                .next()?
+                .trim_matches('"');
+            Some(value)
+        })
+        .or_else(|| {
+            output.split_whitespace().find_map(|value| {
+                value
+                    .trim_matches('"')
+                    .chars()
+                    .next()
+                    .filter(char::is_ascii_digit)
+                    .map(|_| value.trim_matches('"'))
+            })
+        })?;
+
+    let mut components = version.split('.');
+    let first = components.next()?.parse::<u32>().ok()?;
+    if first == 1 {
+        components.next()?.parse::<u32>().ok()
+    } else {
+        Some(first)
+    }
+}
+
+fn path_with_java_home(home: &Path) -> OsString {
+    let mut paths = vec![home.join("bin")];
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| {
+        let mut fallback = OsString::from(home.join("bin").as_os_str());
+        if let Some(path) = std::env::var_os("PATH") {
+            fallback.push(if cfg!(windows) { ";" } else { ":" });
+            fallback.push(path);
+        }
+        fallback
+    })
+}
+
+fn executable_from_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(executable_name(name));
+        if is_regular_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn java_home_from_executable(executable: &Path) -> Option<PathBuf> {
+    let executable = canonical_path(executable);
+    let bin = executable.parent()?;
+    if bin.file_name() != Some(OsStr::new("bin")) {
+        return None;
+    }
+    bin.parent().map(Path::to_path_buf)
+}
+
+fn executable_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn deduplicate_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .map(|path| canonical_path(&path))
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+fn discover_environment_java_homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    if let Some(root) = std::env::var_os("SDKMAN_CANDIDATES_DIR") {
+        scan_java_home_root(&PathBuf::from(root).join("java"), &mut homes);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        scan_java_home_root(
+            &PathBuf::from(home).join(".sdkman/candidates/java"),
+            &mut homes,
+        );
+    }
+    if let Some(root) = std::env::var_os("ASDF_DATA_DIR") {
+        scan_java_home_root(&PathBuf::from(root).join("installs/java"), &mut homes);
+    }
+    homes
+}
+
+#[cfg(target_os = "macos")]
+fn discover_macos_java_homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    for version in MIN_SUPPORTED_JAVA_MAJOR..=TARGET_JAVA_MAJOR {
+        let output = Command::new("/usr/libexec/java_home")
+            .arg("-v")
+            .arg(version.to_string())
+            .output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !home.is_empty() {
+                    homes.push(PathBuf::from(home));
+                }
+            }
+        }
+    }
+    homes
+}
+
+#[cfg(target_os = "linux")]
+fn discover_linux_java_homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    if let Ok(output) = Command::new("update-alternatives")
+        .args(["--list", "java"])
+        .output()
+    {
+        if output.status.success() {
+            for executable in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Some(home) = java_home_from_executable(Path::new(executable.trim())) {
+                    homes.push(home);
+                }
+            }
+        }
+    }
+    for root in ["/usr/lib/jvm", "/usr/java", "/opt/java"] {
+        scan_java_home_root(Path::new(root), &mut homes);
+    }
+    homes
+}
+
+fn scan_java_home_root(root: &Path, homes: &mut Vec<PathBuf>) {
+    if is_regular_file(&root.join("bin").join(executable_name("java"))) {
+        homes.push(root.to_path_buf());
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && is_regular_file(&path.join("bin").join(executable_name("java"))) {
+            homes.push(path);
+        }
     }
 }
 
@@ -124,17 +400,54 @@ struct InitScript {
     _directory: TempDir,
     path: PathBuf,
     result_dir: PathBuf,
+    classes_dir: PathBuf,
 }
 
 pub(crate) fn build_gradle_init_script() -> &'static str {
     r#"// Generated temporarily by leetcoder. It is deleted after the run.
 allprojects {
     plugins.withId('java') {
+        def selectedClass = System.getProperty('leetcoderProblemClass')
+        if (selectedClass == null || selectedClass.trim().isEmpty()) {
+            throw new GradleException('leetcoderProblemClass was not provided')
+        }
+        def selectedSourcePath = selectedClass.replace('.', '/') + '.java'
+        def problemSourceFiles = files(sourceSets.main.java.srcDirs).asFileTree.matching {
+            include '**/*.java'
+            exclude 'shane/leetcode/problems/easy/**'
+            exclude 'shane/leetcode/problems/medium/**'
+            exclude 'shane/leetcode/problems/xhard/**'
+        }
+        def selectedSourceFiles = files(sourceSets.main.java.srcDirs).asFileTree.matching {
+            include selectedSourcePath
+        }
+        if (selectedSourceFiles.isEmpty()) {
+            throw new GradleException("Selected problem source was not found: ${selectedSourcePath}")
+        }
+        def isolatedSources = files(problemSourceFiles, selectedSourceFiles)
+        def classesDirProperty = System.getProperty('leetcoderClassesDir')
+        if (classesDirProperty == null || classesDirProperty.trim().isEmpty()) {
+            throw new GradleException('leetcoderClassesDir was not provided')
+        }
+        def classesDir = project.file(classesDirProperty)
+        def jarClasspath = configurations.testRuntimeClasspath.filter { file ->
+            file.isFile() && file.name.toLowerCase().endsWith('.jar')
+        }
+        def compileTask = tasks.register('leetcoderProblemCompile', JavaCompile) {
+            description = 'Compiles shared sources and the selected leetcoder problem only.'
+            source isolatedSources
+            destinationDirectory.set(classesDir)
+            classpath = jarClasspath
+            options.sourcepath = files(sourceSets.main.java.srcDirs)
+            options.encoding = 'UTF-8'
+            outputs.upToDateWhen { false }
+        }
         tasks.register('leetcoderProblemTest', Test) {
             description = 'Runs one leetcoder problem class from the main source set.'
             group = 'verification'
-            testClassesDirs = sourceSets.main.output.classesDirs
-            classpath = sourceSets.main.output + configurations.testRuntimeClasspath
+            dependsOn compileTask
+            testClassesDirs = files(classesDir)
+            classpath = files(classesDir, sourceSets.main.resources.srcDirs) + jarClasspath
             useJUnitPlatform()
             def resultDir = System.getProperty('leetcoderResultDir')
             if (resultDir == null || resultDir.trim().isEmpty()) {
@@ -170,10 +483,17 @@ fn create_init_script() -> Result<InitScript, String> {
 
     let path = directory.path().join("init.gradle");
     let result_dir = directory.path().join("junit-results");
+    let classes_dir = directory.path().join("classes");
     fs::create_dir(&result_dir).map_err(|error| {
         format!(
             "Unable to create temporary JUnit result directory '{}': {error}",
             result_dir.display()
+        )
+    })?;
+    fs::create_dir(&classes_dir).map_err(|error| {
+        format!(
+            "Unable to create temporary Java classes directory '{}': {error}",
+            classes_dir.display()
         )
     })?;
     #[cfg(unix)]
@@ -183,6 +503,12 @@ fn create_init_script() -> Result<InitScript, String> {
             format!(
                 "Unable to secure temporary JUnit result directory '{}': {error}",
                 result_dir.display()
+            )
+        })?;
+        fs::set_permissions(&classes_dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!(
+                "Unable to secure temporary Java classes directory '{}': {error}",
+                classes_dir.display()
             )
         })?;
     }
@@ -215,6 +541,7 @@ fn create_init_script() -> Result<InitScript, String> {
         _directory: directory,
         path,
         result_dir,
+        classes_dir,
     })
 }
 
@@ -263,11 +590,6 @@ fn build_problem_test_result(
     let mut diagnostics = parse_compilation_diagnostics(&stdout);
     diagnostics.extend(parse_compilation_diagnostics(&stderr));
     deduplicate_diagnostics(&mut diagnostics);
-    let has_compilation_error = diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.severity == ProblemDiagnosticSeverity::Error)
-        || looks_like_compilation_failure(&stdout)
-        || looks_like_compilation_failure(&stderr);
 
     let report_failed = report_error.is_some();
     if let Some(error) = report_error {
@@ -281,6 +603,29 @@ fn build_problem_test_result(
             caret: None,
         });
     }
+
+    let has_error_diagnostic = diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == ProblemDiagnosticSeverity::Error);
+    if !process_success && !has_error_diagnostic {
+        if let Some(message) = first_output_line(&stderr).or_else(|| first_output_line(&stdout)) {
+            diagnostics.push(ProblemDiagnostic {
+                severity: ProblemDiagnosticSeverity::Error,
+                file: None,
+                line: None,
+                column: None,
+                message,
+                source: Some("runner".to_string()),
+                caret: None,
+            });
+        }
+    }
+
+    let has_compilation_error = diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == ProblemDiagnosticSeverity::Error
+            && !matches!(diagnostic.source.as_deref(), Some("runner") | Some("junit"))
+    }) || looks_like_compilation_failure(&stdout)
+        || looks_like_compilation_failure(&stderr);
 
     let summary = summarize_tests(&parsed.tests, parsed.duration_ms, elapsed_ms);
     let has_tests = !parsed.tests.is_empty();
@@ -311,6 +656,14 @@ fn build_problem_test_result(
         stdout,
         stderr,
     }
+}
+
+fn first_output_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
 }
 
 fn runner_failure_result(message: String, duration_ms: u64) -> ProblemTestResult {
@@ -905,12 +1258,67 @@ expected: <5>
     fn init_script_writes_junit_reports_to_each_run_directory() {
         let script = build_gradle_init_script();
         assert!(script.contains("leetcoderProblemTest"));
-        assert!(script.contains("sourceSets.main.output.classesDirs"));
-        assert!(script.contains("configurations.testRuntimeClasspath"));
+        assert!(script.contains("leetcoderProblemCompile"));
+        assert!(script.contains("sourceSets.main.java.srcDirs"));
+        assert!(script.contains("exclude 'shane/leetcode/problems/easy/**'"));
+        assert!(script.contains("exclude 'shane/leetcode/problems/medium/**'"));
+        assert!(script.contains("exclude 'shane/leetcode/problems/xhard/**'"));
+        assert!(script.contains("selectedSourcePath"));
+        assert!(script.contains("options.sourcepath"));
+        assert!(script.contains("leetcoderClassesDir"));
+        assert!(script.contains("sourceSets.main.resources.srcDirs"));
+        assert!(script.contains("file.isFile() && file.name.toLowerCase().endsWith('.jar')"));
         assert!(script.contains("useJUnitPlatform()"));
         assert!(script.contains("junitXml.outputLocation"));
         assert!(script.contains("outputs.upToDateWhen { false }"));
         assert!(script.contains("leetcoderResultDir"));
+    }
+
+    #[test]
+    fn java_version_parser_supports_modern_and_legacy_output() {
+        assert_eq!(
+            parse_java_major_version("openjdk version \"17.0.18\" 2026-01-20\n"),
+            Some(17)
+        );
+        assert_eq!(
+            parse_java_major_version("java version \"1.8.0_382\"\n"),
+            Some(8)
+        );
+        assert_eq!(
+            parse_java_major_version("openjdk version \"25\" 2026-01-20\n"),
+            Some(25)
+        );
+        assert_eq!(parse_java_major_version("not a java version"), None);
+    }
+
+    #[test]
+    fn java_selection_prefers_target_and_rejects_too_new_or_old_jdks() {
+        let candidates = vec![
+            JavaInstallation {
+                home: PathBuf::from("/jdk-25"),
+                major_version: 25,
+            },
+            JavaInstallation {
+                home: PathBuf::from("/jdk-11"),
+                major_version: 11,
+            },
+            JavaInstallation {
+                home: PathBuf::from("/jdk-17"),
+                major_version: 17,
+            },
+            JavaInstallation {
+                home: PathBuf::from("/jdk-8"),
+                major_version: 8,
+            },
+        ];
+        assert_eq!(
+            select_compatible_java(&candidates),
+            Some(JavaInstallation {
+                home: PathBuf::from("/jdk-17"),
+                major_version: 17,
+            })
+        );
+        assert!(select_compatible_java(&candidates[..1]).is_none());
     }
 
     #[test]
@@ -930,8 +1338,10 @@ expected: <5>
         assert_ne!(first.result_dir, second.result_dir);
         assert!(first.path.is_file());
         assert!(first.result_dir.is_dir());
+        assert!(first.classes_dir.is_dir());
         assert!(second.path.is_file());
         assert!(second.result_dir.is_dir());
+        assert!(second.classes_dir.is_dir());
 
         #[cfg(unix)]
         {
@@ -956,13 +1366,23 @@ expected: <5>
                     & 0o777,
                 0o700
             );
+            assert_eq!(
+                fs::metadata(&first.classes_dir)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
         }
 
         let first_path = first.path.clone();
         let first_results = first.result_dir.clone();
+        let first_classes = first.classes_dir.clone();
         drop(first);
         assert!(!first_path.exists());
         assert!(!first_results.exists());
+        assert!(!first_classes.exists());
         assert!(second.path.exists());
         drop(second);
     }
@@ -1043,6 +1463,25 @@ expected: <5>
         );
         assert_eq!(runner.phase, ProblemTestPhase::Runner);
         assert!(!runner.success);
+    }
+
+    #[test]
+    fn runner_output_keeps_a_useful_diagnostic_when_no_report_exists() {
+        let result = build_problem_test_result(
+            Path::new("/path/that/does/not/exist"),
+            Some(1),
+            false,
+            String::new(),
+            "Unsupported class file major version 69\nmore details\n".to_string(),
+            9,
+        );
+        assert_eq!(result.phase, ProblemTestPhase::Runner);
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].message,
+            "Unsupported class file major version 69"
+        );
+        assert_eq!(result.diagnostics[0].source.as_deref(), Some("runner"));
     }
 
     #[test]

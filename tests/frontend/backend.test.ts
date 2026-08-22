@@ -90,6 +90,27 @@ describe('backend client', () => {
     expect(result.diagnostics[0]).toMatchObject({ message: 'cannot find symbol', file: 'Solution.java', line: 8 })
   })
 
+  it('normalizes no-tests and runner phases from the Rust result enum', () => {
+    expect(normalizeTestResult({
+      success: false,
+      phase: 'noTests',
+      summary: {},
+      tests: [],
+      diagnostics: [],
+      stdout: 'BUILD SUCCESSFUL',
+      stderr: '',
+    }).phase).toBe('noTests')
+    expect(normalizeTestResult({
+      success: false,
+      phase: 'runner',
+      summary: {},
+      tests: [],
+      diagnostics: [],
+      stdout: '',
+      stderr: 'runner stopped',
+    }).phase).toBe('runner')
+  })
+
   it('reads direct Rust ProblemTestResult fields and source locations', () => {
     const result = normalizeTestResult({
       success: false,

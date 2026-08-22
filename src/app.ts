@@ -9,6 +9,7 @@ import {
   type TestResult,
   type TestCaseResult,
   type TestDiagnostic,
+  type TestPhase,
 } from './backend'
 import { JavaEditor } from './editor'
 import { iconFor } from './icons'
@@ -41,6 +42,134 @@ export interface AutosaveCoordinatorOptions {
   delayMs?: number
   onStatusChange?: (status: AutosaveStatus) => void
   onError?: (error: unknown) => void
+}
+
+export interface TestResultPresentation {
+  phaseLabel: string
+  statusLabel: string
+  failureMessage: string | null
+  rawLogsOpen: boolean
+}
+
+/**
+ * Turns a structured run result into the short, actionable copy used above
+ * the detailed test rows. The full process output remains available below.
+ */
+export function presentTestResult(result: TestResult): TestResultPresentation {
+  const phaseLabel = testPhaseLabel(result.phase)
+  const failureMessage = result.success ? null : testFailureMessage(result)
+  return {
+    phaseLabel,
+    statusLabel: result.success ? 'Passed' : `Failed · ${phaseLabel}`,
+    failureMessage,
+    rawLogsOpen: !result.success,
+  }
+}
+
+export function testResultBannerMessage(result: TestResult): string {
+  if (result.success) {
+    return 'Test passed.'
+  }
+  const reason = testFailureMessage(result)
+  const phase = normalizeTestPhase(result.phase)
+  if (phase === 'compile') {
+    return `Compilation failed: ${reason}`
+  }
+  if (phase === 'runner') {
+    return `Test runner failed: ${reason}`
+  }
+  if (phase === 'noTests') {
+    return `No tests found: ${reason}`
+  }
+  if (phase === 'test') {
+    return `Tests failed: ${reason}`
+  }
+  return `Test failed: ${reason}`
+}
+
+function testPhaseLabel(phase: TestPhase): string {
+  switch (normalizeTestPhase(phase)) {
+    case 'compile':
+      return 'Compilation'
+    case 'runner':
+      return 'Test runner'
+    case 'noTests':
+      return 'No tests'
+    case 'test':
+      return 'Tests'
+    default:
+      return phase.trim() || 'Test run'
+  }
+}
+
+function normalizeTestPhase(phase: TestPhase): 'compile' | 'runner' | 'noTests' | 'test' | 'unknown' {
+  const normalized = phase.trim().toLowerCase().replace(/[\s_-]/g, '')
+  if (normalized === 'compile' || normalized === 'compilation') {
+    return 'compile'
+  }
+  if (normalized === 'runner' || normalized === 'run' || normalized === 'execution') {
+    return 'runner'
+  }
+  if (normalized === 'notest' || normalized === 'notests') {
+    return 'noTests'
+  }
+  if (normalized === 'test' || normalized === 'tests') {
+    return 'test'
+  }
+  return 'unknown'
+}
+
+function testFailureMessage(result: TestResult): string {
+  const phase = normalizeTestPhase(result.phase)
+  const diagnostic = result.diagnostics.find((entry) => entry.message.trim().length > 0)
+  const failedTest = result.tests.find(
+    (test) => test.status === 'failed' && test.message?.trim().length,
+  )
+  if (phase === 'compile' && diagnostic) {
+    return shortenResultMessage(diagnostic.message)
+  }
+  if (phase === 'test' && failedTest?.message) {
+    return shortenResultMessage(failedTest.message)
+  }
+  const stderr = firstUsefulOutputLine(result.stderr)
+  if (stderr) {
+    return shortenResultMessage(stderr)
+  }
+  const stdout = firstUsefulOutputLine(result.stdout)
+  if (stdout) {
+    return shortenResultMessage(stdout)
+  }
+  if (diagnostic) {
+    return shortenResultMessage(diagnostic.message)
+  }
+  if (phase === 'compile') {
+    return 'The Java source could not be compiled.'
+  }
+  if (phase === 'runner') {
+    return 'The test runner stopped before reporting any tests.'
+  }
+  if (phase === 'noTests') {
+    return 'The test task completed without reporting any tests.'
+  }
+  return 'The test run stopped before reporting a result.'
+}
+
+function firstUsefulOutputLine(output: string): string | null {
+  const lines = output
+    .replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length === 0) {
+    return null
+  }
+  const useful = lines.find((line) => !/^> task .* (executed|failed)$/i.test(line))
+  return useful ?? lines[0]
+}
+
+function shortenResultMessage(message: string, limit = 220): string {
+  const compact = message.replace(/\s+/g, ' ').trim()
+  return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact
 }
 
 /**
@@ -236,6 +365,7 @@ export class LeetcoderApp {
   private refreshRequestId = 0
   private closePreparation: Promise<void> | null = null
   private destroyed = false
+  private renderedTestResult: TestResult | null = null
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     FILE_GROUPS.map((group) => group.key),
   )
@@ -394,9 +524,13 @@ export class LeetcoderApp {
                 <span id="result-status" class="result-status" aria-live="polite">No run yet</span>
               </div>
               <div id="test-summary" class="test-summary" aria-live="polite">Run the current class to see results.</div>
+              <div id="failure-panel" class="failure-panel" role="alert" hidden>
+                <strong id="failure-panel-title"></strong>
+                <p id="failure-panel-message"></p>
+              </div>
               <div id="test-list" class="test-list"></div>
               <div id="diagnostics" class="diagnostics"></div>
-              <details class="raw-logs">
+              <details id="raw-logs" class="raw-logs">
                 <summary id="raw-logs-summary">Gradle output</summary>
                 <div class="result-columns">
                   <div class="result-pane">
@@ -766,7 +900,7 @@ export class LeetcoderApp {
     try {
       this.state.testResult = await this.backend.runProblemTest(this.state.repoPath, this.state.selectedFqcn)
       this.setMessage(
-        this.state.testResult.success ? 'Test passed.' : 'Test failed. See stderr below.',
+        testResultBannerMessage(this.state.testResult),
         this.state.testResult.success ? 'success' : 'error',
       )
     } catch (error) {
@@ -1000,13 +1134,21 @@ export class LeetcoderApp {
   private renderResult(): void {
     const status = this.element<HTMLElement>('#result-status')
     const summaryElement = this.element<HTMLElement>('#test-summary')
+    const failurePanel = this.element<HTMLElement>('#failure-panel')
+    const failurePanelTitle = this.element<HTMLElement>('#failure-panel-title')
+    const failurePanelMessage = this.element<HTMLElement>('#failure-panel-message')
     const testList = this.element<HTMLElement>('#test-list')
     const diagnosticsElement = this.element<HTMLElement>('#diagnostics')
     const stdout = this.element<HTMLElement>('#stdout')
     const stderr = this.element<HTMLElement>('#stderr')
+    const rawLogs = this.element<HTMLDetailsElement>('#raw-logs')
     const result = this.state.testResult
     status.className = 'result-status'
+    status.removeAttribute('title')
     summaryElement.textContent = ''
+    failurePanel.hidden = true
+    failurePanelTitle.textContent = ''
+    failurePanelMessage.textContent = ''
     testList.innerHTML = ''
     diagnosticsElement.innerHTML = ''
     if (!result) {
@@ -1014,10 +1156,21 @@ export class LeetcoderApp {
       summaryElement.textContent = 'Run the current class to see results.'
       stdout.textContent = ''
       stderr.textContent = ''
+      rawLogs.open = false
+      this.renderedTestResult = null
       return
     }
+    const presentation = presentTestResult(result)
     status.classList.add(result.success ? 'is-success' : 'is-failure')
-    status.textContent = result.success ? 'Passed' : 'Failed'
+    status.textContent = presentation.statusLabel
+    if (!result.success && presentation.failureMessage) {
+      status.title = presentation.failureMessage
+    }
+    const resultChanged = this.renderedTestResult !== result
+    if (resultChanged) {
+      rawLogs.open = presentation.rawLogsOpen
+    }
+    this.renderedTestResult = result
     const summary = result.summary
     const summaryParts = [
       `${summary.passed} passed`,
@@ -1033,6 +1186,12 @@ export class LeetcoderApp {
       summaryParts.push(formatDuration(summary.durationMs))
     }
     summaryElement.textContent = summaryParts.join(' · ')
+
+    if (!result.success && presentation.failureMessage) {
+      failurePanel.hidden = false
+      failurePanelTitle.textContent = `${presentation.phaseLabel} failed`
+      failurePanelMessage.textContent = presentation.failureMessage
+    }
 
     for (const test of result.tests) {
       testList.append(this.renderTestCase(test))
