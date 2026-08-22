@@ -28,6 +28,167 @@ export interface AppOptions {
   storage?: Storage
 }
 
+export interface AutosaveSnapshot {
+  repoPath: string
+  filePath: string
+  source: string
+}
+
+export type AutosaveStatus = 'idle' | 'saving' | 'error'
+
+export interface AutosaveCoordinatorOptions {
+  delayMs?: number
+  onStatusChange?: (status: AutosaveStatus) => void
+  onError?: (error: unknown) => void
+}
+
+/**
+ * Coalesces editor changes into one debounced write and follows an in-flight
+ * write with the newest snapshot when the document changes while saving.
+ */
+export class AutosaveCoordinator {
+  private readonly save: (snapshot: AutosaveSnapshot) => Promise<void>
+  private readonly delayMs: number
+  private readonly onStatusChange?: (status: AutosaveStatus) => void
+  private readonly onError?: (error: unknown) => void
+  private timer: ReturnType<typeof setTimeout> | null = null
+  private pending: AutosaveSnapshot | null = null
+  private running: Promise<void> | null = null
+  private currentStatus: AutosaveStatus = 'idle'
+  private disposed = false
+
+  constructor(
+    save: (snapshot: AutosaveSnapshot) => Promise<void>,
+    options: AutosaveCoordinatorOptions = {},
+  ) {
+    this.save = save
+    this.delayMs = options.delayMs ?? 500
+    this.onStatusChange = options.onStatusChange
+    this.onError = options.onError
+  }
+
+  get status(): AutosaveStatus {
+    return this.currentStatus
+  }
+
+  get hasPendingChanges(): boolean {
+    return this.pending !== null || this.running !== null
+  }
+
+  schedule(snapshot: AutosaveSnapshot): void {
+    if (this.disposed) {
+      return
+    }
+    this.pending = snapshot
+    this.clearTimer()
+    this.setStatus('saving')
+    this.timer = setTimeout(() => {
+      this.timer = null
+      void this.flush().catch((error) => this.onError?.(error))
+    }, this.delayMs)
+  }
+
+  async flush(): Promise<void> {
+    this.clearTimer()
+    if (!this.pending && !this.running) {
+      return
+    }
+    await (this.running ?? this.startRun())
+  }
+
+  dispose(): void {
+    this.disposed = true
+    this.clearTimer()
+  }
+
+  private startRun(): Promise<void> {
+    const run = this.persistPending()
+    this.running = run
+    void run.then(
+      () => {
+        if (this.running === run) {
+          this.running = null
+        }
+      },
+      () => {
+        if (this.running === run) {
+          this.running = null
+        }
+      },
+    )
+    return run
+  }
+
+  private async persistPending(): Promise<void> {
+    while (this.pending) {
+      const snapshot = this.pending
+      this.pending = null
+      this.setStatus('saving')
+      try {
+        await this.save(snapshot)
+      } catch (error) {
+        // Keep the failed snapshot available for an explicit retry. If a
+        // newer edit already arrived, that newer snapshot is sufficient.
+        this.pending ??= snapshot
+        this.setStatus('error')
+        throw error
+      }
+    }
+    this.setStatus('idle')
+  }
+
+  private clearTimer(): void {
+    if (this.timer !== null) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+  }
+
+  private setStatus(status: AutosaveStatus): void {
+    this.currentStatus = status
+    this.onStatusChange?.(status)
+  }
+}
+
+export function filterProblemFiles(files: ProblemFileEntry[], query: string): ProblemFileEntry[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  if (!normalizedQuery) {
+    return files
+  }
+  return files.filter((file) => file.name.toLocaleLowerCase().includes(normalizedQuery))
+}
+
+export function filterProblemFilesByGroup(
+  files: ProblemFileEntry[],
+  group: ProblemFileEntry['packageSegment'],
+  query: string,
+): ProblemFileEntry[] {
+  return filterProblemFiles(files, query).filter((file) => file.packageSegment === group)
+}
+
+export interface RepositoryRefreshRequest {
+  repoPath: string
+  repositoryGeneration: number
+  requestId: number
+}
+
+export interface RepositoryRefreshState {
+  repoPath: string | null
+  projectValid: boolean
+  repositoryGeneration: number
+  refreshRequestId: number
+}
+
+export function isCurrentRepositoryRefresh(
+  request: RepositoryRefreshRequest,
+  state: RepositoryRefreshState,
+): boolean {
+  return state.projectValid
+    && state.repoPath === request.repoPath
+    && state.repositoryGeneration === request.repositoryGeneration
+    && state.refreshRequestId === request.requestId
+}
+
 interface AppState {
   repoPath: string | null
   projectValid: boolean
@@ -41,6 +202,8 @@ interface AppState {
   dailyError: string | null
   testResult: TestResult | null
   busy: boolean
+  fileSearch: string
+  saveError: string | null
 }
 
 /** The desktop application's single-window state and DOM orchestration. */
@@ -62,8 +225,16 @@ export class LeetcoderApp {
     dailyError: null,
     testResult: null,
     busy: false,
+    fileSearch: '',
+    saveError: null,
   }
   private editor: JavaEditor
+  private readonly autosave: AutosaveCoordinator
+  private suppressEditorChange = false
+  private repositoryGeneration = 0
+  private refreshRequestId = 0
+  private closePreparation: Promise<void> | null = null
+  private destroyed = false
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     FILE_GROUPS.map((group) => group.key),
   )
@@ -91,6 +262,17 @@ export class LeetcoderApp {
     this.directoryPicker = options.directoryPicker ?? defaultDirectoryPicker
     this.storage = options.storage ?? safeStorage()
     this.renderShell()
+    this.autosave = new AutosaveCoordinator(
+      (snapshot) => this.persistSnapshot(snapshot),
+      {
+        onStatusChange: () => {
+          if (this.root.querySelector('#save-status')) {
+            this.renderFileHeading()
+          }
+        },
+        onError: (error) => this.handleSaveError(error),
+      },
+    )
     this.editor = new JavaEditor(this.element('#editor'), {
       onChange: (source) => this.onEditorChange(source),
       onSave: () => {
@@ -116,9 +298,37 @@ export class LeetcoderApp {
     }
   }
 
-  destroy(): void {
-    window.removeEventListener('keydown', this.handleGlobalKeydown)
+  async prepareToClose(): Promise<void> {
+    if (this.closePreparation) {
+      return this.closePreparation
+    }
+    const preparation = (async (): Promise<void> => {
+      try {
+        await this.autosave.flush()
+      } catch (error) {
+        this.handleSaveError(error)
+        throw error
+      }
+    })()
+    this.closePreparation = preparation
+    try {
+      await preparation
+    } finally {
+      if (this.closePreparation === preparation) {
+        this.closePreparation = null
+      }
+    }
+  }
+
+  async destroy(): Promise<void> {
+    if (this.destroyed) {
+      return
+    }
+    await this.prepareToClose()
     this.editor.destroy()
+    this.autosave.dispose()
+    window.removeEventListener('keydown', this.handleGlobalKeydown)
+    this.destroyed = true
   }
 
   private renderShell(): void {
@@ -140,6 +350,10 @@ export class LeetcoderApp {
               <h2>Problems</h2>
               <button id="refresh-files" class="icon-button" type="button" aria-label="Refresh problem files" title="Refresh files">↻</button>
             </div>
+            <div class="file-search">
+              <label class="sr-only" for="file-search">Search problems</label>
+              <input id="file-search" type="search" placeholder="Search problems" autocomplete="off" spellcheck="false">
+            </div>
             <div id="file-list" class="file-list"></div>
           </aside>
 
@@ -158,9 +372,9 @@ export class LeetcoderApp {
                 <div class="file-heading">
                   <strong id="selected-file">No file selected</strong>
                   <span id="dirty-indicator" class="dirty-indicator" hidden>Unsaved</span>
+                  <span id="save-status" class="save-status" aria-live="polite"></span>
                 </div>
                 <div class="code-actions">
-                  <button id="save-file" class="secondary-button" type="button">Save <kbd id="save-shortcut">Ctrl+S</kbd></button>
                   <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">Ctrl+R</kbd></button>
                 </div>
               </div>
@@ -211,8 +425,20 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#create-file').addEventListener('click', () => {
       void this.createFileForToday()
     })
-    this.element<HTMLButtonElement>('#save-file').addEventListener('click', () => {
-      void this.saveCurrentFile()
+    this.element<HTMLInputElement>('#file-search').addEventListener('input', (event) => {
+      this.state.fileSearch = (event.target as HTMLInputElement).value
+      this.renderFiles()
+    })
+    this.element<HTMLInputElement>('#file-search').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        const input = event.currentTarget as HTMLInputElement
+        if (input.value.length > 0 || this.state.fileSearch.length > 0) {
+          input.value = ''
+          this.state.fileSearch = ''
+          this.renderFiles()
+        }
+      }
     })
     this.element<HTMLButtonElement>('#run-test').addEventListener('click', () => {
       void this.runCurrentTest()
@@ -235,11 +461,21 @@ export class LeetcoderApp {
   }
 
   private async selectRepository(path: string, remember: boolean): Promise<void> {
-    if (this.state.busy || (path !== this.state.repoPath && !this.confirmDiscard('switch repositories'))) {
+    if (this.state.busy) {
       return
     }
-    this.state.busy = true
     const switchingRepository = path !== this.state.repoPath
+    if (switchingRepository) {
+      this.repositoryGeneration += 1
+      this.refreshRequestId += 1
+    }
+    this.state.busy = true
+    this.renderAll()
+    if (path !== this.state.repoPath && !(await this.flushPendingSave())) {
+      this.state.busy = false
+      this.renderAll()
+      return
+    }
     if (switchingRepository) {
       // Clear the old document before loading the new repository. Relative
       // paths can be identical across repositories and must never reuse the
@@ -247,9 +483,9 @@ export class LeetcoderApp {
       this.state.repoPath = null
       this.state.projectValid = false
       this.state.files = []
+      this.state.fileSearch = ''
       this.resetCurrentFile()
     }
-    this.renderAll()
     this.setMessage('Checking repository…', 'info')
     try {
       const validation = await this.backend.validateProject(path)
@@ -300,13 +536,21 @@ export class LeetcoderApp {
     if (!this.state.repoPath || !this.state.projectValid) {
       return false
     }
+    const repoPath = this.state.repoPath
+    const repositoryGeneration = this.repositoryGeneration
+    const requestId = ++this.refreshRequestId
     try {
-      const files = await this.backend.listProblemFiles(this.state.repoPath)
+      const files = await this.backend.listProblemFiles(repoPath)
+      if (!this.isCurrentRefresh(repoPath, repositoryGeneration, requestId)) {
+        return false
+      }
       const selectedFileRemoved = Boolean(
         this.state.selectedPath && !files.some((file) => file.path === this.state.selectedPath),
       )
-      if (selectedFileRemoved && !this.confirmDiscard('refresh the file list')) {
-        this.setMessage('Refresh cancelled; unsaved changes were kept.', 'info')
+      if (selectedFileRemoved && !(await this.flushPendingSave())) {
+        return false
+      }
+      if (!this.isCurrentRefresh(repoPath, repositoryGeneration, requestId)) {
         return false
       }
       this.state.files = files
@@ -319,11 +563,26 @@ export class LeetcoderApp {
       }
       return true
     } catch (error) {
+      if (!this.isCurrentRefresh(repoPath, repositoryGeneration, requestId)) {
+        return false
+      }
       this.setMessage(`Could not list problem files: ${errorMessage(error)}`, 'error')
       return false
     } finally {
       this.renderAll()
     }
+  }
+
+  private isCurrentRefresh(repoPath: string, repositoryGeneration: number, requestId: number): boolean {
+    return isCurrentRepositoryRefresh(
+      { repoPath, repositoryGeneration, requestId },
+      {
+        repoPath: this.state.repoPath,
+        projectValid: this.state.projectValid,
+        repositoryGeneration: this.repositoryGeneration,
+        refreshRequestId: this.refreshRequestId,
+      },
+    )
   }
 
   private async openFile(file: ProblemFileEntry): Promise<void> {
@@ -336,20 +595,26 @@ export class LeetcoderApp {
       this.editor.focus()
       return
     }
-    if (!this.confirmDiscard('open another file')) {
-      return
-    }
     this.state.busy = true
     this.state.testResult = null
     this.renderAll()
     try {
+      if (!(await this.flushPendingSave())) {
+        return
+      }
       const source = await this.backend.readProblemFile(this.state.repoPath, file.path)
       this.state.selectedPath = file.path
       this.state.selectedSource = source
       this.state.savedSource = source
       this.state.selectedFqcn = fqcnFromJavaPath(file.path)
       this.state.dirty = false
-      this.editor.setValue(source)
+      this.state.saveError = null
+      this.suppressEditorChange = true
+      try {
+        this.editor.setValue(source)
+      } finally {
+        this.suppressEditorChange = false
+      }
       this.editor.focus()
       this.setMessage(`Opened ${file.name}.`, 'success')
     } catch (error) {
@@ -368,12 +633,12 @@ export class LeetcoderApp {
       this.setMessage('Choose a valid repository and load today’s problem first.', 'error')
       return
     }
-    if (!this.confirmDiscard('create a new problem file')) {
-      return
-    }
     this.state.busy = true
     this.renderAll()
     try {
+      if (!(await this.flushPendingSave())) {
+        return
+      }
       const problem = this.state.dailyProblem
       const plan = await createProblemWithRetry(this.backend, this.state.repoPath, {
         number: problem.frontendId,
@@ -398,19 +663,18 @@ export class LeetcoderApp {
   }
 
   private onEditorChange(source: string): void {
-    if (!this.state.selectedPath) {
+    if (this.suppressEditorChange || !this.state.selectedPath || !this.state.repoPath) {
       return
     }
     this.state.selectedSource = source
     this.state.dirty = source !== this.state.savedSource
+    this.state.saveError = null
+    this.autosave.schedule({
+      repoPath: this.state.repoPath,
+      filePath: this.state.selectedPath,
+      source,
+    })
     this.renderFileHeading()
-  }
-
-  private confirmDiscard(action: string): boolean {
-    if (!this.state.dirty) {
-      return true
-    }
-    return window.confirm(`You have unsaved changes. Discard them to ${action}?`)
   }
 
   private resetCurrentFile(): void {
@@ -419,38 +683,50 @@ export class LeetcoderApp {
     this.state.savedSource = ''
     this.state.selectedFqcn = null
     this.state.dirty = false
+    this.state.saveError = null
     this.state.testResult = null
-    this.editor.setValue('')
+    this.suppressEditorChange = true
+    try {
+      this.editor.setValue('')
+    } finally {
+      this.suppressEditorChange = false
+    }
   }
 
-  private async saveCurrentFile(): Promise<void> {
-    if (this.state.busy) {
-      return
-    }
+  private async saveCurrentFile(): Promise<boolean> {
     if (!this.state.repoPath || !this.state.selectedPath) {
-      this.setMessage('Choose a Java file before saving.', 'error')
-      return
+      return true
     }
-    if (!this.state.dirty) {
-      this.setMessage('No changes to save.', 'info')
-      return
-    }
-    this.state.busy = true
-    this.renderAll()
+    return this.flushPendingSave()
+  }
+
+  private async flushPendingSave(): Promise<boolean> {
     try {
-      const source = this.editor.getValue()
-      await this.backend.saveProblemFile(this.state.repoPath, this.state.selectedPath, source)
-      this.state.selectedSource = source
-      this.state.savedSource = source
-      this.state.dirty = false
-      this.element<HTMLElement>('#editor-host').dataset.savedSource = source
-      this.setMessage('File saved.', 'success')
+      await this.autosave.flush()
+      return !this.autosave.hasPendingChanges
     } catch (error) {
-      this.setMessage(`Could not save the file: ${errorMessage(error)}`, 'error')
-    } finally {
-      this.state.busy = false
-      this.renderAll()
+      this.handleSaveError(error)
+      return false
     }
+  }
+
+  private async persistSnapshot(snapshot: AutosaveSnapshot): Promise<void> {
+    await this.backend.saveProblemFile(snapshot.repoPath, snapshot.filePath, snapshot.source)
+    if (snapshot.repoPath !== this.state.repoPath || snapshot.filePath !== this.state.selectedPath) {
+      return
+    }
+    this.state.savedSource = snapshot.source
+    this.state.dirty = this.state.selectedSource !== this.state.savedSource
+    this.state.saveError = null
+    this.element<HTMLElement>('#editor-host').dataset.savedSource = snapshot.source
+    this.renderFileHeading()
+  }
+
+  private handleSaveError(error: unknown): void {
+    this.state.saveError = errorMessage(error)
+    this.state.dirty = this.state.selectedSource !== this.state.savedSource
+    this.setMessage(`Could not save the file: ${this.state.saveError}`, 'error')
+    this.renderAll()
   }
 
   private async runCurrentTest(): Promise<void> {
@@ -461,13 +737,13 @@ export class LeetcoderApp {
       this.setMessage('Choose a Java file before running a test.', 'error')
       return
     }
-    if (this.state.dirty) {
-      await this.saveCurrentFile()
-      if (this.state.dirty) {
-        return
-      }
-    }
     this.state.busy = true
+    this.renderAll()
+    if (!(await this.flushPendingSave())) {
+      this.state.busy = false
+      this.renderAll()
+      return
+    }
     this.state.testResult = null
     this.renderAll()
     this.setMessage(`Running ${this.state.selectedFqcn}…`, 'info')
@@ -496,7 +772,6 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#refresh-files').disabled = this.state.busy || !this.state.projectValid
     this.element<HTMLButtonElement>('#refresh-daily').disabled = this.state.busy
     this.element<HTMLButtonElement>('#create-file').disabled = this.state.busy || !this.state.projectValid || !this.state.dailyProblem
-    this.element<HTMLButtonElement>('#save-file').disabled = this.state.busy || !this.state.selectedPath
     this.element<HTMLButtonElement>('#run-test').disabled = this.state.busy || !this.state.selectedPath
     this.element<HTMLElement>('#editor-empty').hidden = Boolean(this.state.selectedPath)
     this.element<HTMLElement>('#editor-host').classList.toggle('is-empty', !this.state.selectedPath)
@@ -504,7 +779,6 @@ export class LeetcoderApp {
 
   private renderShortcutLabels(): void {
     const modifier = isMacPlatform() ? '⌘' : 'Ctrl+'
-    this.element<HTMLElement>('#save-shortcut').textContent = `${modifier}S`
     this.element<HTMLElement>('#run-shortcut').textContent = `${modifier}R`
   }
 
@@ -541,6 +815,10 @@ export class LeetcoderApp {
   private renderFiles(): void {
     const list = this.element<HTMLElement>('#file-list')
     list.innerHTML = ''
+    const searchInput = this.element<HTMLInputElement>('#file-search')
+    if (searchInput.value !== this.state.fileSearch) {
+      searchInput.value = this.state.fileSearch
+    }
     if (!this.state.projectValid) {
       const empty = document.createElement('p')
       empty.className = 'muted-copy sidebar-empty'
@@ -554,10 +832,22 @@ export class LeetcoderApp {
       this.expandedGroups.add(selectedGroup)
     }
 
+    const searchTerm = this.state.fileSearch.trim()
+    const javaFiles = this.state.files.filter((file) => /\.java$/i.test(file.path))
+    const filteredFiles = filterProblemFiles(javaFiles, searchTerm)
+    if (searchTerm && filteredFiles.length === 0) {
+      const empty = document.createElement('p')
+      empty.className = 'muted-copy sidebar-empty'
+      empty.textContent = 'No matches'
+      list.append(empty)
+      return
+    }
+
     for (const group of FILE_GROUPS) {
-      const files = this.state.files.filter((file) => (
-        file.packageSegment === group.key && /\.java$/i.test(file.path)
-      ))
+      const files = filterProblemFilesByGroup(javaFiles, group.key, searchTerm)
+      if (searchTerm && files.length === 0) {
+        continue
+      }
       const section = document.createElement('section')
       section.className = 'file-group'
       const isCurrentGroup = selectedGroup === group.key
@@ -580,6 +870,7 @@ export class LeetcoderApp {
           this.expandedGroups.add(group.key)
           section.dataset.expanded = 'true'
           headingButton.setAttribute('aria-expanded', 'true')
+          groupList.hidden = false
           return
         }
         const nextExpanded = !this.expandedGroups.has(group.key)
@@ -590,6 +881,7 @@ export class LeetcoderApp {
         }
         section.dataset.expanded = String(nextExpanded)
         headingButton.setAttribute('aria-expanded', String(nextExpanded))
+        groupList.hidden = !nextExpanded
       })
       heading.append(headingButton)
       section.append(heading)
@@ -649,7 +941,21 @@ export class LeetcoderApp {
     const file = this.state.files.find((entry) => entry.path === this.state.selectedPath)
     selectedFile.textContent = file?.name ?? 'No file selected'
     const dirty = this.element<HTMLElement>('#dirty-indicator')
-    dirty.hidden = !this.state.dirty
+    dirty.hidden = !this.state.dirty || this.autosave.status === 'saving'
+    const saveStatus = this.element<HTMLElement>('#save-status')
+    saveStatus.className = 'save-status'
+    if (this.state.saveError) {
+      saveStatus.classList.add('is-error')
+      saveStatus.textContent = 'Save failed'
+      saveStatus.title = this.state.saveError
+    } else if (this.autosave.status === 'saving') {
+      saveStatus.classList.add('is-saving')
+      saveStatus.textContent = 'Saving…'
+      saveStatus.removeAttribute('title')
+    } else {
+      saveStatus.textContent = ''
+      saveStatus.removeAttribute('title')
+    }
     this.element<HTMLElement>('#editor-host').dataset.savedSource = this.state.savedSource
   }
 
