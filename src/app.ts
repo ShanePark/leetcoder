@@ -11,6 +11,7 @@ import {
   type TestDiagnostic,
 } from './backend'
 import { JavaEditor } from './editor'
+import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
 
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
@@ -348,11 +349,14 @@ export class LeetcoderApp {
           <aside class="sidebar" aria-label="Problem files">
             <div class="sidebar-heading">
               <h2>Problems</h2>
-              <button id="refresh-files" class="icon-button" type="button" aria-label="Refresh problem files" title="Refresh files">↻</button>
+              <button id="refresh-files" class="icon-button" type="button" aria-label="Refresh problem files" title="Refresh files"></button>
             </div>
             <div class="file-search">
               <label class="sr-only" for="file-search">Search problems</label>
-              <input id="file-search" type="search" placeholder="Search problems" autocomplete="off" spellcheck="false">
+              <div class="file-search-field">
+                <span id="file-search-icon" aria-hidden="true"></span>
+                <input id="file-search" type="search" placeholder="Search problems" autocomplete="off" spellcheck="false">
+              </div>
             </div>
             <div id="file-list" class="file-list"></div>
           </aside>
@@ -361,9 +365,9 @@ export class LeetcoderApp {
             <section class="daily-card" aria-label="Today's problem">
               <div id="daily-content" class="daily-content"></div>
               <div class="daily-actions">
-                <a id="problem-link" class="problem-link" href="#" target="_blank" rel="noreferrer">Open ↗</a>
+                <a id="problem-link" class="problem-link" href="#" target="_blank" rel="noreferrer">Open</a>
                 <button id="create-file" class="primary-button" type="button">New file</button>
-                <button id="refresh-daily" class="icon-button" type="button" aria-label="Refresh daily problem" title="Refresh daily problem">↻</button>
+                <button id="refresh-daily" class="icon-button" type="button" aria-label="Refresh daily problem" title="Refresh daily problem"></button>
               </div>
             </section>
 
@@ -393,7 +397,7 @@ export class LeetcoderApp {
               <div id="test-list" class="test-list"></div>
               <div id="diagnostics" class="diagnostics"></div>
               <details class="raw-logs">
-                <summary>Gradle output</summary>
+                <summary id="raw-logs-summary">Gradle output</summary>
                 <div class="result-columns">
                   <div class="result-pane">
                     <span class="result-label">stdout</span>
@@ -410,6 +414,18 @@ export class LeetcoderApp {
         </main>
       </div>
     `
+    this.installStaticIcons()
+  }
+
+  private installStaticIcons(): void {
+    this.element<HTMLButtonElement>('#choose-repository').prepend(iconFor('folderOpen', 'button-icon'))
+    this.element<HTMLButtonElement>('#refresh-files').append(iconFor('refresh', 'button-icon'))
+    this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
+    this.element<HTMLAnchorElement>('#problem-link').prepend(iconFor('externalLink', 'button-icon'))
+    this.element<HTMLButtonElement>('#create-file').prepend(iconFor('filePlus', 'button-icon'))
+    this.element<HTMLButtonElement>('#refresh-daily').append(iconFor('refresh', 'button-icon'))
+    this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
+    this.element<HTMLElement>('#raw-logs-summary').prepend(iconFor('terminal', 'button-icon'))
   }
 
   private bindEvents(): void {
@@ -798,6 +814,7 @@ export class LeetcoderApp {
     }
     const problem = this.state.dailyProblem
     content.innerHTML = ''
+    content.append(iconFor('calendar', 'daily-icon'))
     const number = document.createElement('span')
     number.className = 'problem-number'
     number.textContent = `#${problem.frontendId}`
@@ -864,13 +881,27 @@ export class LeetcoderApp {
       if (isCurrentGroup) {
         headingButton.title = 'The current file group stays open'
       }
-      headingButton.innerHTML = `<span>${group.label}</span><span class="file-count">${files.length}</span>`
+      const groupLabel = document.createElement('span')
+      groupLabel.className = 'file-group-label'
+      groupLabel.append(
+        iconFor(expanded ? 'chevronDown' : 'chevronRight', 'group-toggle-icon'),
+        document.createTextNode(group.label),
+      )
+      const count = document.createElement('span')
+      count.className = 'file-count'
+      count.textContent = String(files.length)
+      headingButton.append(groupLabel, count)
+      const updateGroupIcon = (nextExpanded: boolean): void => {
+        const previous = groupLabel.querySelector('.group-toggle-icon')
+        previous?.replaceWith(iconFor(nextExpanded ? 'chevronDown' : 'chevronRight', 'group-toggle-icon'))
+      }
       headingButton.addEventListener('click', () => {
         if (selectedGroup === group.key) {
           this.expandedGroups.add(group.key)
           section.dataset.expanded = 'true'
           headingButton.setAttribute('aria-expanded', 'true')
           groupList.hidden = false
+          updateGroupIcon(true)
           return
         }
         const nextExpanded = !this.expandedGroups.has(group.key)
@@ -882,6 +913,7 @@ export class LeetcoderApp {
         section.dataset.expanded = String(nextExpanded)
         headingButton.setAttribute('aria-expanded', String(nextExpanded))
         groupList.hidden = !nextExpanded
+        updateGroupIcon(nextExpanded)
       })
       heading.append(headingButton)
       section.append(heading)
@@ -897,7 +929,13 @@ export class LeetcoderApp {
         button.disabled = this.state.busy
         button.dataset.path = file.path
         button.title = file.path
-        button.textContent = file.name.replace(/\.java$/i, '')
+        const fileName = document.createElement('span')
+        fileName.className = 'file-item-name'
+        fileName.textContent = file.name.replace(/\.java$/i, '')
+        button.append(
+          iconFor('fileCode', 'file-item-icon'),
+          fileName,
+        )
         button.addEventListener('click', () => {
           void this.openFile(file)
         })
@@ -1090,7 +1128,10 @@ export class LeetcoderApp {
     const location = document.createElement('button')
     location.type = 'button'
     location.className = 'result-location'
-    location.textContent = `${file}:${line}${column ? `:${column}` : ''}`
+    location.append(
+      iconFor('locate', 'result-location-icon'),
+      document.createTextNode(`${file}:${line}${column ? `:${column}` : ''}`),
+    )
     location.title = 'Reveal this line in the editor'
     location.addEventListener('click', () => {
       const reveal = this.editor as JavaEditor & { revealLine?: (line: number) => void }

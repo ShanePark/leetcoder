@@ -21,7 +21,8 @@
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "^6.36.5",
     "@tauri-apps/api": "^2.11.1",
-    "@tauri-apps/plugin-dialog": "^2.4.0"
+    "@tauri-apps/plugin-dialog": "^2.4.0",
+    "lucide": "^1.33.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",

@@ -168,13 +168,28 @@ h3 {
   display: block;
   width: 100%;
   height: 29px;
-  padding: 5px 8px;
+  padding: 5px 8px 5px 29px;
   border: 1px solid var(--line);
   border-radius: 5px;
   color: var(--text);
   background: var(--surface-raised);
   font: 11px ui-sans-serif, system-ui, sans-serif;
   outline: none;
+}
+
+.file-search-field {
+  position: relative;
+}
+
+.search-icon {
+  position: absolute;
+  top: 50%;
+  left: 9px;
+  width: 14px;
+  height: 14px;
+  color: #7488a5;
+  pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .file-search input::placeholder {
@@ -249,23 +264,24 @@ h3 {
   text-transform: uppercase;
 }
 
-.file-group-toggle::before {
-  width: 11px;
-  margin-right: 2px;
-  color: #667b99;
-  content: "▾";
-  font-size: 11px;
-}
-
-.file-group[data-expanded="false"] .file-group-toggle::before {
-  content: "▸";
-}
-
 .file-group-toggle:hover,
 .file-group-toggle:focus-visible {
   border-color: var(--line);
   background: var(--surface-soft);
   outline: none;
+}
+
+.file-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.group-toggle-icon {
+  width: 13px;
+  height: 13px;
+  color: #667b99;
 }
 
 .file-count {
@@ -292,9 +308,11 @@ h3 {
 }
 
 .file-item {
-  display: block;
+  display: flex;
   width: 100%;
   height: 31px;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   padding: 6px 8px;
   border: 1px solid transparent;
@@ -305,6 +323,39 @@ h3 {
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-item-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: #7891b2;
+}
+
+.file-item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.daily-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: var(--accent);
+}
+
+.raw-logs summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.raw-logs summary .button-icon {
+  width: 14px;
+  height: 14px;
+  flex-basis: 14px;
 }
 
 .file-item:hover,
@@ -341,6 +392,21 @@ h3 {
   padding: 6px 9px;
 }
 
+.button-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  vertical-align: -3px;
+}
+
+.primary-button,
+.secondary-button,
+.problem-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .primary-button {
   border-color: #477fdb;
   color: #f1f6ff;
@@ -365,8 +431,10 @@ h3 {
 }
 
 .icon-button {
+  display: inline-grid;
   width: 27px;
   height: 27px;
+  place-items: center;
   padding: 0;
   color: #9eb5d5;
   background: transparent;
@@ -737,6 +805,9 @@ details.test-row > summary::-webkit-details-marker {
 }
 
 .result-location {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
   padding: 0;
   border: 0;
@@ -745,6 +816,11 @@ details.test-row > summary::-webkit-details-marker {
   font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
   text-decoration: underline;
   text-decoration-color: transparent;
+}
+
+.result-location-icon {
+  width: 13px;
+  height: 13px;
 }
 
 .result-location:hover,
