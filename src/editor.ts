@@ -29,7 +29,7 @@ import {
   lineNumbers,
 } from '@codemirror/view'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { javaCompletions } from './completions'
+import { javaCompletions, javaIdentifierAt, resolveJavaDefinition } from './completions'
 
 export interface EditorCallbacks {
   onChange?: (source: string) => void
@@ -149,6 +149,32 @@ const failureDecorations = StateField.define<ReturnType<typeof RangeSet.of<Decor
   provide: (field) => EditorView.decorations.from(field),
 })
 
+const setDefinitionHover = StateEffect.define<{ from: number; to: number } | null>()
+
+const definitionHover = StateField.define<ReturnType<typeof RangeSet.of<Decoration>>>({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    value = value.map(transaction.changes)
+    for (const effect of transaction.effects) {
+      if (!effect.is(setDefinitionHover)) {
+        continue
+      }
+      if (!effect.value || effect.value.from >= effect.value.to) {
+        return Decoration.none
+      }
+      const builder = new RangeSetBuilder<Decoration>()
+      builder.add(
+        effect.value.from,
+        effect.value.to,
+        Decoration.mark({ class: 'cm-definition-link' }),
+      )
+      return builder.finish()
+    }
+    return value
+  },
+  provide: (field) => EditorView.decorations.from(field),
+})
+
 /** A deliberately small CodeMirror wrapper used by the single editor pane. */
 export class JavaEditor {
   readonly view: EditorView
@@ -156,6 +182,38 @@ export class JavaEditor {
   constructor(parent: HTMLElement, callbacks: EditorCallbacks = {}) {
     const save = () => callbacks.onSave?.() !== false
     const run = () => callbacks.onRun?.() !== false
+    let hoveredDefinition = ''
+
+    const updateDefinitionHover = (view: EditorView, event: MouseEvent): void => {
+      const modifierHeld = event.metaKey || event.altKey || event.ctrlKey
+      const position = modifierHeld
+        ? view.posAtCoords({ x: event.clientX, y: event.clientY })
+        : null
+      const identifier = position === null ? null : javaIdentifierAt(view.state.doc.toString(), position)
+      const definition = modifierHeld && position !== null && identifier
+        ? resolveJavaDefinition(view.state.doc.toString(), position)
+        : null
+      const range = definition && identifier
+        ? `${identifier.from}:${identifier.to}`
+        : ''
+      if (range === hoveredDefinition) {
+        return
+      }
+      hoveredDefinition = range
+      view.dispatch({
+        effects: setDefinitionHover.of(identifier && definition
+          ? { from: identifier.from, to: identifier.to }
+          : null),
+      })
+    }
+
+    const clearDefinitionHover = (view: EditorView): void => {
+      if (!hoveredDefinition) {
+        return
+      }
+      hoveredDefinition = ''
+      view.dispatch({ effects: setDefinitionHover.of(null) })
+    }
 
     const state = EditorState.create({
       doc: '',
@@ -166,6 +224,7 @@ export class JavaEditor {
         highlightActiveLineGutter(),
         failureMarkers,
         failureDecorations,
+        definitionHover,
         gutter({
           class: 'cm-failure-gutter',
           markers: (view) => view.state.field(failureMarkers),
@@ -200,6 +259,39 @@ export class JavaEditor {
           if (update.docChanged) {
             callbacks.onChange?.(update.state.doc.toString())
           }
+        }),
+        EditorView.domEventHandlers({
+          click: (event, view) => {
+            if (event.button !== 0 || !(event.metaKey || event.altKey || event.ctrlKey)) {
+              return false
+            }
+            const position = view.posAtCoords({ x: event.clientX, y: event.clientY })
+            if (position === null) {
+              return false
+            }
+            const definition = resolveJavaDefinition(view.state.doc.toString(), position)
+            if (!definition) {
+              return false
+            }
+            event.preventDefault()
+            view.dispatch({
+              selection: { anchor: definition.from },
+              effects: EditorView.scrollIntoView(definition.from, { y: 'center' }),
+            })
+            view.focus()
+            return true
+          },
+          mousemove: (event, view) => {
+            updateDefinitionHover(view, event)
+            return false
+          },
+          mouseout: (event, view) => {
+            if (event.relatedTarget instanceof Node && view.dom.contains(event.relatedTarget)) {
+              return false
+            }
+            clearDefinitionHover(view)
+            return false
+          },
         }),
       ],
     })

@@ -647,6 +647,13 @@ kbd {
   background: rgba(255, 135, 152, .1);
 }
 
+.editor .cm-definition-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+}
+
 .editor-empty {
   position: absolute;
   top: 50%;
