@@ -618,44 +618,44 @@ export class LeetcoderApp {
                 <div id="editor-empty" class="editor-empty">Choose a file from the left to start coding.</div>
               </div>
             </section>
-
-            <section class="results-card" aria-labelledby="results-heading" aria-busy="false">
-              <div class="results-heading-row">
-                <div class="results-heading-main">
-                  <span id="result-badge" class="result-badge" aria-hidden="true">·</span>
-                  <div class="results-heading-copy">
-                    <h2 id="results-heading">Tests</h2>
-                    <span id="result-phase" class="result-phase">No run yet</span>
-                  </div>
-                </div>
-                <div class="result-status-stack">
-                  <span id="result-status" class="result-status" aria-live="polite">No run yet</span>
-                  <span id="result-elapsed" class="result-elapsed"></span>
-                </div>
-              </div>
-              <div id="test-summary" class="test-summary" aria-live="polite">Run the current class to see results.</div>
-              <div id="failure-panel" class="failure-panel" role="alert" hidden>
-                <strong id="failure-panel-title"></strong>
-                <p id="failure-panel-message"></p>
-              </div>
-              <div id="test-list" class="test-list"></div>
-              <div id="diagnostics" class="diagnostics"></div>
-              <details id="raw-logs" class="raw-logs">
-                <summary id="raw-logs-summary">Gradle output</summary>
-                <div class="result-columns">
-                  <div class="result-pane">
-                    <span class="result-label">stdout</span>
-                    <pre id="stdout"></pre>
-                  </div>
-                  <div class="result-pane">
-                    <span class="result-label">stderr</span>
-                    <pre id="stderr"></pre>
-                  </div>
-                </div>
-              </details>
-            </section>
           </section>
         </main>
+
+        <section class="results-card" aria-labelledby="results-heading" aria-busy="false">
+          <div class="results-heading-row">
+            <div class="results-heading-main">
+              <span id="result-badge" class="result-badge" aria-hidden="true">·</span>
+              <div class="results-heading-copy">
+                <h2 id="results-heading">Tests</h2>
+                <span id="result-phase" class="result-phase">No run yet</span>
+              </div>
+            </div>
+            <div class="result-status-stack">
+              <span id="result-status" class="result-status" aria-live="polite">No run yet</span>
+              <span id="result-elapsed" class="result-elapsed"></span>
+            </div>
+          </div>
+          <div id="test-summary" class="test-summary" aria-live="polite">Run the current class to see results.</div>
+          <div id="failure-panel" class="failure-panel" role="alert" hidden>
+            <strong id="failure-panel-title"></strong>
+            <p id="failure-panel-message"></p>
+          </div>
+          <div id="test-list" class="test-list"></div>
+          <div id="diagnostics" class="diagnostics"></div>
+          <details id="raw-logs" class="raw-logs">
+            <summary id="raw-logs-summary">Gradle output</summary>
+            <div class="result-columns">
+              <div class="result-pane">
+                <span class="result-label">stdout</span>
+                <pre id="stdout"></pre>
+              </div>
+              <div class="result-pane">
+                <span class="result-label">stderr</span>
+                <pre id="stderr"></pre>
+              </div>
+            </div>
+          </details>
+        </section>
       </div>
     `
     this.installStaticIcons()

@@ -39,7 +39,6 @@ export class JavaEditor {
         closeBrackets(),
         indentUnit.of('    '),
         EditorState.tabSize.of(4),
-        EditorView.lineWrapping,
         indentOnInput(),
         keymap.of([
           ...closeBracketsKeymap,
