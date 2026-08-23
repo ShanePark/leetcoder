@@ -7,7 +7,14 @@ import {
 } from '@codemirror/autocomplete'
 import { java } from '@codemirror/lang-java'
 import { indentOnInput, indentUnit } from '@codemirror/language'
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import {
+  copyLineDown,
+  defaultKeymap,
+  deleteLine,
+  history,
+  historyKeymap,
+  indentWithTab,
+} from '@codemirror/commands'
 import {
   EditorState,
   Prec,
@@ -15,6 +22,7 @@ import {
   RangeSetBuilder,
   StateEffect,
   StateField,
+  Transaction,
 } from '@codemirror/state'
 import {
   Decoration,
@@ -138,6 +146,24 @@ export function isJavaDocAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'KeyJ'
     && event.shiftKey
     && event.altKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the Option+D form, including macOS layouts that report a typed glyph. */
+export function isLineDuplicateAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyD'
+    && event.altKey
+    && !event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the Option+Backspace form when the keymap cannot consume it. */
+export function isLineDeleteAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'Backspace'
+    && event.altKey
+    && !event.shiftKey
     && !event.metaKey
     && !event.ctrlKey
 }
@@ -512,6 +538,13 @@ export class JavaEditor {
           { key: 'Mod-s', run: save },
           { key: 'Mod-r', run },
           { key: 'Shift-Mod-j', run: insertJavaDoc },
+          // IntelliJ-style line editing shortcuts. CodeMirror's built-in
+          // commands handle selected line blocks and multiple cursors while
+          // preserving the document's configured line separator.
+          { key: 'Mod-d', run: copyLineDown, preventDefault: true },
+          { key: 'Alt-d', run: copyLineDown, preventDefault: true },
+          { key: 'Mod-Backspace', run: deleteLine, preventDefault: true },
+          { key: 'Alt-Backspace', run: deleteLine, preventDefault: true },
           { key: 'Ctrl-Space', run: startCompletion },
           { key: 'Cmd-Space', run: startCompletion },
         ])),
@@ -562,7 +595,16 @@ export class JavaEditor {
           },
           keydown: (event, view) => {
             if (!isJavaDocAltShortcut(event)) {
-              return false
+              if (!isLineDuplicateAltShortcut(event) && !isLineDeleteAltShortcut(event)) {
+                return false
+              }
+              const handled = isLineDuplicateAltShortcut(event)
+                ? copyLineDown(view)
+                : deleteLine(view)
+              if (handled) {
+                event.preventDefault()
+              }
+              return handled
             }
             const handled = insertJavaDoc(view)
             if (handled) {
@@ -589,6 +631,9 @@ export class JavaEditor {
     this.view.dispatch({
       changes: { from: 0, to: current.length, insert: source },
       selection: { anchor: 0 },
+      // Loading a file is an external state replacement, not an edit the
+      // user should be able to undo back to the empty bootstrap document.
+      annotations: Transaction.addToHistory.of(false),
     })
   }
 
