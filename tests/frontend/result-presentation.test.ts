@@ -39,7 +39,7 @@ describe('test result failure presentation', () => {
       phaseLabel: 'Test runner',
       statusLabel: 'Failed · Test runner',
       failureMessage: 'Gradle daemon disappeared unexpectedly',
-      rawLogsOpen: true,
+      rawLogsOpen: false,
     })
     expect(testResultBannerMessage(run)).toBe(
       'Test runner failed: Gradle daemon disappeared unexpectedly',
@@ -71,7 +71,7 @@ describe('test result failure presentation', () => {
     expect(presentTestResult(run)).toMatchObject({
       phaseLabel: 'Compilation',
       failureMessage: 'cannot find symbol',
-      rawLogsOpen: true,
+      rawLogsOpen: false,
     })
     expect(testResultBannerMessage(run)).toBe('Compilation failed: cannot find symbol')
   })
