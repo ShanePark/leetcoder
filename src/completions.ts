@@ -74,9 +74,9 @@ const JAVA_KEYWORDS = [
 const JAVA_TYPES = [
   'ArrayDeque', 'ArrayList', 'Arrays', 'BigDecimal', 'BigInteger', 'Boolean', 'Byte', 'Character',
   'Collections', 'Comparator', 'Deque', 'Double', 'Float', 'HashMap', 'HashSet', 'Integer',
-  'Iterable', 'Iterator', 'LinkedHashMap', 'LinkedHashSet', 'LinkedList', 'List', 'Long', 'Map',
-  'Math', 'Object', 'PriorityQueue', 'Queue', 'Set', 'Short', 'Stack', 'String', 'StringBuilder',
-  'StringBuffer', 'TreeMap', 'TreeSet',
+  'InputStream', 'Iterable', 'Iterator', 'LinkedHashMap', 'LinkedHashSet', 'LinkedList', 'List', 'Long', 'Map',
+  'Math', 'Object', 'PrintStream', 'PriorityQueue', 'Queue', 'Set', 'Short', 'Stack', 'String', 'StringBuilder',
+  'StringBuffer', 'System', 'TreeMap', 'TreeSet',
 ]
 
 const JAVA_COMPLETIONS: Completion[] = [
@@ -89,6 +89,8 @@ const JAVA_COMPLETIONS: Completion[] = [
   snippetCompletion('List.of(...)', 'List', 'List.of(${items})'),
   snippetCompletion('Map.of(...)', 'Map', 'Map.of(${entries})'),
   snippetCompletion('Set.of(...)', 'Set', 'Set.of(${items})'),
+  snippetCompletion('sout', 'PrintStream', 'System.out.println(${})'),
+  snippetCompletion('serr', 'PrintStream', 'System.err.println(${})'),
   snippetCompletion('new ArrayList<>()', 'ArrayList', 'new ArrayList<>()'),
   snippetCompletion('new HashMap<>()', 'HashMap', 'new HashMap<>()'),
   snippetCompletion('for (int i = 0; i < ...; i++)', 'loop', 'for (int ${i} = 0; ${i} < ${length}; ${i}++) {\n    ${}\n}'),
@@ -175,6 +177,20 @@ const CATALOG: Record<string, MethodSpec[]> = {
   Boolean: specs([
     ['booleanValue'], ['toString'],
   ]),
+  PrintStream: specs([
+    ['print'], ['print', ['value']], ['print', ['booleanValue']], ['print', ['charValue']], ['print', ['intValue']],
+    ['print', ['longValue']], ['print', ['floatValue']], ['print', ['doubleValue']], ['print', ['text']],
+    ['println'], ['println', ['value']], ['println', ['booleanValue']], ['println', ['charValue']], ['println', ['intValue']],
+    ['println', ['longValue']], ['println', ['floatValue']], ['println', ['doubleValue']], ['println', ['text']],
+    ['printf', ['format', 'args']], ['format', ['format', 'args']], ['append', ['value']], ['append', ['charValue']],
+    ['append', ['sequence', 'start', 'end']], ['flush'], ['close'], ['checkError'], ['write', ['value']],
+    ['write', ['buffer', 'offset', 'length']], ['writeBytes', ['buffer']],
+  ]),
+  InputStream: specs([
+    ['available'], ['close'], ['mark', ['readLimit']], ['markSupported'], ['read'], ['read', ['buffer']],
+    ['read', ['buffer', 'offset', 'length']], ['readAllBytes'], ['readNBytes', ['length']],
+    ['readNBytes', ['buffer', 'offset', 'length']], ['reset'], ['skip', ['count']], ['transferTo', ['out']],
+  ]),
 }
 
 const TYPE_GROUPS: Record<string, string[]> = {
@@ -245,6 +261,27 @@ const STATIC_CATALOG: Record<string, MethodSpec[]> = {
     ['compare', ['x', 'y']], ['getBoolean', ['name']], ['logicalAnd', ['a', 'b']], ['logicalOr', ['a', 'b']],
     ['logicalXor', ['a', 'b']], ['parseBoolean', ['value']], ['toString', ['value']], ['valueOf', ['value']],
   ]),
+  System: specs([
+    ['arraycopy', ['source', 'sourcePosition', 'destination', 'destinationPosition', 'length']],
+    ['clearProperty', ['key']], ['currentTimeMillis'], ['exit', ['status']], ['gc'], ['getProperties'],
+    ['getProperty', ['key']], ['getProperty', ['key', 'defaultValue']], ['getenv'], ['getenv', ['name']],
+    ['identityHashCode', ['object']], ['lineSeparator'], ['load', ['filename']], ['loadLibrary', ['name']],
+    ['nanoTime'], ['runFinalization'], ['setErr', ['err']], ['setIn', ['in']], ['setOut', ['out']],
+    ['setProperty', ['key', 'value']], ['setSecurityManager', ['manager']],
+  ]),
+}
+
+interface StaticFieldSpec {
+  name: string
+  type: string
+}
+
+const STATIC_FIELDS: Record<string, StaticFieldSpec[]> = {
+  System: [
+    { name: 'out', type: 'PrintStream' },
+    { name: 'err', type: 'PrintStream' },
+    { name: 'in', type: 'InputStream' },
+  ],
 }
 
 const OBJECT_METHODS = specs([
@@ -856,7 +893,11 @@ export function resolveJavaDefinition(source: string, position: number): JavaDef
 
 function findDotContext(source: string, position: number): DotContext | null {
   const before = source.slice(0, position)
-  const dotWord = /(?:^|[^\w$])((?:this\.)?[A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)?$/.exec(before)
+  // Keep the complete receiver so chains such as `System.out.` can be
+  // resolved.  The resolver remains conservative for arbitrary dotted
+  // expressions, but recognizing the chain here preserves the typed prefix
+  // range (`System.out.pr|` -> `pr`).
+  const dotWord = /(?:^|[^\w$])((?:(?:this\.)?[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)?$/.exec(before)
   if (dotWord) {
     const typed = dotWord[2] ?? ''
     return { receiver: dotWord[1], from: position - typed.length, assertJ: false }
@@ -886,6 +927,15 @@ function completionOptions(items: MethodSpec[]): Completion[] {
   return items.map((item) => methodCompletion(item))
 }
 
+function staticFieldOptions(fields: StaticFieldSpec[]): Completion[] {
+  return fields.map((field) => ({
+    label: field.name,
+    type: 'field' as const,
+    detail: field.type,
+    apply: field.name,
+  }))
+}
+
 function methodOptions(resolution: ReceiverResolution, assertJ = false): Completion[] {
   if (assertJ) {
     return completionOptions([...ASSERTJ_METHODS, ...OBJECT_METHODS])
@@ -901,7 +951,11 @@ function methodOptions(resolution: ReceiverResolution, assertJ = false): Complet
   }
   if (resolution.static) {
     const allStatic = resolution.bases.flatMap((base) => STATIC_CATALOG[base] ?? [])
-    return completionOptions(uniqueMethodSpecs(allStatic))
+    const allFields = resolution.bases.flatMap((base) => STATIC_FIELDS[base] ?? [])
+    return uniqueOptions([
+      ...staticFieldOptions(allFields),
+      ...completionOptions(uniqueMethodSpecs(allStatic)),
+    ])
   }
 
   const all = new Map<string, MethodSpec>()
@@ -933,6 +987,12 @@ function uniqueMethodSpecs(items: MethodSpec[]): MethodSpec[] {
 function receiverResolution(receiver: string, position: number, symbols: JavaSymbol[]): ReceiverResolution {
   if (receiver === 'this') {
     return { bases: [], static: false, unknown: false, primitive: false, array: false, thisReceiver: true }
+  }
+  if (receiver === 'System.out' || receiver === 'System.err') {
+    return { bases: ['PrintStream'], static: false, unknown: false, primitive: false, array: false, thisReceiver: false }
+  }
+  if (receiver === 'System.in') {
+    return { bases: ['InputStream'], static: false, unknown: false, primitive: false, array: false, thisReceiver: false }
   }
   const symbolName = receiver.startsWith('this.') ? receiver.slice('this.'.length) : receiver
   const symbol = symbolFor(symbols, symbolName, position)

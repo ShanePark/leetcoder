@@ -99,6 +99,48 @@ describe('lightweight Java completions', () => {
     expect(integerStatic).not.toContain('intValue()')
   })
 
+  it('completes System fields and static utilities', () => {
+    const system = labels('class Solution { void test() { System.| } }')
+    expect(system).toEqual(expect.arrayContaining(['out', 'err', 'in', 'currentTimeMillis()', 'nanoTime()', 'arraycopy(source, sourcePosition, destination, destinationPosition, length)']))
+    expect(system).not.toContain('println(value)')
+
+    const explicit = labels('class Solution { void test() { Sys| } }')
+    expect(explicit).toContain('System')
+  })
+
+  it('completes PrintStream methods for System.out and System.err chains', () => {
+    const stdout = labels('class Solution { void test() { System.out.| } }')
+    expect(stdout).toEqual(expect.arrayContaining([
+      'print()', 'print(value)', 'println()', 'println(value)', 'printf(format, args)',
+      'format(format, args)', 'append(value)', 'flush()', 'close()', 'checkError()',
+    ]))
+    expect(stdout).not.toContain('currentTimeMillis()')
+
+    const stderr = labels('class Solution { void test() { System.err.| } }')
+    expect(stderr).toContain('println(value)')
+
+    const input = labels('class Solution { void test() { System.in.| } }')
+    expect(input).toContain('read()')
+  })
+
+  it('keeps the completion range for a typed dotted receiver and adds print snippets', () => {
+    const source = 'class Solution { void test() { System.out.pr| } }'
+    const result = complete(source)
+    expect(result?.from).toBe(source.indexOf('|') - 2)
+    expect(result?.options.map((option) => option.label)).toContain('println(value)')
+
+    const topLevel = labels('class Solution { void test() { sout| } }')
+    expect(topLevel).toContain('sout')
+    expect(topLevel).toContain('serr')
+  })
+
+  it('does not expand unknown dotted chains into collection methods', () => {
+    const options = labels('class Solution { void test() { unknown.chain.| } }')
+    expect(options).toContain('toString()')
+    expect(options).not.toContain('size()')
+    expect(options).not.toContain('println(value)')
+  })
+
   it('shows fields declared later and methods from this.', () => {
     const source = `class Solution {
       void test() { this.| }
