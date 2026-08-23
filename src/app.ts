@@ -28,6 +28,8 @@ const MIN_GIT_DIFF_WIDTH = 260
 const GIT_SPLITTER_WIDTH = 7
 const GIT_WORKSPACE_GAP = 16
 const GIT_REFRESH_DEBOUNCE_MS = 250
+const GIT_POLL_INTERVAL_MS = 4000
+const DAILY_RETRY_INTERVAL_MS = 60_000
 const FILE_CONTEXT_MENU_WIDTH = 96
 const FILE_CONTEXT_MENU_HEIGHT = 38
 const VIEWPORT_MARGIN = 8
@@ -898,6 +900,46 @@ export function isCurrentRepositoryRefresh(
     && state.refreshRequestId === request.requestId
 }
 
+/** Returns the calendar day used by the daily-problem service (UTC). */
+export function utcDateKey(value: Date | number = new Date()): string {
+  const date = typeof value === 'number' ? new Date(value) : value
+  if (!Number.isFinite(date.getTime())) {
+    return ''
+  }
+  return date.toISOString().slice(0, 10)
+}
+
+/**
+ * Delay until just after the next UTC midnight. The small one-second cushion
+ * avoids racing the provider while its daily cache rolls over.
+ */
+export function nextUtcMidnightDelayMs(value: Date | number = new Date(), paddingMs = 1000): number {
+  const date = typeof value === 'number' ? new Date(value) : value
+  if (!Number.isFinite(date.getTime())) {
+    return 24 * 60 * 60 * 1000 + Math.max(0, paddingMs)
+  }
+  const nextMidnight = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1)
+  return Math.max(1, nextMidnight - date.getTime() + Math.max(0, paddingMs))
+}
+
+/** Accept only a real calendar date in the provider's UTC YYYY-MM-DD format. */
+export function normalizeDailyProblemDateKey(value: unknown): string | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null
+  }
+  const [yearText, monthText, dayText] = value.split('-')
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const date = new Date(Date.UTC(2000, 0, 1))
+  date.setUTCFullYear(year, month - 1, day)
+  date.setUTCHours(0, 0, 0, 0)
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null
+  }
+  return value
+}
+
 interface AppState {
   repoPath: string | null
   projectValid: boolean
@@ -908,7 +950,10 @@ interface AppState {
   selectedFqcn: string | null
   dirty: boolean
   dailyProblem: DailyProblem | null
+  dailyProblemDateKey: string | null
+  dailyRetryPending: boolean
   dailyError: string | null
+  dailyLoading: boolean
   testResult: TestResult | null
   testRun: TestRunSnapshot | null
   busy: boolean
@@ -935,7 +980,10 @@ export class LeetcoderApp {
     selectedFqcn: null,
     dirty: false,
     dailyProblem: null,
+    dailyProblemDateKey: null,
+    dailyRetryPending: false,
     dailyError: null,
+    dailyLoading: false,
     testResult: null,
     testRun: null,
     busy: false,
@@ -981,6 +1029,8 @@ export class LeetcoderApp {
   private gitDiffRequestId = 0
   private gitOperationId = 0
   private gitRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  private dailyRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  private dailyRequestId = 0
   private pendingGitDiffPath: string | null = null
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     FILE_GROUPS.map((group) => group.key),
@@ -1030,6 +1080,19 @@ export class LeetcoderApp {
   private readonly handlePanelWindowBlur = (): void => {
     this.handlePanelPointerUp()
     this.handleGitSplitterPointerUp()
+  }
+
+  private readonly handleWindowFocus = (): void => {
+    this.handleAppVisibilityReturn()
+  }
+
+  private readonly handleVisibilityChange = (): void => {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      this.clearScheduledGitRefresh()
+      this.clearScheduledDailyRefresh()
+      return
+    }
+    this.handleAppVisibilityReturn()
   }
 
   private readonly handleWindowResize = (): void => {
@@ -1195,6 +1258,8 @@ export class LeetcoderApp {
     this.editor.destroy()
     this.autosave.dispose()
     window.removeEventListener('keydown', this.handleGlobalKeydown)
+    window.removeEventListener('focus', this.handleWindowFocus)
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange)
     window.removeEventListener('pointermove', this.handlePanelPointerMove)
     window.removeEventListener('pointerup', this.handlePanelPointerUp)
     window.removeEventListener('pointercancel', this.handlePanelPointerUp)
@@ -1205,6 +1270,7 @@ export class LeetcoderApp {
     window.removeEventListener('resize', this.handleWindowResize)
     window.removeEventListener('pointerdown', this.handleContextMenuOutside)
     window.removeEventListener('keydown', this.handleContextMenuKeydown)
+    this.clearScheduledDailyRefresh()
     this.destroyed = true
   }
 
@@ -1243,7 +1309,6 @@ export class LeetcoderApp {
               <div class="daily-actions">
                 <a id="problem-link" class="problem-link" href="#" target="_blank" rel="noreferrer">Open</a>
                 <button id="create-file" class="primary-button" type="button">New file</button>
-                <button id="refresh-daily" class="icon-button" type="button" aria-label="Refresh daily problem" title="Refresh daily problem"></button>
               </div>
             </section>
 
@@ -1324,7 +1389,6 @@ export class LeetcoderApp {
                 <span id="git-file-count" class="git-file-count"></span>
               </div>
               <div class="git-actions">
-                <button id="git-refresh" class="icon-button" type="button" aria-label="Refresh Git changes" title="Refresh Git changes"></button>
                 <button id="git-select-all" class="secondary-button" type="button">Select all</button>
                 <button id="git-select-none" class="secondary-button" type="button">Clear</button>
               </div>
@@ -1378,10 +1442,8 @@ export class LeetcoderApp {
     this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
     this.element<HTMLAnchorElement>('#problem-link').prepend(iconFor('externalLink', 'button-icon'))
     this.element<HTMLButtonElement>('#create-file').prepend(iconFor('filePlus', 'button-icon'))
-    this.element<HTMLButtonElement>('#refresh-daily').append(iconFor('refresh', 'button-icon'))
     this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
     this.element<HTMLElement>('#raw-logs-summary').prepend(iconFor('terminal', 'button-icon'))
-    this.element<HTMLButtonElement>('#git-refresh').append(iconFor('refresh', 'button-icon'))
   }
 
   private bindEvents(): void {
@@ -1390,9 +1452,6 @@ export class LeetcoderApp {
     })
     this.element<HTMLButtonElement>('#refresh-files').addEventListener('click', () => {
       void this.refreshFiles()
-    })
-    this.element<HTMLButtonElement>('#refresh-daily').addEventListener('click', () => {
-      void this.loadDailyProblem()
     })
     this.element<HTMLButtonElement>('#create-file').addEventListener('click', () => {
       void this.createFileForToday()
@@ -1439,9 +1498,6 @@ export class LeetcoderApp {
         this.selectBottomPanelTab(nextTab, true)
       })
     }
-    this.element<HTMLButtonElement>('#git-refresh').addEventListener('click', () => {
-      void this.refreshGitStatus(true)
-    })
     this.element<HTMLButtonElement>('#git-select-all').addEventListener('click', () => {
       this.selectAllGitFiles()
     })
@@ -1499,6 +1555,8 @@ export class LeetcoderApp {
     window.addEventListener('pointerdown', this.handleContextMenuOutside)
     window.addEventListener('keydown', this.handleContextMenuKeydown)
     window.addEventListener('keydown', this.handleGlobalKeydown)
+    window.addEventListener('focus', this.handleWindowFocus)
+    document.addEventListener('visibilitychange', this.handleVisibilityChange)
   }
 
   private async chooseRepository(): Promise<void> {
@@ -1569,23 +1627,58 @@ export class LeetcoderApp {
     }
   }
 
-  private async loadDailyProblem(): Promise<void> {
-    if (this.state.busy) {
+  private async loadDailyProblem(showMessage = true): Promise<void> {
+    if (this.state.dailyLoading) {
       return
     }
-    this.state.busy = true
+    const requestId = ++this.dailyRequestId
+    this.state.dailyLoading = true
+    this.state.dailyError = null
     this.renderAll()
     try {
-      this.state.dailyProblem = await this.backend.fetchDailyProblem()
-      this.state.dailyError = null
-      this.setMessage('Daily problem loaded.', 'success')
+      const problem = await this.backend.fetchDailyProblem()
+      if (this.destroyed || requestId !== this.dailyRequestId) {
+        return
+      }
+      const problemDateKey = normalizeDailyProblemDateKey(problem.date)
+      const currentDateKey = utcDateKey()
+      if (!problemDateKey) {
+        this.state.dailyRetryPending = true
+        this.state.dailyError = 'The daily problem returned an invalid date.'
+        if (showMessage) {
+          this.setMessage(`Could not load today's problem: ${this.state.dailyError}`, 'error')
+        }
+      } else if (problemDateKey !== currentDateKey) {
+        this.state.dailyRetryPending = true
+        this.state.dailyProblemDateKey = problemDateKey
+        this.state.dailyError = `The daily problem is dated ${problemDateKey}; waiting for ${currentDateKey}.`
+        if (showMessage) {
+          this.setMessage(`Could not load today's problem: ${this.state.dailyError}`, 'error')
+        }
+      } else {
+        this.state.dailyProblem = problem
+        this.state.dailyProblemDateKey = problemDateKey
+        this.state.dailyRetryPending = false
+        this.state.dailyError = null
+        if (showMessage) {
+          this.setMessage('Daily problem loaded.', 'success')
+        }
+      }
     } catch (error) {
-      this.state.dailyProblem = null
+      if (this.destroyed || requestId !== this.dailyRequestId) {
+        return
+      }
+      this.state.dailyRetryPending = true
       this.state.dailyError = errorMessage(error)
-      this.setMessage(`Could not load today's problem: ${this.state.dailyError}`, 'error')
+      if (showMessage) {
+        this.setMessage(`Could not load today's problem: ${this.state.dailyError}`, 'error')
+      }
     } finally {
-      this.state.busy = false
-      this.renderAll()
+      if (!this.destroyed && requestId === this.dailyRequestId) {
+        this.state.dailyLoading = false
+        this.scheduleDailyProblemRefresh(this.state.dailyRetryPending ? DAILY_RETRY_INTERVAL_MS : nextUtcMidnightDelayMs())
+        this.renderAll()
+      }
     }
   }
 
@@ -2066,7 +2159,6 @@ export class LeetcoderApp {
       this.element<HTMLButtonElement>(tab === 'tests' ? '#tests-tab' : '#git-tab').focus()
     }
     if (tab === 'git' && this.state.repoPath && this.state.projectValid
-      && (this.state.git.loadedRepoPath !== this.state.repoPath || this.state.git.stale)
       && !this.state.busy && !this.state.git.loading) {
       void this.refreshGitStatus(false)
     }
@@ -2133,10 +2225,10 @@ export class LeetcoderApp {
 
   private scheduleGitRefreshIfNeeded(): void {
     if (this.gitRefreshTimer !== null
-      || !this.state.git.stale
       || this.state.bottomPanelTab !== 'git'
       || !this.state.repoPath
       || !this.state.projectValid
+      || !this.isWindowVisible()
       || this.state.busy
       || this.state.git.busy
       || this.state.git.loading) {
@@ -2147,17 +2239,20 @@ export class LeetcoderApp {
       if (this.state.bottomPanelTab !== 'git'
         || !this.state.repoPath
         || !this.state.projectValid
+        || !this.isWindowVisible()
         || this.state.busy
         || this.state.git.busy
         || this.state.git.loading
-        || !this.state.git.stale) {
+        || this.state.bottomPanelTab !== 'git') {
+        this.scheduleGitRefreshIfNeeded()
         return
       }
-      // Consume this stale marker before attempting the request. If the
-      // request fails, leave the error visible without retrying forever.
+      // Consume this stale marker before attempting the request. The regular
+      // poll remains active after an error, while request guards prevent an
+      // older response from painting over a newer repository state.
       this.state.git.stale = false
       void this.refreshGitStatus(false)
-    }, GIT_REFRESH_DEBOUNCE_MS)
+    }, this.state.git.stale ? GIT_REFRESH_DEBOUNCE_MS : GIT_POLL_INTERVAL_MS)
   }
 
   private clearScheduledGitRefresh(): void {
@@ -2165,6 +2260,62 @@ export class LeetcoderApp {
       clearTimeout(this.gitRefreshTimer)
       this.gitRefreshTimer = null
     }
+  }
+
+  private clearScheduledDailyRefresh(): void {
+    if (this.dailyRefreshTimer !== null) {
+      clearTimeout(this.dailyRefreshTimer)
+      this.dailyRefreshTimer = null
+    }
+  }
+
+  private scheduleDailyProblemRefresh(delayMs = nextUtcMidnightDelayMs()): void {
+    this.clearScheduledDailyRefresh()
+    if (this.destroyed || this.state.dailyLoading || !this.isWindowVisible()) {
+      return
+    }
+    this.dailyRefreshTimer = setTimeout(() => {
+      this.dailyRefreshTimer = null
+      if (!this.isWindowVisible() || this.destroyed) {
+        return
+      }
+      this.refreshDailyProblemIfStale()
+    }, Math.max(1, delayMs))
+  }
+
+  private refreshDailyProblemIfStale(): void {
+    const currentDateKey = utcDateKey()
+    if (this.state.dailyLoading) {
+      return
+    }
+    if (this.state.dailyRetryPending
+      || !this.state.dailyProblem
+      || this.state.dailyProblemDateKey !== currentDateKey) {
+      void this.loadDailyProblem(false)
+      return
+    }
+    this.scheduleDailyProblemRefresh()
+  }
+
+  private handleAppVisibilityReturn(): void {
+    if (!this.isWindowVisible() || this.destroyed) {
+      return
+    }
+    this.refreshDailyProblemIfStale()
+    if (this.state.bottomPanelTab !== 'git'
+      || !this.state.projectValid
+      || !this.state.repoPath
+      || this.state.busy
+      || this.state.git.busy
+      || this.state.git.loading) {
+      return
+    }
+    this.clearScheduledGitRefresh()
+    void this.refreshGitStatus(false)
+  }
+
+  private isWindowVisible(): boolean {
+    return typeof document === 'undefined' || document.visibilityState !== 'hidden'
   }
 
   private async refreshGitStatus(showMessage: boolean, allowBusy = false): Promise<void> {
@@ -2471,7 +2622,7 @@ export class LeetcoderApp {
       status.textContent = 'Loading unified diff…'
     } else if (git.stale) {
       status.classList.add('is-loading')
-      status.textContent = 'Changes may be out of date. Refresh to update.'
+      status.textContent = 'Updating Git changes…'
     } else if (git.files.length === 0) {
       status.textContent = git.loadedRepoPath ? 'Working tree is clean.' : 'Open Git to inspect working-tree changes.'
     } else {
@@ -2564,7 +2715,6 @@ export class LeetcoderApp {
     input.disabled = this.state.busy || git.busy || git.files.length === 0
     this.element<HTMLButtonElement>('#git-commit').disabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
     this.element<HTMLButtonElement>('#git-commit-push').disabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
-    this.element<HTMLButtonElement>('#git-refresh').disabled = this.state.busy || git.busy || git.loading || !this.state.projectValid
     this.element<HTMLButtonElement>('#git-select-all').disabled = this.state.busy || git.busy || git.loading || git.files.length === 0
     this.element<HTMLButtonElement>('#git-select-none').disabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
     this.applyGitFileListWidth()
@@ -2584,8 +2734,7 @@ export class LeetcoderApp {
     this.renderContextMenu()
     this.element<HTMLButtonElement>('#choose-repository').disabled = this.state.busy
     this.element<HTMLButtonElement>('#refresh-files').disabled = this.state.busy || !this.state.projectValid
-    this.element<HTMLButtonElement>('#refresh-daily').disabled = this.state.busy
-    this.element<HTMLButtonElement>('#create-file').disabled = this.state.busy || !this.state.projectValid || !this.state.dailyProblem
+    this.element<HTMLButtonElement>('#create-file').disabled = this.state.busy || this.state.dailyLoading || !this.state.projectValid || !this.state.dailyProblem
     this.element<HTMLButtonElement>('#run-test').disabled = this.state.busy || !this.state.selectedPath
     this.element<HTMLElement>('#editor-empty').hidden = Boolean(this.state.selectedPath)
     this.element<HTMLElement>('#editor-host').classList.toggle('is-empty', !this.state.selectedPath)
@@ -2606,8 +2755,11 @@ export class LeetcoderApp {
       message.className = this.state.dailyError ? 'error-copy' : 'muted-copy'
       message.textContent = this.state.dailyError
         ? `Could not load today’s problem: ${this.state.dailyError}`
-        : 'Loading today’s problem…'
+        : this.state.dailyLoading ? 'Fetching today’s problem…' : 'Loading today’s problem…'
       content.append(message)
+      if (this.state.dailyLoading) {
+        content.append(createIndeterminateProgress('Fetching today’s problem'))
+      }
       link.hidden = true
       return
     }
@@ -2624,6 +2776,15 @@ export class LeetcoderApp {
     difficulty.className = `difficulty difficulty-${problem.difficulty.toLowerCase()}`
     difficulty.textContent = problem.difficulty
     content.append(number, title, difficulty)
+    if (this.state.dailyLoading) {
+      content.append(createIndeterminateProgress('Fetching today’s problem'))
+    } else if (this.state.dailyError) {
+      const error = document.createElement('span')
+      error.className = 'daily-refresh-error'
+      error.textContent = 'Could not refresh today’s problem.'
+      error.title = this.state.dailyError
+      content.append(error)
+    }
     link.href = problem.url
     link.hidden = false
   }
@@ -3311,6 +3472,130 @@ function formatDuration(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(2)}s`
 }
 
+function createIndeterminateProgress(label: string): HTMLElement {
+  const progress = document.createElement('span')
+  progress.className = 'indeterminate-progress'
+  progress.setAttribute('role', 'progressbar')
+  progress.setAttribute('aria-label', label)
+  progress.setAttribute('aria-valuetext', 'In progress')
+  progress.setAttribute('aria-busy', 'true')
+  return progress
+}
+
+export type UnifiedDiffLineKind = 'context' | 'addition' | 'deletion' | 'hunk' | 'no-newline'
+
+export interface UnifiedDiffLine {
+  kind: UnifiedDiffLineKind
+  oldLine: number | null
+  newLine: number | null
+  marker: '' | '+' | '-'
+  content: string
+}
+
+/**
+ * Converts a raw Git unified diff into only the lines useful in the file
+ * viewer. Git's file headers and index/mode metadata are already represented
+ * by the file heading and status badge, so showing them again makes the code
+ * harder to scan. The returned line numbers are the source line numbers from
+ * each side of every hunk.
+ */
+export function parseUnifiedDiffLines(diff: string): UnifiedDiffLine[] {
+  const lines: UnifiedDiffLine[] = []
+  let oldLine = 0
+  let newLine = 0
+  let hasHunk = false
+
+  const rawLines = diff.split(/\r\n|\n|\r/)
+  for (const [lineIndex, line] of rawLines.entries()) {
+    // A final line ending is not an additional blank source line. Actual
+    // blank context lines retain their required unified-diff space prefix.
+    if (lineIndex === rawLines.length - 1 && line.length === 0) {
+      continue
+    }
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line)
+    if (hunk) {
+      oldLine = Number(hunk[1])
+      newLine = Number(hunk[3])
+      hasHunk = true
+      lines.push({
+        kind: 'hunk',
+        oldLine: null,
+        newLine: null,
+        marker: '',
+        content: line,
+      })
+      continue
+    }
+
+    // Everything before the first hunk is a file header or a diff metadata
+    // line. A metadata line after a hunk can occur for binary/rename diffs;
+    // it is intentionally omitted as well.
+    if (isUnifiedDiffMetadataLine(line, hasHunk) || !hasHunk) {
+      continue
+    }
+
+    if (line === '\\ No newline at end of file') {
+      lines.push({
+        kind: 'no-newline',
+        oldLine: null,
+        newLine: null,
+        marker: '',
+        content: line,
+      })
+      continue
+    }
+
+    if (line.startsWith('+')) {
+      lines.push({
+        kind: 'addition',
+        oldLine: null,
+        newLine: newLine++,
+        marker: '+',
+        content: line.slice(1),
+      })
+      continue
+    }
+
+    if (line.startsWith('-')) {
+      lines.push({
+        kind: 'deletion',
+        oldLine: oldLine++,
+        newLine: null,
+        marker: '-',
+        content: line.slice(1),
+      })
+      continue
+    }
+
+    // A normal unified-diff context line starts with one space. Keeping the
+    // fallback makes the renderer tolerant of backend payloads that omit the
+    // prefix while still preserving an actually blank context line (" ").
+    const content = line.startsWith(' ') ? line.slice(1) : line
+    lines.push({
+      kind: 'context',
+      oldLine: oldLine++,
+      newLine: newLine++,
+      marker: '',
+      content,
+    })
+  }
+
+  return lines
+}
+
+function isUnifiedDiffMetadataLine(line: string, hasHunk = false): boolean {
+  return line.startsWith('diff --git ')
+    || /^(?:new|deleted|old) file mode\s/.test(line)
+    || /^(?:old|new) mode\s/.test(line)
+    || /^(?:similarity|dissimilarity) index\s/.test(line)
+    || /^(?:rename|copy) (?:from|to)\s/.test(line)
+    || line.startsWith('index ')
+    || (!hasHunk && /^(?:---|\+\+\+)(?:\s|$)/.test(line))
+    || line === 'GIT binary patch'
+    || /^(?:literal|delta) \d+$/.test(line)
+    || line.startsWith('Binary files ')
+}
+
 function gitStatusGlyph(status: string): string {
   switch (normalizeGitStatusLabel(status)) {
     case 'added':
@@ -3348,56 +3633,35 @@ function confirmDeleteFile(fileName: string): boolean {
 
 function renderUnifiedDiff(diff: string): HTMLElement {
   const fragment = document.createDocumentFragment()
-  let oldLine = 0
-  let newLine = 0
-  for (const line of diff.split(/\r?\n/)) {
+  for (const parsedLine of parseUnifiedDiffLines(diff)) {
     const row = document.createElement('div')
-    row.className = `git-diff-line ${gitDiffLineClass(line)}`
+    row.className = `git-diff-line is-${parsedLine.kind}`
     const oldNumber = document.createElement('span')
     oldNumber.className = 'git-diff-line-number git-diff-old-line'
     const newNumber = document.createElement('span')
     newNumber.className = 'git-diff-line-number git-diff-new-line'
+    const marker = document.createElement('span')
+    marker.className = 'git-diff-line-marker'
+    marker.textContent = parsedLine.marker
+    marker.setAttribute('aria-hidden', 'true')
     const content = document.createElement('code')
     content.className = 'git-diff-line-content'
-    content.textContent = line || ' '
-
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-    const noNewlineMarker = line === '\\ No newline at end of file'
-    if (hunk) {
-      oldLine = Number(hunk[1])
-      newLine = Number(hunk[2])
-    } else if (noNewlineMarker) {
-      // This metadata line belongs to the preceding file line and does not
-      // consume a source line in either side of the hunk.
-    } else if (line.startsWith('+') && !line.startsWith('+++')) {
-      newNumber.textContent = String(newLine++)
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
-      oldNumber.textContent = String(oldLine++)
-    } else if (!line.startsWith('diff ') && !line.startsWith('index ') && !line.startsWith('---') && !line.startsWith('+++')) {
-      if (line.length > 0) {
-        oldNumber.textContent = String(oldLine++)
-        newNumber.textContent = String(newLine++)
-      }
+    // textContent is deliberate: source text must never be interpreted as
+    // markup, and an empty code node still reserves the row's line height.
+    content.textContent = parsedLine.content
+    if (parsedLine.oldLine !== null) {
+      oldNumber.textContent = String(parsedLine.oldLine)
     }
-    row.append(oldNumber, newNumber, content)
+    if (parsedLine.newLine !== null) {
+      newNumber.textContent = String(parsedLine.newLine)
+    }
+    row.append(oldNumber, newNumber, marker, content)
     fragment.append(row)
   }
   const wrapper = document.createElement('div')
   wrapper.className = 'git-diff-lines'
   wrapper.append(fragment)
   return wrapper
-}
-
-function gitDiffLineClass(line: string): string {
-  if (line === '\\ No newline at end of file') return 'is-no-newline'
-  if (line.startsWith('@@')) return 'is-hunk'
-  if (line.startsWith('+++') || line.startsWith('---')) return 'is-file-header'
-  if (line.startsWith('+')) return 'is-addition'
-  if (line.startsWith('-')) return 'is-deletion'
-  if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('new file') || line.startsWith('deleted file') || line.startsWith('rename ')) {
-    return 'is-metadata'
-  }
-  return 'is-context'
 }
 
 export function clampBottomPanelHeight(value: number, viewportHeight = windowHeight()): number {

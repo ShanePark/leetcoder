@@ -15,7 +15,11 @@ import {
   isCurrentRepositoryRefresh,
   normalizeGitDiff,
   normalizeGitStatus,
+  normalizeDailyProblemDateKey,
+  parseUnifiedDiffLines,
   relevantTestStackFrames,
+  nextUtcMidnightDelayMs,
+  utcDateKey,
 } from '../../src/app'
 import type { ProblemFileEntry, TestCaseResult, TestDiagnostic } from '../../src/backend'
 
@@ -176,6 +180,74 @@ describe('Git panel helpers', () => {
     expect(diff['Q1.java']).toContain('\\ No newline at end of file')
   })
 
+  it('renders only useful unified-diff rows with Desktop-style gutters', () => {
+    const rows = parseUnifiedDiffLines([
+      'diff --git a/src/Q1.java b/src/Q1.java',
+      'index 1111111..2222222 100644',
+      '--- a/src/Q1.java',
+      '+++ b/src/Q1.java',
+      '@@ -3,3 +3,4 @@',
+      ' context',
+      '-removed',
+      '---',
+      '+added',
+      '+++',
+      ' ',
+      '\\ No newline at end of file',
+    ].join('\r\n'))
+
+    expect(rows).toEqual([
+      { kind: 'hunk', oldLine: null, newLine: null, marker: '', content: '@@ -3,3 +3,4 @@' },
+      { kind: 'context', oldLine: 3, newLine: 3, marker: '', content: 'context' },
+      { kind: 'deletion', oldLine: 4, newLine: null, marker: '-', content: 'removed' },
+      { kind: 'deletion', oldLine: 5, newLine: null, marker: '-', content: '--' },
+      { kind: 'addition', oldLine: null, newLine: 4, marker: '+', content: 'added' },
+      { kind: 'addition', oldLine: null, newLine: 5, marker: '+', content: '++' },
+      { kind: 'context', oldLine: 6, newLine: 6, marker: '', content: '' },
+      { kind: 'no-newline', oldLine: null, newLine: null, marker: '', content: '\\ No newline at end of file' },
+    ])
+  })
+
+  it('keeps deleted and newly added file hunks while filtering mode and binary metadata', () => {
+    const deleted = parseUnifiedDiffLines([
+      'diff --git a/Q1.java b/Q1.java',
+      'deleted file mode 100644',
+      'index abc..000',
+      '--- a/Q1.java',
+      '+++ /dev/null',
+      '@@ -1,2 +0,0 @@',
+      '-first',
+      '-second',
+    ].join('\n'))
+    const added = parseUnifiedDiffLines([
+      'diff --git a/Q2.java b/Q2.java',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/Q2.java',
+      '@@ -0,0 +1,2 @@',
+      '+first',
+      '+second',
+    ].join('\n'))
+    const binary = parseUnifiedDiffLines([
+      'diff --git a/image.png b/image.png',
+      'new file mode 100644',
+      'index 000..abc',
+      'Binary files /dev/null and b/image.png differ',
+    ].join('\n'))
+
+    expect(deleted.map(({ kind, oldLine, newLine, content }) => ({ kind, oldLine, newLine, content }))).toEqual([
+      { kind: 'hunk', oldLine: null, newLine: null, content: '@@ -1,2 +0,0 @@' },
+      { kind: 'deletion', oldLine: 1, newLine: null, content: 'first' },
+      { kind: 'deletion', oldLine: 2, newLine: null, content: 'second' },
+    ])
+    expect(added.map(({ kind, oldLine, newLine, content }) => ({ kind, oldLine, newLine, content }))).toEqual([
+      { kind: 'hunk', oldLine: null, newLine: null, content: '@@ -0,0 +1,2 @@' },
+      { kind: 'addition', oldLine: null, newLine: 1, content: 'first' },
+      { kind: 'addition', oldLine: null, newLine: 2, content: 'second' },
+    ])
+    expect(binary).toEqual([])
+  })
+
   it('uses the requested Create message and clamps panel height', () => {
     expect(defaultGitCommitMessage(['src/Q1386CinemaSeatAllocation.java'])).toBe('Create Q1386CinemaSeatAllocation.java')
     expect(defaultGitCommitMessage(['Q1.java', 'Q2.java'])).toBe('Create Q1.java and 1 more')
@@ -188,6 +260,22 @@ describe('Git panel helpers', () => {
     expect(clampGitFileListWidth(700, 900)).toBe(617)
     expect(clampGitFileListWidth(Number.POSITIVE_INFINITY, 400)).toBe(180)
     expect(deleteFileConfirmationMessage('Q1.java')).toBe('Delete Q1.java?\n\nThis cannot be undone.')
+  })
+
+  it('uses UTC dates and schedules just after the next UTC midnight', () => {
+    const beforeMidnight = Date.UTC(2026, 7, 23, 23, 59, 59, 500)
+    expect(utcDateKey(beforeMidnight)).toBe('2026-08-23')
+    expect(utcDateKey(beforeMidnight + 1000)).toBe('2026-08-24')
+    expect(nextUtcMidnightDelayMs(beforeMidnight)).toBe(1500)
+    expect(nextUtcMidnightDelayMs(Date.UTC(2026, 7, 23, 12, 0, 0), 0)).toBe(12 * 60 * 60 * 1000)
+  })
+
+  it('accepts only real provider UTC date keys', () => {
+    expect(normalizeDailyProblemDateKey('2026-08-23')).toBe('2026-08-23')
+    expect(normalizeDailyProblemDateKey('2026-02-29')).toBeNull()
+    expect(normalizeDailyProblemDateKey('2026-13-01')).toBeNull()
+    expect(normalizeDailyProblemDateKey('2026-8-23')).toBeNull()
+    expect(normalizeDailyProblemDateKey('not-a-date')).toBeNull()
   })
 })
 
