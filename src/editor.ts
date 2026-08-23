@@ -45,6 +45,255 @@ export interface EditorIssue {
   message?: string | null
 }
 
+export interface JavaDocInsertion {
+  from: number
+  insert: string
+  cursor: number
+}
+
+interface SourceLine {
+  from: number
+  to: number
+  text: string
+}
+
+const JAVA_CLASS_DECLARATION = /^[ \t]*(?:(?:public|protected|private|abstract|final|static|strictfp|sealed|non-sealed)[ \t]+)*class[ \t]+[A-Za-z_$][\w$]*/
+
+function isEscaped(source: string, position: number): boolean {
+  let backslashes = 0
+  for (let index = position - 1; index >= 0 && source[index] === '\\'; index -= 1) {
+    backslashes += 1
+  }
+  return backslashes % 2 === 1
+}
+
+function isInsideCommentOrString(source: string, position: number): boolean {
+  let blockComment = false
+  let lineComment = false
+  let textBlock = false
+  let quote: '"' | "'" | null = null
+  let escaped = false
+
+  for (let index = 0; index < position; index += 1) {
+    const character = source[index]
+    const next = source[index + 1]
+    if (lineComment) {
+      if (character === '\n' || character === '\r') {
+        lineComment = false
+      }
+      continue
+    }
+    if (blockComment) {
+      if (character === '*' && next === '/') {
+        blockComment = false
+        index += 1
+      }
+      continue
+    }
+    if (textBlock) {
+      if (character === '"' && next === '"' && source[index + 2] === '"'
+        && !isEscaped(source, index)) {
+        textBlock = false
+        index += 2
+      }
+      continue
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false
+      } else if (character === '\\') {
+        escaped = true
+      } else if (character === quote) {
+        quote = null
+      }
+      continue
+    }
+    if (character === '/' && next === '*') {
+      blockComment = true
+      index += 1
+    } else if (character === '/' && next === '/') {
+      lineComment = true
+      index += 1
+    } else if (character === '"' && next === '"' && source[index + 2] === '"'
+      && !isEscaped(source, index)) {
+      textBlock = true
+      index += 2
+    } else if (character === '"' || character === "'") {
+      quote = character
+    }
+  }
+  return blockComment || lineComment || textBlock || quote !== null
+}
+
+export interface JavaDocAltShortcutEvent {
+  code: string
+  shiftKey: boolean
+  altKey: boolean
+  metaKey: boolean
+  ctrlKey: boolean
+}
+
+/** Match the macOS Option form without consuming unrelated modified keystrokes. */
+export function isJavaDocAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyJ'
+    && event.shiftKey
+    && event.altKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+function lineAt(source: string, position: number): SourceLine {
+  const bounded = Math.max(0, Math.min(position, source.length))
+  let from = bounded
+  while (from > 0 && source[from - 1] !== '\n' && source[from - 1] !== '\r') {
+    from -= 1
+  }
+  let to = bounded
+  while (to < source.length && source[to] !== '\n' && source[to] !== '\r') {
+    to += 1
+  }
+  return { from, to, text: source.slice(from, to) }
+}
+
+function previousLine(source: string, lineFrom: number): SourceLine | null {
+  if (lineFrom <= 0) {
+    return null
+  }
+  let to = lineFrom - 1
+  if (source[to] === '\n' && to > 0 && source[to - 1] === '\r') {
+    to -= 1
+  }
+  let from = to
+  while (from > 0 && source[from - 1] !== '\n' && source[from - 1] !== '\r') {
+    from -= 1
+  }
+  return { from, to, text: source.slice(from, to) }
+}
+
+function lineBreakFor(source: string, line?: SourceLine): string {
+  if (line) {
+    const following = /^(?:\r\n|\r|\n)/.exec(source.slice(line.to))
+    if (following) {
+      return following[0]
+    }
+    const preceding = source.slice(Math.max(0, line.from - 2), line.from)
+    if (preceding.endsWith('\r\n')) {
+      return '\r\n'
+    }
+    if (preceding.endsWith('\r')) {
+      return '\r'
+    }
+    if (preceding.endsWith('\n')) {
+      return '\n'
+    }
+  }
+  const match = /\r\n|\r|\n/.exec(source)
+  return match?.[0] ?? '\n'
+}
+
+function javaDocBodyCursor(line: SourceLine): number | null {
+  const match = /^([ \t]*)\* (.*)$/.exec(line.text)
+  if (!match) {
+    return null
+  }
+  return line.from + match[1].length + 2
+}
+
+function existingJavaDocCursor(source: string, classLine: SourceLine): number | null {
+  let line = previousLine(source, classLine.from)
+  if (!line || (!/^[ \t]*\*\/[ \t]*$/.test(line.text)
+    && !/^[ \t]*\/\*\*.*\*\/[ \t]*$/.test(line.text))) {
+    return null
+  }
+
+  const closingLine = line
+  let lastBodyCursor: number | null = null
+  while (line) {
+    const opening = /^[ \t]*\/\*\*/.exec(line.text)
+    if (opening) {
+      const openingEnd = line.text.indexOf('/**') + 3
+      const closing = line.text.indexOf('*/', openingEnd)
+      if (closing >= 0) {
+        if (lastBodyCursor !== null) {
+          return lastBodyCursor
+        }
+        let cursor = openingEnd
+        while (cursor < closing && /[ \t]/.test(line.text[cursor] ?? '')) {
+          cursor += 1
+        }
+        return line.from + cursor
+      }
+      return lastBodyCursor ?? (closingLine.from + closingLine.text.search(/\*\//))
+    }
+
+    if (line === closingLine && /^[ \t]*\*\/[ \t]*$/.test(line.text)) {
+      line = previousLine(source, line.from)
+      continue
+    }
+
+    const bodyCursor = javaDocBodyCursor(line)
+    if (bodyCursor !== null && lastBodyCursor === null) {
+      lastBodyCursor = bodyCursor
+    } else if (!/^[ \t]*$/.test(line.text) && !/^[ \t]*\*\*?[ \t]*$/.test(line.text)) {
+      return null
+    }
+    line = previousLine(source, line.from)
+  }
+  return null
+}
+
+/** Plan the JavaDoc edit for a cursor on a Java class declaration line. */
+export function planJavaDocInsertion(source: string, position: number): JavaDocInsertion | null {
+  const classLine = lineAt(source, position)
+  if (isInsideCommentOrString(source, classLine.from) || !JAVA_CLASS_DECLARATION.test(classLine.text)) {
+    return null
+  }
+
+  const existingCursor = existingJavaDocCursor(source, classLine)
+  if (existingCursor !== null) {
+    return { from: existingCursor, insert: '', cursor: existingCursor }
+  }
+
+  const indent = /^[ \t]*/.exec(classLine.text)?.[0] ?? ''
+  const lineBreak = lineBreakFor(source, classLine)
+  const lines = [
+    `${indent}/**`,
+    `${indent} * `,
+    `${indent} */`,
+  ]
+  const insert = `${lines.join(lineBreak)}${lineBreak}`
+  const cursor = classLine.from + lines[0].length + lineBreak.length + lines[1].length
+  return { from: classLine.from, insert, cursor }
+}
+
+function isJavaDocBodyAt(source: string, position: number): { prefix: string } | null {
+  const line = lineAt(source, position)
+  const body = /^([ \t]*)\* /.exec(line.text)
+  if (!body || position < line.from + body[0].length) {
+    return null
+  }
+  const beforeLine = source.slice(0, line.from)
+  if (beforeLine.lastIndexOf('/**') <= beforeLine.lastIndexOf('*/')) {
+    return null
+  }
+  return { prefix: `${body[1]}* ` }
+}
+
+/** Format a multiline clipboard payload when it is pasted into JavaDoc text. */
+export function formatJavaDocClipboard(text: string, source: string, position: number): string {
+  const normalized = text.replace(/\r\n?/g, '\n')
+  if (!normalized.includes('\n')) {
+    return text
+  }
+  const body = isJavaDocBodyAt(source, position)
+  if (!body) {
+    return text
+  }
+  const withoutTrailingNewlines = normalized.replace(/\n+$/, '')
+  const lines = withoutTrailingNewlines.split('\n')
+  return [lines[0], ...lines.slice(1).map((line) => `${body.prefix}${line}`)].join('\n')
+}
+
 const setEditorIssues = StateEffect.define<readonly EditorIssue[]>()
 
 class FailureMarker extends GutterMarker {
@@ -182,6 +431,21 @@ export class JavaEditor {
   constructor(parent: HTMLElement, callbacks: EditorCallbacks = {}) {
     const save = () => callbacks.onSave?.() !== false
     const run = () => callbacks.onRun?.() !== false
+    const insertJavaDoc = (view: EditorView): boolean => {
+      const selection = view.state.selection.main
+      if (!selection.empty) {
+        return false
+      }
+      const edit = planJavaDocInsertion(view.state.doc.toString(), selection.head)
+      if (!edit) {
+        return false
+      }
+      view.dispatch({
+        ...(edit.insert ? { changes: { from: edit.from, insert: edit.insert } } : {}),
+        selection: { anchor: edit.cursor },
+      })
+      return true
+    }
     let hoveredDefinition = ''
 
     const updateDefinitionHover = (view: EditorView, event: MouseEvent): void => {
@@ -247,9 +511,13 @@ export class JavaEditor {
         Prec.high(keymap.of([
           { key: 'Mod-s', run: save },
           { key: 'Mod-r', run },
+          { key: 'Shift-Mod-j', run: insertJavaDoc },
           { key: 'Ctrl-Space', run: startCompletion },
           { key: 'Cmd-Space', run: startCompletion },
         ])),
+        EditorView.clipboardInputFilter.of((text, state) => state.selection.ranges.length === 1
+          ? formatJavaDocClipboard(text, state.doc.toString(), state.selection.main.head)
+          : text),
         autocompletion({
           override: [javaCompletions],
           activateOnTyping: true,
@@ -291,6 +559,16 @@ export class JavaEditor {
             }
             clearDefinitionHover(view)
             return false
+          },
+          keydown: (event, view) => {
+            if (!isJavaDocAltShortcut(event)) {
+              return false
+            }
+            const handled = insertJavaDoc(view)
+            if (handled) {
+              event.preventDefault()
+            }
+            return handled
           },
         }),
       ],
