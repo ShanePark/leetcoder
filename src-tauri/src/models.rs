@@ -166,6 +166,8 @@ pub struct ProblemTestCase {
     pub duration_ms: Option<u64>,
     pub message: Option<String>,
     pub details: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
     pub expected: Option<String>,
     pub actual: Option<String>,
     pub source_file: Option<String>,

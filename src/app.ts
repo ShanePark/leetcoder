@@ -188,6 +188,11 @@ export function testFailureMessage(result: TestResult): string {
   return 'The test run stopped before reporting a result.'
 }
 
+/** Whether a testcase has output worth showing in its expanded result row. */
+export function testCaseHasOutput(test: TestCaseResult): boolean {
+  return (test.stdout?.length ?? 0) > 0 || (test.stderr?.length ?? 0) > 0
+}
+
 /**
  * Match a backend source path against the currently open repository-relative
  * path. Gradle/JUnit may report an absolute path, a repository suffix, or
@@ -1646,9 +1651,10 @@ export class LeetcoderApp {
 
   private renderTestCase(test: TestCaseResult): HTMLElement {
     const failed = test.status === 'failed' || test.status === 'error'
+    const hasOutput = testCaseHasOutput(test)
     const hasDetail = failed || Boolean(
       test.message || test.details || test.expected || test.actual || (test.file && test.line),
-    )
+    ) || hasOutput
     const row = hasDetail ? document.createElement('details') : document.createElement('div')
     row.className = `test-row test-row-${test.status}`
 
@@ -1667,7 +1673,7 @@ export class LeetcoderApp {
     }
     row.append(summary)
 
-    if (failed && row instanceof HTMLDetailsElement) {
+    if ((failed || hasOutput) && row instanceof HTMLDetailsElement) {
       row.open = true
     }
     if (hasDetail && row instanceof HTMLDetailsElement) {
@@ -1690,6 +1696,26 @@ export class LeetcoderApp {
         stacktrace.className = 'test-stacktrace'
         stacktrace.textContent = test.details
         detail.append(stacktrace)
+      }
+      if (hasOutput) {
+        const outputGrid = document.createElement('div')
+        outputGrid.className = 'test-output'
+        for (const [label, value] of [['stdout', test.stdout], ['stderr', test.stderr]] as const) {
+          if (!value) {
+            continue
+          }
+          const pane = document.createElement('div')
+          pane.className = `test-output-pane test-output-${label}`
+          const outputLabel = document.createElement('span')
+          outputLabel.className = 'test-output-label'
+          outputLabel.textContent = label
+          const output = document.createElement('pre')
+          output.className = 'test-output-content'
+          output.textContent = value
+          pane.append(outputLabel, output)
+          outputGrid.append(pane)
+        }
+        detail.append(outputGrid)
       }
       if (test.file && validSourceLine(test.line) !== null) {
         detail.append(this.renderLocation(test.file, validSourceLine(test.line)!, test.column))

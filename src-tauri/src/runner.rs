@@ -724,6 +724,7 @@ allprojects {
                 throw new GradleException('leetcoderResultDir was not provided')
             }
             reports.junitXml.outputLocation = project.file(resultDir)
+            reports.junitXml.outputPerTestCase = true
             def progressMarker = 'LEETCODER_TEST_EVENT_V1:'
             def emitProgress = { payload ->
                 println(progressMarker + JsonOutput.toJson(payload))
@@ -1133,6 +1134,8 @@ struct ActiveTest {
     duration_ms: Option<u64>,
     message: Option<String>,
     details: String,
+    stdout: String,
+    stderr: String,
     status: ProblemTestStatus,
     source_file: Option<String>,
     source_line: Option<u32>,
@@ -1145,6 +1148,12 @@ struct XmlFailure {
     details: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XmlOutputKind {
+    Stdout,
+    Stderr,
+}
+
 fn parse_junit_xml(xml: &str) -> Result<ParsedReports, String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -1153,6 +1162,7 @@ fn parse_junit_xml(xml: &str) -> Result<ParsedReports, String> {
     let mut suite_depth = 0usize;
     let mut active_test: Option<ActiveTest> = None;
     let mut active_failure: Option<XmlFailure> = None;
+    let mut active_output: Option<XmlOutputKind> = None;
 
     loop {
         match reader.read_event() {
@@ -1184,6 +1194,14 @@ fn parse_junit_xml(xml: &str) -> Result<ParsedReports, String> {
                             details: String::new(),
                         });
                     }
+                } else if tag.as_slice() == b"system-out" || tag.as_slice() == b"system-err" {
+                    if active_test.is_some() {
+                        active_output = Some(if tag.as_slice() == b"system-out" {
+                            XmlOutputKind::Stdout
+                        } else {
+                            XmlOutputKind::Stderr
+                        });
+                    }
                 } else if tag.as_slice() == b"skipped" {
                     if let Some(test) = active_test.as_mut() {
                         test.status = ProblemTestStatus::Skipped;
@@ -1213,6 +1231,10 @@ fn parse_junit_xml(xml: &str) -> Result<ParsedReports, String> {
                         };
                         test.message = attr_value(&element, b"message");
                     }
+                } else if tag.as_slice() == b"system-out" || tag.as_slice() == b"system-err" {
+                    // An empty per-test output element carries no output. A
+                    // suite-level empty element is intentionally ignored.
+                    active_output = None;
                 } else if tag.as_slice() == b"skipped" {
                     if let Some(test) = active_test.as_mut() {
                         test.status = ProblemTestStatus::Skipped;
@@ -1229,6 +1251,15 @@ fn parse_junit_xml(xml: &str) -> Result<ParsedReports, String> {
                         &unescape(decoded.as_ref())
                             .map_err(|error| format!("invalid JUnit escape: {error}"))?,
                     );
+                } else if let (Some(test), Some(output_kind)) =
+                    (active_test.as_mut(), active_output)
+                {
+                    let decoded = text
+                        .decode()
+                        .map_err(|error| format!("invalid JUnit text: {error}"))?;
+                    let decoded = unescape(decoded.as_ref())
+                        .map_err(|error| format!("invalid JUnit escape: {error}"))?;
+                    append_test_output(test, output_kind, decoded.as_ref());
                 }
             }
             Ok(Event::CData(text)) => {
@@ -1236,6 +1267,25 @@ fn parse_junit_xml(xml: &str) -> Result<ParsedReports, String> {
                     failure
                         .details
                         .push_str(&String::from_utf8_lossy(text.as_ref()));
+                } else if let (Some(test), Some(output_kind)) =
+                    (active_test.as_mut(), active_output)
+                {
+                    append_test_output(test, output_kind, &String::from_utf8_lossy(text.as_ref()));
+                }
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let entity = reference
+                    .decode()
+                    .map_err(|error| format!("invalid JUnit entity: {error}"))?;
+                let escaped = format!("&{};", entity.as_ref());
+                let value =
+                    unescape(&escaped).map_err(|error| format!("invalid JUnit escape: {error}"))?;
+                if let Some(failure) = active_failure.as_mut() {
+                    failure.details.push_str(value.as_ref());
+                } else if let (Some(test), Some(output_kind)) =
+                    (active_test.as_mut(), active_output)
+                {
+                    append_test_output(test, output_kind, value.as_ref());
                 }
             }
             Ok(Event::End(element)) => {
@@ -1248,6 +1298,8 @@ fn parse_junit_xml(xml: &str) -> Result<ParsedReports, String> {
                         test.details.push_str(&failure.details);
                         test.capturing_details = false;
                     }
+                } else if tag.as_slice() == b"system-out" || tag.as_slice() == b"system-err" {
+                    active_output = None;
                 } else if tag.as_slice() == b"testcase" {
                     if let Some(test) = active_test.take() {
                         reports.tests.push(finish_active_test(test));
@@ -1257,13 +1309,7 @@ fn parse_junit_xml(xml: &str) -> Result<ParsedReports, String> {
                     suite_classes.pop();
                 }
             }
-            Ok(
-                Event::Comment(_)
-                | Event::Decl(_)
-                | Event::PI(_)
-                | Event::DocType(_)
-                | Event::GeneralRef(_),
-            ) => {}
+            Ok(Event::Comment(_) | Event::Decl(_) | Event::PI(_) | Event::DocType(_)) => {}
             Ok(Event::Eof) => break,
             Err(error) => return Err(error.to_string()),
         }
@@ -1281,10 +1327,19 @@ fn active_test_from_xml(element: &BytesStart<'_>, suite_classes: &[String]) -> A
         duration_ms: attr_value(element, b"time").and_then(|value| parse_duration_ms(&value)),
         message: None,
         details: String::new(),
+        stdout: String::new(),
+        stderr: String::new(),
         status: ProblemTestStatus::Passed,
         source_file: attr_value(element, b"file"),
         source_line: attr_value(element, b"line").and_then(|line| line.parse().ok()),
         capturing_details: false,
+    }
+}
+
+fn append_test_output(test: &mut ActiveTest, output_kind: XmlOutputKind, text: &str) {
+    match output_kind {
+        XmlOutputKind::Stdout => test.stdout.push_str(text),
+        XmlOutputKind::Stderr => test.stderr.push_str(text),
     }
 }
 
@@ -1313,6 +1368,8 @@ fn finish_active_test(mut test: ActiveTest) -> ProblemTestCase {
         duration_ms: test.duration_ms,
         message: clean_text(&test.message.unwrap_or_default()),
         details,
+        stdout: (!test.stdout.is_empty()).then_some(test.stdout),
+        stderr: (!test.stderr.is_empty()).then_some(test.stderr),
         expected,
         actual,
         source_file: test.source_file,
@@ -1621,6 +1678,7 @@ expected: <5>
         assert!(script.contains("useJUnitPlatform()"));
         assert!(script.contains("testLogging.showStandardStreams = true"));
         assert!(script.contains("junitXml.outputLocation"));
+        assert!(script.contains("junitXml.outputPerTestCase = true"));
         assert!(script.contains("outputs.upToDateWhen { false }"));
         assert!(script.contains("leetcoderResultDir"));
         assert!(script.contains(TEST_EVENT_MARKER));
@@ -1850,6 +1908,34 @@ expected: <5>
     }
 
     #[test]
+    fn parses_per_testcase_output_without_attributing_suite_output() {
+        let xml = r#"
+<testsuites>
+  <testsuite name="Q1" time="0.010">
+    <testcase classname="sample.Q1" name="prints">
+      <system-out>hello &amp; goodbye
+</system-out>
+      <system-err><![CDATA[warning <detail>]]></system-err>
+      <failure message="expected: &lt;1&gt; but was: &lt;2&gt;"><![CDATA[at sample.Q1.prints(Q1.java:11)]]></failure>
+    </testcase>
+    <system-out><![CDATA[suite output must stay global]]></system-out>
+    <system-err>suite error must stay global</system-err>
+  </testsuite>
+</testsuites>
+"#;
+        let parsed = parse_junit_xml(xml).expect("fixture parses");
+        assert_eq!(parsed.tests.len(), 1);
+        let test = &parsed.tests[0];
+        assert_eq!(test.stdout.as_deref(), Some("hello & goodbye\n"));
+        assert_eq!(test.stderr.as_deref(), Some("warning <detail>"));
+        assert_eq!(test.message.as_deref(), Some("expected: <1> but was: <2>"));
+        assert!(test
+            .details
+            .as_deref()
+            .is_some_and(|details| details.contains("Q1.java:11")));
+    }
+
+    #[test]
     fn prefers_the_active_test_frame_over_junit_and_jdk_frames() {
         let xml = r#"
 <testsuites>
@@ -1959,6 +2045,20 @@ at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method
         assert!(value["diagnostics"].is_array());
         assert!(value.get("stdout").is_some());
         assert!(value.get("stderr").is_some());
+    }
+
+    #[test]
+    fn serializes_per_testcase_output_as_optional_camel_case_fields() {
+        let xml = r#"
+<testsuites><testsuite><testcase classname="sample.Q1" name="prints">
+  <system-out><![CDATA[hello]]></system-out>
+  <system-err><![CDATA[warning]]></system-err>
+</testcase></testsuite></testsuites>
+"#;
+        let parsed = parse_junit_xml(xml).expect("fixture parses");
+        let value: Value = serde_json::to_value(&parsed.tests[0]).expect("test serializes");
+        assert_eq!(value["stdout"], Value::String("hello".to_string()));
+        assert_eq!(value["stderr"], Value::String("warning".to_string()));
     }
 
     #[cfg(unix)]

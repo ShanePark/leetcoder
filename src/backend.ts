@@ -46,6 +46,8 @@ export interface TestCaseResult {
   durationMs?: number | null
   message?: string | null
   details?: string | null
+  stdout?: string | null
+  stderr?: string | null
   expected?: string | null
   actual?: string | null
   file?: string | null
@@ -425,6 +427,8 @@ function normalizeTestCase(value: unknown, index: number): TestCaseResult {
   }
   const entry = isRecord(value) ? value : {}
   const failure = firstRecord(entry.failure, entry.error)
+  const output = firstRecord(entry.output, entry.testOutput, entry.test_output)
+  const outputText = stringValue(entry.output)
   const status = normalizeStatus(entry.status ?? entry.outcome ?? entry.result)
   const line = numberValue(
     entry.line
@@ -453,6 +457,25 @@ function normalizeTestCase(value: unknown, index: number): TestCaseResult {
       ?? stringValue(failure?.details)
       ?? stringValue(failure?.stackTrace)
       ?? stringValue(failure?.stack_trace),
+    stdout: stringValue(entry.stdout)
+      ?? stringValue(entry.systemOut)
+      ?? stringValue(entry.system_out)
+      ?? stringValue(output?.stdout)
+      ?? stringValue(output?.systemOut)
+      ?? stringValue(output?.system_out)
+      ?? stringValue(failure?.stdout)
+      ?? stringValue(failure?.systemOut)
+      ?? stringValue(failure?.system_out)
+      ?? outputText,
+    stderr: stringValue(entry.stderr)
+      ?? stringValue(entry.systemErr)
+      ?? stringValue(entry.system_err)
+      ?? stringValue(output?.stderr)
+      ?? stringValue(output?.systemErr)
+      ?? stringValue(output?.system_err)
+      ?? stringValue(failure?.stderr)
+      ?? stringValue(failure?.systemErr)
+      ?? stringValue(failure?.system_err),
     expected: stringValue(entry.expected) ?? stringValue(failure?.expected),
     actual: stringValue(entry.actual) ?? stringValue(failure?.actual),
     file: stringValue(entry.file)

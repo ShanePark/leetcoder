@@ -1037,6 +1037,43 @@ details.test-row > summary::-webkit-details-marker {
   white-space: pre-wrap;
 }
 
+.test-output {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px;
+}
+
+.test-output-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(42, 57, 80, .8);
+  border-radius: 4px;
+  background: #0d1522;
+}
+
+.test-output-label {
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(42, 57, 80, .8);
+  color: #7891b2;
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+}
+
+.test-output-content {
+  max-height: 120px;
+  overflow: auto;
+  color: #c6d3e6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.test-output-stderr .test-output-label {
+  color: #d7a8b0;
+}
+
 .diagnostics {
   flex-shrink: 1;
   max-height: 82px;

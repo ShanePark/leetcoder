@@ -164,6 +164,36 @@ describe('backend client', () => {
     expect(result.summary).toMatchObject({ failed: 1, errors: 1 })
   })
 
+  it('normalizes per-test stdout and stderr from Rust and legacy JUnit shapes', () => {
+    const result = normalizeTestResult({
+      success: true,
+      phase: 'test',
+      summary: { total: 2, passed: 2 },
+      tests: [
+        {
+          name: 'prints()',
+          status: 'passed',
+          stdout: 'hello\n',
+          stderr: 'warning\n',
+        },
+        {
+          name: 'legacy()',
+          status: 'passed',
+          output: {
+            system_out: 'legacy stdout',
+            system_err: 'legacy stderr',
+          },
+        },
+      ],
+      diagnostics: [],
+      stdout: '',
+      stderr: '',
+    })
+
+    expect(result.tests[0]).toMatchObject({ stdout: 'hello\n', stderr: 'warning\n' })
+    expect(result.tests[1]).toMatchObject({ stdout: 'legacy stdout', stderr: 'legacy stderr' })
+  })
+
   it('normalizes tagged progress events and ignores malformed payloads', () => {
     expect(normalizeTestRunProgress({ kind: 'phase', phase: 'compilation' })).toEqual({
       kind: 'phase',

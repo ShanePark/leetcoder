@@ -5,6 +5,7 @@ import {
   presentTestResult,
   sourcePathsMatch,
   summarizeLiveTests,
+  testCaseHasOutput,
   testResultBannerMessage,
 } from '../../src/app'
 import type { TestResult } from '../../src/backend'
@@ -117,6 +118,12 @@ describe('test result failure presentation', () => {
       errors: 1,
       durationMs: 42,
     })
+  })
+
+  it('recognizes non-empty per-test output for automatic row expansion', () => {
+    expect(testCaseHasOutput({ name: 'prints()', status: 'passed', stdout: 'hi\n' })).toBe(true)
+    expect(testCaseHasOutput({ name: 'warns()', status: 'passed', stderr: 'warning' })).toBe(true)
+    expect(testCaseHasOutput({ name: 'quiet()', status: 'passed', stdout: '', stderr: null })).toBe(false)
   })
 })
 
