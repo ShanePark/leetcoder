@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   collectEditorIssues,
+  isTestRunSourceCurrent,
   presentTestResult,
   sourcePathsMatch,
   summarizeLiveTests,
@@ -217,5 +218,32 @@ describe('editor failure locations', () => {
     })
     expect(collectEditorIssues(run, 'Q.java')).toEqual([])
     expect(collectEditorIssues(run, null)).toEqual([])
+  })
+})
+
+describe('test run source snapshots', () => {
+  const snapshot = {
+    repoPath: '/repo',
+    filePath: 'src/main/java/Q1TwoSum.java',
+    source: 'class Q1TwoSum {}',
+  }
+
+  it('accepts the exact repository path, file path, and source', () => {
+    expect(isTestRunSourceCurrent(snapshot, snapshot)).toBe(true)
+  })
+
+  it('rejects a result after the file or source changes', () => {
+    expect(isTestRunSourceCurrent(snapshot, {
+      ...snapshot,
+      filePath: 'src/main/java/Q2Add.java',
+    })).toBe(false)
+    expect(isTestRunSourceCurrent(snapshot, {
+      ...snapshot,
+      source: 'class Q1TwoSum { int changed; }',
+    })).toBe(false)
+    expect(isTestRunSourceCurrent(snapshot, {
+      ...snapshot,
+      repoPath: '/other-repo',
+    })).toBe(false)
   })
 })

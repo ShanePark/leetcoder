@@ -66,6 +66,32 @@ export interface TestRunSnapshot {
   error: string | null
 }
 
+export interface TestRunSourceSnapshot {
+  repoPath: string
+  filePath: string
+  source: string
+}
+
+export interface CurrentTestSource {
+  repoPath: string | null
+  filePath: string | null
+  source: string
+}
+
+/**
+ * A backend result is only valid for the exact document that started the run.
+ * Comparing the source as well as the path prevents an older run from painting
+ * failures onto an edited buffer while its process is still finishing.
+ */
+export function isTestRunSourceCurrent(
+  snapshot: TestRunSourceSnapshot,
+  current: CurrentTestSource,
+): boolean {
+  return snapshot.repoPath === current.repoPath
+    && snapshot.filePath === current.filePath
+    && snapshot.source === current.source
+}
+
 /**
  * Turns a structured run result into the short, actionable copy used above
  * the detailed test rows. The full process output remains available below.
@@ -1028,10 +1054,17 @@ export class LeetcoderApp {
     if (this.suppressEditorChange || !this.state.selectedPath || !this.state.repoPath) {
       return
     }
+    const activeRunId = this.state.testRun?.status === 'running'
+      ? this.state.testRun.id
+      : null
     this.editor.setIssues([])
     this.state.selectedSource = source
     this.state.dirty = source !== this.state.savedSource
     this.state.saveError = null
+    if (activeRunId !== null) {
+      this.discardStaleTestRun(activeRunId)
+      this.renderResult()
+    }
     this.autosave.schedule({
       repoPath: this.state.repoPath,
       filePath: this.state.selectedPath,
@@ -1103,10 +1136,14 @@ export class LeetcoderApp {
       this.setMessage('Choose a Java file before running a test.', 'error')
       return
     }
-    const runRepoPath = this.state.repoPath
-    const runFilePath = this.state.selectedPath
+    const runSnapshot: TestRunSourceSnapshot = {
+      repoPath: this.state.repoPath,
+      filePath: this.state.selectedPath,
+      source: this.state.selectedSource,
+    }
+    const runRepoPath = runSnapshot.repoPath
+    const runFilePath = runSnapshot.filePath
     const runFqcn = this.state.selectedFqcn
-    const runSource = this.state.selectedSource
     this.state.busy = true
     const runId = ++this.testRunGeneration
     const run: TestRunSnapshot = {
@@ -1128,6 +1165,10 @@ export class LeetcoderApp {
     try {
       if (!(await this.flushPendingSave())) {
         if (this.isCurrentTestRun(runId)) {
+          if (!this.isTestRunSourceCurrent(runSnapshot)) {
+            this.discardStaleTestRun(runId)
+            return
+          }
           const failure = runnerFailureResult(
             run,
             this.state.saveError ?? 'The source file could not be saved before running tests.',
@@ -1147,10 +1188,12 @@ export class LeetcoderApp {
       if (!this.isCurrentTestRun(runId)) {
         return
       }
-      this.state.testResult = result
-      if (this.state.selectedPath === runFilePath && this.state.selectedSource === runSource) {
-        this.editor.setIssues(collectEditorIssues(result, runFilePath))
+      if (!this.isTestRunSourceCurrent(runSnapshot)) {
+        this.discardStaleTestRun(runId)
+        return
       }
+      this.state.testResult = result
+      this.editor.setIssues(collectEditorIssues(result, runFilePath))
       run.status = 'completed'
       run.phase = result.phase
       run.tests = result.tests
@@ -1164,6 +1207,10 @@ export class LeetcoderApp {
       )
     } catch (error) {
       if (this.isCurrentTestRun(runId)) {
+        if (!this.isTestRunSourceCurrent(runSnapshot)) {
+          this.discardStaleTestRun(runId)
+          return
+        }
         const failure = runnerFailureResult(run, errorMessage(error))
         run.status = 'error'
         run.phase = failure.phase
@@ -1181,6 +1228,25 @@ export class LeetcoderApp {
   private isCurrentTestRun(runId: number): boolean {
     return this.state.testRun?.id === runId
       && this.testRunGeneration === runId
+  }
+
+  private isTestRunSourceCurrent(snapshot: TestRunSourceSnapshot): boolean {
+    return isTestRunSourceCurrent(snapshot, {
+      repoPath: this.state.repoPath,
+      filePath: this.state.selectedPath,
+      source: this.state.selectedSource,
+    })
+  }
+
+  private discardStaleTestRun(runId: number): void {
+    if (!this.isCurrentTestRun(runId)) {
+      return
+    }
+    this.state.testRun = null
+    this.state.testResult = null
+    this.renderedTestResult = null
+    this.editor.setIssues([])
+    this.setMessage('Test result discarded because the source changed while it was running.', 'info')
   }
 
   private applyTestRunProgress(runId: number, progress: TestRunProgress): void {
