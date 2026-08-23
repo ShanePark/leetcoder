@@ -2,12 +2,78 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createBackendClient,
+  normalizeGitChanges,
+  normalizeGitCommitResult,
+  normalizeGitDiff,
+  normalizeGitPushResult,
   normalizeTestResult,
   normalizeTestRunProgress,
   type Invoke,
 } from '../../src/backend'
 
 describe('backend client', () => {
+  it('normalizes Git status paths and preserves staged/worktree columns', () => {
+    expect(normalizeGitChanges({ changes: [{
+      path: 'src/a file.java',
+      status: 'MM',
+      index_status: 'M',
+      worktreeStatus: 'M',
+      original_path: 'src/old file.java',
+    }] })).toEqual([{
+      path: 'src/a file.java',
+      status: 'MM',
+      indexStatus: 'M',
+      worktreeStatus: 'M',
+      originalPath: 'src/old file.java',
+    }])
+  })
+
+  it('invokes Git diff, commit, and push with explicit arguments', async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
+    const invoke: Invoke = async (command, args) => {
+      calls.push({ command, args })
+      if (command === 'get_git_diff') return 'diff --git a/Q1.java b/Q1.java\n'
+      if (command === 'commit_git') {
+        return { commitHash: 'abc123', message: 'Create Q1.java', paths: ['Q1.java'] }
+      }
+      if (command === 'push_git') return { output: 'done', branch: 'main' }
+      throw new Error(`unexpected command ${command}`)
+    }
+    const backend = createBackendClient(invoke)
+
+    await expect(backend.getGitDiff('/repo', ['Q1.java'])).resolves.toContain('diff --git')
+    await expect(backend.commitGit('/repo', ['Q1.java'], 'Create Q1.java')).resolves.toMatchObject({
+      commitHash: 'abc123',
+    })
+    await expect(backend.pushGit('/repo')).resolves.toMatchObject({ branch: 'main' })
+    expect(calls).toEqual([
+      { command: 'get_git_diff', args: { repoPath: '/repo', paths: ['Q1.java'] } },
+      { command: 'commit_git', args: { repoPath: '/repo', paths: ['Q1.java'], message: 'Create Q1.java' } },
+      { command: 'push_git', args: { repoPath: '/repo' } },
+    ])
+  })
+
+  it('invokes deletion with the repository-relative source path', async () => {
+    const invoke: Invoke = async (command, args) => {
+      expect(command).toBe('delete_problem_file')
+      expect(args).toEqual({ repoPath: '/repo', path: 'src/main/java/Q1.java' })
+      return undefined
+    }
+
+    await expect(
+      createBackendClient(invoke).deleteProblemFile('/repo', 'src/main/java/Q1.java'),
+    ).resolves.toBeUndefined()
+  })
+
+  it('accepts legacy-compatible Git response shapes', () => {
+    expect(normalizeGitDiff({ patch: 'patch' })).toBe('patch')
+    expect(normalizeGitCommitResult({ hash: 'deadbeef', files: ['Q1.java'] })).toMatchObject({
+      commitHash: 'deadbeef',
+      paths: ['Q1.java'],
+    })
+    expect(normalizeGitPushResult('pushed')).toEqual({ output: 'pushed', branch: null })
+  })
+
   it('keeps Kotlin files for collision detection while ignoring unrelated files', async () => {
     const invoke: Invoke = async (command) => {
       expect(command).toBe('list_problem_files')

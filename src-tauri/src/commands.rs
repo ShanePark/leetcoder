@@ -1,7 +1,9 @@
+use crate::git;
 use crate::leetcode;
 use crate::models::{
-    CreateProblemFileArgs, DailyProblem, ProblemFileArgs, ProblemFileContent, ProblemFileList,
-    ProblemTestEvent, ProblemTestResult, ProjectValidation, RunProblemTestArgs,
+    CreateProblemFileArgs, DailyProblem, GitCommitResult, GitFileChange, GitPushResult,
+    ProblemFileArgs, ProblemFileContent, ProblemFileList, ProblemTestEvent, ProblemTestResult,
+    ProjectValidation, RunProblemTestArgs,
 };
 use crate::repository;
 use crate::runner;
@@ -54,6 +56,38 @@ pub fn save_problem_file(
         relative_path: path,
         content,
     })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_problem_file(repo_path: String, path: String) -> Result<(), String> {
+    repository::delete_problem_file(ProblemFileArgs {
+        project_root: repo_path,
+        relative_path: path,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_git_changes(repo_path: String) -> Result<Vec<GitFileChange>, String> {
+    git::list_changes(&repo_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_git_diff(repo_path: String, paths: Vec<String>) -> Result<String, String> {
+    git::diff(&repo_path, paths)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn commit_git(
+    repo_path: String,
+    paths: Vec<String>,
+    message: String,
+) -> Result<GitCommitResult, String> {
+    git::commit(&repo_path, paths, message)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn push_git(repo_path: String) -> Result<GitPushResult, String> {
+    git::push(&repo_path)
 }
 
 #[tauri::command(rename_all = "camelCase")]

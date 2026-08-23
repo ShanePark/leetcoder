@@ -20,6 +20,26 @@ export interface ProblemFileEntry {
   packageSegment: 'easy' | 'medium' | 'xhard' | 'other'
 }
 
+/** A path reported by Git as changed in the selected repository. */
+export interface GitFileChange {
+  path: string
+  status: string
+  indexStatus: string
+  worktreeStatus: string
+  originalPath?: string | null
+}
+
+export interface GitCommitResult {
+  commitHash: string
+  message: string
+  paths: string[]
+}
+
+export interface GitPushResult {
+  output: string
+  branch?: string | null
+}
+
 export interface ProjectValidation {
   valid: boolean
   message?: string
@@ -90,6 +110,11 @@ export interface BackendClient {
   readProblemFile(repoPath: string, path: string): Promise<string>
   createProblemFile(repoPath: string, plan: ProblemFilePlan): Promise<void>
   saveProblemFile(repoPath: string, path: string, content: string): Promise<void>
+  deleteProblemFile(repoPath: string, path: string): Promise<void>
+  listGitChanges(repoPath: string): Promise<GitFileChange[]>
+  getGitDiff(repoPath: string, paths: string[]): Promise<string>
+  commitGit(repoPath: string, paths: string[], message: string): Promise<GitCommitResult>
+  pushGit(repoPath: string): Promise<GitPushResult>
   runProblemTest(
     repoPath: string,
     fullyQualifiedClassName: string,
@@ -155,6 +180,30 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
 
     async saveProblemFile(repoPath, path, content) {
       await invoke<unknown>('save_problem_file', { repoPath, path, content })
+    },
+
+    async deleteProblemFile(repoPath, path) {
+      await invoke<unknown>('delete_problem_file', { repoPath, path })
+    },
+
+    async listGitChanges(repoPath) {
+      const response = await invoke<unknown>('list_git_changes', { repoPath })
+      return normalizeGitChanges(response)
+    },
+
+    async getGitDiff(repoPath, paths) {
+      const response = await invoke<unknown>('get_git_diff', { repoPath, paths })
+      return normalizeGitDiff(response)
+    },
+
+    async commitGit(repoPath, paths, message) {
+      const response = await invoke<unknown>('commit_git', { repoPath, paths, message })
+      return normalizeGitCommitResult(response)
+    },
+
+    async pushGit(repoPath) {
+      const response = await invoke<unknown>('push_git', { repoPath })
+      return normalizeGitPushResult(response)
     },
 
     async runProblemTest(repoPath, fullyQualifiedClassName, onProgress) {
@@ -297,6 +346,94 @@ function normalizeProblemFiles(value: unknown): ProblemFileEntry[] {
     // this list to Java files at render time.
     .filter((file) => /\.(?:java|kt)$/i.test(file.path))
     .sort((left, right) => left.path.localeCompare(right.path))
+}
+
+export function normalizeGitChanges(value: unknown): GitFileChange[] {
+  const rawChanges = Array.isArray(value)
+    ? value
+    : isRecord(value)
+      ? value.changes ?? value.files ?? value.entries
+      : undefined
+  if (!Array.isArray(rawChanges)) {
+    throw new Error('The Git status response was invalid.')
+  }
+
+  const normalized = rawChanges
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return null
+      }
+      const path = stringValue(entry.path) ?? stringValue(entry.relativePath) ?? stringValue(entry.relative_path)
+      if (!path || path.trim().length === 0) {
+        return null
+      }
+      const indexStatus = stringValue(entry.indexStatus) ?? stringValue(entry.index_status) ?? '.'
+      const worktreeStatus = stringValue(entry.worktreeStatus) ?? stringValue(entry.worktree_status) ?? '.'
+      const status = stringValue(entry.status) ?? compactGitStatus(indexStatus, worktreeStatus)
+      return {
+        path,
+        status,
+        indexStatus,
+        worktreeStatus,
+        originalPath: stringValue(entry.originalPath) ?? stringValue(entry.original_path) ?? null,
+      }
+    })
+  return normalized.filter((entry): entry is Exclude<typeof normalized[number], null> => entry !== null)
+}
+
+export function normalizeGitDiff(value: unknown): string {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (isRecord(value)) {
+    const diff = value.diff ?? value.patch ?? value.content
+    if (typeof diff === 'string') {
+      return diff
+    }
+  }
+  throw new Error('The Git diff response was invalid.')
+}
+
+export function normalizeGitCommitResult(value: unknown): GitCommitResult {
+  if (!isRecord(value)) {
+    throw new Error('The Git commit response was invalid.')
+  }
+  const commitHash = stringValue(value.commitHash)
+    ?? stringValue(value.commit_hash)
+    ?? stringValue(value.hash)
+  if (!commitHash) {
+    throw new Error('The Git commit response did not contain a commit hash.')
+  }
+  const rawPaths = value.paths ?? value.files
+  const paths = Array.isArray(rawPaths)
+    ? rawPaths.filter((path): path is string => typeof path === 'string')
+    : []
+  return {
+    commitHash,
+    message: stringValue(value.message) ?? '',
+    paths,
+  }
+}
+
+export function normalizeGitPushResult(value: unknown): GitPushResult {
+  if (typeof value === 'string') {
+    return { output: value, branch: null }
+  }
+  if (!isRecord(value)) {
+    throw new Error('The Git push response was invalid.')
+  }
+  return {
+    output: stringValue(value.output) ?? stringValue(value.stdout) ?? '',
+    branch: stringValue(value.branch) ?? null,
+  }
+}
+
+function compactGitStatus(indexStatus: string, worktreeStatus: string): string {
+  if (indexStatus === '?' && worktreeStatus === '?') {
+    return '??'
+  }
+  const status = `${indexStatus === '.' ? '' : indexStatus}${worktreeStatus === '.' ? '' : worktreeStatus}`
+  return status || '.'
 }
 
 function createFileEntry(path: string): ProblemFileEntry {

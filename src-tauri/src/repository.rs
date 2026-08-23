@@ -217,6 +217,24 @@ pub(crate) fn save_problem_file(args: CreateProblemFileArgs) -> Result<ProblemFi
     })
 }
 
+pub(crate) fn delete_problem_file(args: ProblemFileArgs) -> Result<(), String> {
+    let root = canonical_project_root(&args.project_root)?;
+    let (_lexical, canonical) = resolve_existing_source_file(&root, &args.relative_path)?;
+    fs::remove_file(&canonical)
+        .map_err(|error| format!("Unable to delete '{}': {error}", args.relative_path))?;
+    let canonical_parent = canonical.parent().ok_or_else(|| {
+        format!(
+            "File '{}' was deleted, but its parent directory could not be determined",
+            args.relative_path
+        )
+    })?;
+    // The directory sync improves durability on Unix, but the file has
+    // already been removed successfully. Keep deletion successful if the
+    // filesystem cannot sync the parent (for example, on a special volume).
+    let _ = sync_directory(canonical_parent);
+    Ok(())
+}
+
 fn sync_directory(directory: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -311,5 +329,37 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "after");
         assert_eq!(fs::read_dir(parent).unwrap().count(), before_entries);
+    }
+
+    #[test]
+    fn delete_removes_only_existing_problem_source_files() {
+        let directory = fixture();
+        let root = directory.path().to_string_lossy().to_string();
+        let relative_path = "src/main/java/shane/leetcode/problems/easy/Q1.java";
+        fs::write(directory.path().join(relative_path), "class Q1 {}").unwrap();
+
+        delete_problem_file(ProblemFileArgs {
+            project_root: root.clone(),
+            relative_path: relative_path.to_string(),
+        })
+        .unwrap();
+        assert!(!directory.path().join(relative_path).exists());
+        let error = delete_problem_file(ProblemFileArgs {
+            project_root: root,
+            relative_path: relative_path.to_string(),
+        })
+        .unwrap_err();
+        assert!(error.contains("Unable to access") || error.contains("not a regular file"));
+    }
+
+    #[test]
+    fn delete_rejects_non_source_paths() {
+        let directory = fixture();
+        let error = delete_problem_file(ProblemFileArgs {
+            project_root: directory.path().to_string_lossy().to_string(),
+            relative_path: "build.gradle".to_string(),
+        })
+        .unwrap_err();
+        assert!(error.contains("Only .java and .kt source files are allowed"));
     }
 }

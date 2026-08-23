@@ -60,6 +60,36 @@ pub struct RunProblemTestArgs {
     pub fully_qualified_class_name: String,
 }
 
+/// A path with changes in the selected repository.
+///
+/// `index_status` and `worktree_status` retain Git's two-column porcelain
+/// status while `status` is the compact value used by the UI (for example,
+/// `M`, `MM`, `A`, `D`, or `??`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileChange {
+    pub path: String,
+    pub status: String,
+    pub index_status: String,
+    pub worktree_status: String,
+    pub original_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitResult {
+    pub commit_hash: String,
+    pub message: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPushResult {
+    pub output: String,
+    pub branch: Option<String>,
+}
+
 /// Output from the Gradle task injected by the editor for one problem run.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

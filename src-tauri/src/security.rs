@@ -159,6 +159,41 @@ pub(crate) fn validate_relative_path(relative_path: &str) -> Result<PathBuf, Str
     Ok(normalized)
 }
 
+/// Validate a path supplied to a Git command. Git paths are not restricted to
+/// Java/Kotlin source files, but they must remain lexical repository-relative
+/// paths so a caller cannot use a pathspec to escape the selected repository.
+pub(crate) fn validate_git_relative_path(relative_path: &str) -> Result<PathBuf, String> {
+    let input = relative_path;
+    if input.is_empty() || input.trim().is_empty() {
+        return Err("Git path must not be empty".to_string());
+    }
+    if input.as_bytes().contains(&0) {
+        return Err("Git path must not contain a NUL byte".to_string());
+    }
+
+    let path = Path::new(input);
+    if path.is_absolute() {
+        return Err("Git paths must be relative to projectRoot".to_string());
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir => {}
+            Component::ParentDir => return Err("Git paths may not contain '..'".to_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("Git paths must not contain a root or volume prefix".to_string())
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err("Git path must identify a file".to_string());
+    }
+    Ok(normalized)
+}
+
 pub(crate) fn resolve_existing_source_file(
     root: &Path,
     relative_path: &str,
@@ -272,6 +307,21 @@ mod tests {
         assert!(
             validate_relative_path("src/main/java/shane/leetcode/problems/easy/a.txt").is_err()
         );
+    }
+
+    #[test]
+    fn git_paths_allow_regular_names_but_reject_escape_components() {
+        assert_eq!(
+            validate_git_relative_path("src/a file.java").unwrap(),
+            PathBuf::from("src/a file.java")
+        );
+        assert_eq!(
+            validate_git_relative_path("src/./a.java").unwrap(),
+            PathBuf::from("src/a.java")
+        );
+        assert!(validate_git_relative_path("../outside").is_err());
+        assert!(validate_git_relative_path("/absolute").is_err());
+        assert!(validate_git_relative_path(".").is_err());
     }
 
     #[test]

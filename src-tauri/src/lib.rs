@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod git;
 mod leetcode;
 mod models;
 mod repository;
@@ -29,6 +30,11 @@ pub fn run() {
             commands::read_problem_file,
             commands::create_problem_file,
             commands::save_problem_file,
+            commands::delete_problem_file,
+            commands::list_git_changes,
+            commands::get_git_diff,
+            commands::commit_git,
+            commands::push_git,
             commands::run_problem_test,
         ])
         .run(tauri::generate_context!())
