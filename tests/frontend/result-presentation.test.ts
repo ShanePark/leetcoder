@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  collectEditorIssues,
   presentTestResult,
+  sourcePathsMatch,
   summarizeLiveTests,
   testResultBannerMessage,
 } from '../../src/app'
@@ -115,5 +117,98 @@ describe('test result failure presentation', () => {
       errors: 1,
       durationMs: 42,
     })
+  })
+})
+
+describe('editor failure locations', () => {
+  it('matches absolute, repository-suffix, and basename source paths', () => {
+    expect(sourcePathsMatch(
+      'src/main/java/shane/leetcode/problems/easy/Q1TwoSum.java',
+      '/tmp/leetcoder/src/main/java/shane/leetcode/problems/easy/Q1TwoSum.java',
+    )).toBe(true)
+    expect(sourcePathsMatch(
+      'src/main/java/shane/leetcode/problems/easy/Q1TwoSum.java',
+      'Q1TwoSum.java',
+    )).toBe(true)
+    expect(sourcePathsMatch(
+      'src/main/java/shane/leetcode/problems/easy/Q1TwoSum.java',
+      'src/test/java/Q1TwoSum.java',
+    )).toBe(false)
+    expect(sourcePathsMatch('src/main/java/Q1TwoSum.java', 'Q2TwoSum.java')).toBe(false)
+  })
+
+  it('collects matching failed tests and error diagnostics once per position', () => {
+    const run = result({
+      phase: 'test',
+      tests: [
+        {
+          name: 'fails()',
+          status: 'failed',
+          file: 'Q1TwoSum.java',
+          line: 12,
+          column: 8,
+          message: 'expected 2 but was 3',
+        },
+        {
+          name: 'same-failure()',
+          status: 'error',
+          file: '/repo/src/main/java/Q1TwoSum.java',
+          line: 12,
+          column: 8,
+          message: 'duplicate position',
+        },
+        {
+          name: 'passes()',
+          status: 'passed',
+          file: 'Q1TwoSum.java',
+          line: 15,
+        },
+        {
+          name: 'other-file()',
+          status: 'failed',
+          file: 'Q2TwoSum.java',
+          line: 4,
+        },
+      ],
+      diagnostics: [
+        {
+          severity: 'warning',
+          message: 'unused import',
+          file: 'Q1TwoSum.java',
+          line: 2,
+        },
+        {
+          severity: 'error',
+          message: 'cannot find symbol',
+          file: 'src/main/java/Q1TwoSum.java',
+          line: 20,
+          column: 3,
+        },
+      ],
+    })
+
+    expect(collectEditorIssues(run, 'src/main/java/Q1TwoSum.java')).toEqual([
+      {
+        file: 'Q1TwoSum.java',
+        line: 12,
+        column: 8,
+        message: 'expected 2 but was 3',
+      },
+      {
+        file: 'src/main/java/Q1TwoSum.java',
+        line: 20,
+        column: 3,
+        message: 'cannot find symbol',
+      },
+    ])
+  })
+
+  it('ignores locations with invalid coordinates or no selected file', () => {
+    const run = result({
+      tests: [{ name: 'bad()', status: 'failed', file: 'Q.java', line: 0 }],
+      diagnostics: [{ severity: 'error', message: 'bad', file: 'Q.java', line: -1 }],
+    })
+    expect(collectEditorIssues(run, 'Q.java')).toEqual([])
+    expect(collectEditorIssues(run, null)).toEqual([])
   })
 })

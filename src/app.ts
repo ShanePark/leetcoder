@@ -12,7 +12,7 @@ import {
   type TestPhase,
   type TestRunProgress,
 } from './backend'
-import { JavaEditor } from './editor'
+import { JavaEditor, type EditorIssue } from './editor'
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
 
@@ -186,6 +186,100 @@ export function testFailureMessage(result: TestResult): string {
     return 'The test task completed without reporting any tests.'
   }
   return 'The test run stopped before reporting a result.'
+}
+
+/**
+ * Match a backend source path against the currently open repository-relative
+ * path. Gradle/JUnit may report an absolute path, a repository suffix, or
+ * only the Java basename depending on where the failure was discovered.
+ */
+export function sourcePathsMatch(selectedPath: string, reportedPath: string): boolean {
+  const selected = normalizeSourcePath(selectedPath)
+  const reported = normalizeSourcePath(reportedPath)
+  if (!selected || !reported) {
+    return false
+  }
+  if (selected === reported || selected.endsWith(`/${reported}`) || reported.endsWith(`/${selected}`)) {
+    return true
+  }
+  // A basename-only report is common in JUnit stack traces. Once the
+  // backend gives us directory information, require the suffix match above
+  // so two unrelated files with the same name cannot mark this editor.
+  return !reported.includes('/') && sourceBasename(selected) === reported
+}
+
+function normalizeSourcePath(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/\/+/g, '/')
+    .replace(/^\/+/, '')
+    .toLocaleLowerCase()
+}
+
+function sourceBasename(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1)
+}
+
+function validSourceLine(value: number | null | undefined): number | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return null
+  }
+  const line = Math.trunc(value)
+  return line > 0 ? line : null
+}
+
+function validSourceColumn(value: number | null | undefined): number | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return null
+  }
+  const column = Math.trunc(value)
+  return column > 0 ? column : null
+}
+
+/** Collect unique red markers that belong to the currently open source file. */
+export function collectEditorIssues(
+  result: TestResult,
+  selectedPath: string | null,
+): EditorIssue[] {
+  if (!selectedPath) {
+    return []
+  }
+  const issues: EditorIssue[] = []
+  const seen = new Set<string>()
+  const add = (file: string | null | undefined, lineValue: number | null | undefined, columnValue: number | null | undefined, message: string | null | undefined): void => {
+    const line = validSourceLine(lineValue)
+    if (!file || line === null || !sourcePathsMatch(selectedPath, file)) {
+      return
+    }
+    const column = validSourceColumn(columnValue)
+    const key = `${line}:${column ?? ''}`
+    if (seen.has(key)) {
+      return
+    }
+    seen.add(key)
+    issues.push({
+      file,
+      line,
+      column,
+      message: message?.trim() || null,
+    })
+  }
+
+  for (const test of result.tests) {
+    if (test.status !== 'failed' && test.status !== 'error') {
+      continue
+    }
+    add(test.file, test.line, test.column, test.message ?? test.details ?? `${test.name} failed`)
+  }
+  for (const diagnostic of result.diagnostics) {
+    if (diagnostic.severity.trim().toLowerCase() !== 'error') {
+      continue
+    }
+    add(diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message)
+  }
+  return issues
 }
 
 function firstUsefulOutputLine(output: string): string | null {
@@ -859,6 +953,7 @@ export class LeetcoderApp {
     this.state.testResult = null
     this.state.testRun = null
     this.testRunGeneration += 1
+    this.editor.setIssues([])
     this.renderAll()
     try {
       if (!(await this.flushPendingSave())) {
@@ -928,6 +1023,7 @@ export class LeetcoderApp {
     if (this.suppressEditorChange || !this.state.selectedPath || !this.state.repoPath) {
       return
     }
+    this.editor.setIssues([])
     this.state.selectedSource = source
     this.state.dirty = source !== this.state.savedSource
     this.state.saveError = null
@@ -949,6 +1045,7 @@ export class LeetcoderApp {
     this.state.testResult = null
     this.state.testRun = null
     this.testRunGeneration += 1
+    this.editor.setIssues([])
     this.suppressEditorChange = true
     try {
       this.editor.setValue('')
@@ -1001,6 +1098,10 @@ export class LeetcoderApp {
       this.setMessage('Choose a Java file before running a test.', 'error')
       return
     }
+    const runRepoPath = this.state.repoPath
+    const runFilePath = this.state.selectedPath
+    const runFqcn = this.state.selectedFqcn
+    const runSource = this.state.selectedSource
     this.state.busy = true
     const runId = ++this.testRunGeneration
     const run: TestRunSnapshot = {
@@ -1016,6 +1117,7 @@ export class LeetcoderApp {
     }
     this.state.testRun = run
     this.state.testResult = null
+    this.editor.setIssues([])
     this.renderAll()
     this.setMessage(`Running ${this.state.selectedFqcn}…`, 'info')
     try {
@@ -1033,14 +1135,17 @@ export class LeetcoderApp {
         return
       }
       const result = await this.backend.runProblemTest(
-        this.state.repoPath,
-        this.state.selectedFqcn,
+        runRepoPath,
+        runFqcn,
         (progress) => this.applyTestRunProgress(runId, progress),
       )
       if (!this.isCurrentTestRun(runId)) {
         return
       }
       this.state.testResult = result
+      if (this.state.selectedPath === runFilePath && this.state.selectedSource === runSource) {
+        this.editor.setIssues(collectEditorIssues(result, runFilePath))
+      }
       run.status = 'completed'
       run.phase = result.phase
       run.tests = result.tests
@@ -1586,8 +1691,8 @@ export class LeetcoderApp {
         stacktrace.textContent = test.details
         detail.append(stacktrace)
       }
-      if (test.file && test.line !== null && test.line !== undefined) {
-        detail.append(this.renderLocation(test.file, test.line, test.column))
+      if (test.file && validSourceLine(test.line) !== null) {
+        detail.append(this.renderLocation(test.file, validSourceLine(test.line)!, test.column))
       }
       row.append(detail)
     }
@@ -1617,8 +1722,8 @@ export class LeetcoderApp {
     message.className = 'diagnostic-message'
     message.textContent = diagnostic.message
     row.append(icon, message)
-    if (diagnostic.file && diagnostic.line) {
-      row.append(this.renderLocation(diagnostic.file, diagnostic.line, diagnostic.column))
+    if (diagnostic.file && validSourceLine(diagnostic.line) !== null) {
+      row.append(this.renderLocation(diagnostic.file, validSourceLine(diagnostic.line)!, diagnostic.column))
     }
     return row
   }
@@ -1627,15 +1732,20 @@ export class LeetcoderApp {
     const location = document.createElement('button')
     location.type = 'button'
     location.className = 'result-location'
+    const matchesCurrentFile = Boolean(this.state.selectedPath && sourcePathsMatch(this.state.selectedPath, file))
     location.append(
       iconFor('locate', 'result-location-icon'),
       document.createTextNode(`${file}:${line}${column ? `:${column}` : ''}`),
     )
-    location.title = 'Reveal this line in the editor'
-    location.addEventListener('click', () => {
-      const reveal = this.editor as JavaEditor & { revealLine?: (line: number) => void }
-      reveal.revealLine?.(line)
-    })
+    if (matchesCurrentFile) {
+      location.title = 'Reveal this line in the editor'
+      location.addEventListener('click', () => {
+        this.editor.revealLine(line, column)
+      })
+    } else {
+      location.disabled = true
+      location.title = 'This location belongs to another source file'
+    }
     return location
   }
 

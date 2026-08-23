@@ -1297,7 +1297,7 @@ fn finish_active_test(mut test: ActiveTest) -> ProblemTestCase {
     );
     let (expected, actual) = extract_expected_actual(&comparison_text);
     if test.source_file.is_none() || test.source_line.is_none() {
-        if let Some((file, line)) = extract_source_location(&comparison_text) {
+        if let Some((file, line)) = extract_source_location(&comparison_text, &test.class_name) {
             if test.source_file.is_none() {
                 test.source_file = Some(file);
             }
@@ -1347,8 +1347,14 @@ fn clean_text(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-fn extract_source_location(text: &str) -> Option<(String, u32)> {
-    for line in text.lines().rev() {
+fn extract_source_location(text: &str, class_name: &str) -> Option<(String, u32)> {
+    let expected_simple = class_name.rsplit('.').next().unwrap_or(class_name);
+    let expected_outer = expected_simple.split('$').next().unwrap_or(expected_simple);
+    let mut preferred = None;
+    let mut fallback = None;
+    let mut first = None;
+
+    for line in text.lines() {
         let Some(open) = line.rfind('(') else {
             continue;
         };
@@ -1371,9 +1377,38 @@ fn extract_source_location(text: &str) -> Option<(String, u32)> {
             .or_else(|| file.rfind('\\'))
             .map(|index| index + 1)
             .unwrap_or(0);
-        return Some((file[file_start..].to_string(), line_number));
+        let file_name = file[file_start..].to_string();
+        let candidate = (file_name.clone(), line_number);
+        first.get_or_insert_with(|| candidate.clone());
+
+        let frame_head = line.trim().strip_prefix("at ").unwrap_or(line.trim());
+        let owner_and_method = frame_head.split('(').next().unwrap_or_default();
+        let owner = owner_and_method
+            .rsplit_once('.')
+            .map(|(owner, _)| owner)
+            .unwrap_or_default();
+        let owner_simple = owner.rsplit('.').next().unwrap_or(owner);
+        let owner_outer = owner_simple.split('$').next().unwrap_or(owner_simple);
+        let file_stem = file_name.strip_suffix(".java").unwrap_or(&file_name);
+        let matches_active_class = owner_simple == expected_simple
+            || owner_outer == expected_outer
+            || file_stem == expected_simple
+            || file_stem == expected_outer;
+        if matches_active_class {
+            preferred.get_or_insert(candidate.clone());
+        }
+
+        let framework = owner.starts_with("org.junit.")
+            || owner.starts_with("org.opentest4j.")
+            || owner.starts_with("org.gradle.")
+            || owner.starts_with("java.")
+            || owner.starts_with("jdk.")
+            || owner.starts_with("sun.");
+        if !framework {
+            fallback.get_or_insert(candidate);
+        }
     }
-    None
+    preferred.or(fallback).or(first)
 }
 
 fn extract_expected_actual(text: &str) -> (Option<String>, Option<String>) {
@@ -1812,6 +1847,27 @@ expected: <5>
         assert_eq!(summary.skipped, 1);
         assert_eq!(summary.errors, 1);
         assert_eq!(summary.duration_ms, 125);
+    }
+
+    #[test]
+    fn prefers_the_active_test_frame_over_junit_and_jdk_frames() {
+        let xml = r#"
+<testsuites>
+  <testsuite name="Q1" tests="1">
+    <testcase classname="sample.Q1" name="fails">
+      <failure message="boom"><![CDATA[
+at sample.Q1.test(Q1.java:19)
+at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:12)
+at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+]]></failure>
+    </testcase>
+  </testsuite>
+</testsuites>
+"#;
+        let parsed = parse_junit_xml(xml).expect("fixture parses");
+        assert_eq!(parsed.tests.len(), 1);
+        assert_eq!(parsed.tests[0].source_file.as_deref(), Some("Q1.java"));
+        assert_eq!(parsed.tests[0].source_line, Some(19));
     }
 
     #[test]

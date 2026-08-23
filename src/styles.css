@@ -621,6 +621,32 @@ kbd {
   font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
+.editor .cm-failure-gutter {
+  min-width: 17px;
+  color: var(--danger);
+  background: #101724;
+}
+
+.editor .cm-failure-gutter .cm-gutterElement {
+  display: grid;
+  width: 17px;
+  place-items: center;
+  padding: 0;
+}
+
+.editor .cm-failure-marker {
+  display: block;
+  color: var(--danger);
+  font-size: 10px;
+  line-height: 1;
+  text-shadow: 0 0 5px rgba(255, 135, 152, .6);
+}
+
+.editor .cm-line.cm-failure-line {
+  box-shadow: inset 2px 0 var(--danger);
+  background: rgba(255, 135, 152, .1);
+}
+
 .editor-empty {
   position: absolute;
   top: 50%;
