@@ -8,6 +8,18 @@ package, edit it, and run that class's JUnit test.
 The app currently supports this repository only. It does not try to replace a
 general-purpose Java IDE.
 
+<div align="center">
+  <img src="src-tauri/icons/icon.png" width="144" alt="leetcoder app icon: a friendly white ghost holding a green check mark on a deep blue background" />
+  <h2>A focused, friendly workspace for daily Java problem practice</h2>
+  <p>Load a problem, write the solution, and run its tests from one small desktop app.</p>
+</div>
+
+<p align="center">
+  <img src="artifacts/leetcoder-q86-passed.jpg" width="960" alt="leetcoder editor showing Q86 Partition List with five passing JUnit tests and successful Gradle output" />
+</p>
+
+<p align="center"><sub>Example workflow: edit a problem and see every test pass in the results panel.</sub></p>
+
 ## Requirements
 
 ### macOS
@@ -218,7 +230,7 @@ artifacts.
 - New files intentionally start in a non-compiling state so the editor opens
   at the same place the daily practice normally begins.
 - Completion is deliberately lightweight. There is no Java language server,
-  full IntelliJ-style refactoring, formatter, debugger, or code submission.
+  full refactoring suite, formatter, debugger, or code submission.
 - Test execution depends on the repository's Gradle wrapper, downloaded
   dependencies, and the inherited JDK 17 environment (with JDK 11 as a
   fallback).
