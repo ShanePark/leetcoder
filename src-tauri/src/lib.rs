@@ -7,6 +7,8 @@ mod repository;
 mod runner;
 mod security;
 
+use tauri_plugin_window_state::{Builder as WindowStateBuilder, StateFlags};
+
 /// Starts the desktop application.
 ///
 /// Feature modules and Tauri commands can be registered on this builder as
@@ -15,6 +17,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            WindowStateBuilder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             commands::validate_project,
             commands::fetch_daily_problem,
