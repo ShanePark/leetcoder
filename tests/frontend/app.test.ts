@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   AutosaveCoordinator,
+  charDiffSegments,
   clampBottomPanelHeight,
   clampGitFileListWidth,
   conciseTestFailureMessage,
@@ -11,7 +12,10 @@ import {
   filterProblemFiles,
   filterProblemFilesByGroup,
   filterTestDiagnostics,
+  findTodayProblemFile,
   fqcnFromJavaPath,
+  gitDirectoryPath,
+  gitResultToastMessage,
   isCurrentRepositoryRefresh,
   normalizeGitDiff,
   normalizeGitStatus,
@@ -248,9 +252,22 @@ describe('Git panel helpers', () => {
     expect(binary).toEqual([])
   })
 
-  it('uses the requested Create message and clamps panel height', () => {
-    expect(defaultGitCommitMessage(['src/Q1386CinemaSeatAllocation.java'])).toBe('Create Q1386CinemaSeatAllocation.java')
-    expect(defaultGitCommitMessage(['Q1.java', 'Q2.java'])).toBe('Create Q1.java and 1 more')
+  it('derives the auto commit message from the change kinds and clamps panel height', () => {
+    expect(defaultGitCommitMessage([])).toBe('Update files')
+    expect(defaultGitCommitMessage([
+      { path: 'src/Q1386CinemaSeatAllocation.java', status: 'added' },
+    ])).toBe('Add Q1386CinemaSeatAllocation.java')
+    expect(defaultGitCommitMessage([
+      { path: 'Q1.java', status: 'untracked' },
+      { path: 'Q2.java', status: 'added' },
+    ])).toBe('Add 2 files')
+    expect(defaultGitCommitMessage([
+      { path: 'src/Q1.java', status: 'modified' },
+    ])).toBe('Update Q1.java')
+    expect(defaultGitCommitMessage([
+      { path: 'Q1.java', status: 'added' },
+      { path: 'Q2.java', status: 'modified' },
+    ])).toBe('Update 2 files')
     expect(clampBottomPanelHeight(20, 900)).toBe(180)
     expect(clampBottomPanelHeight(1000, 900)).toBe(640)
     expect(clampBottomPanelHeight(Number.POSITIVE_INFINITY, 300)).toBe(240)
@@ -307,16 +324,66 @@ describe('test failure and diagnostic presentation helpers', () => {
     ])).toEqual([])
   })
 
-  it('shows only failed tests by default when a run has failures', () => {
+  it('keeps every test visible, ordered failed → errors → passed → skipped', () => {
     const tests: TestCaseResult[] = [
       { name: 'pass', status: 'passed' },
+      { name: 'err', status: 'error' },
       { name: 'fail', status: 'failed' },
       { name: 'skip', status: 'skipped' },
+      { name: 'fail2', status: 'failed' },
     ]
-    expect(defaultVisibleTests(tests)).toMatchObject({
-      tests: [tests[1]],
-      hiddenCount: 2,
+    expect(defaultVisibleTests(tests).map((test) => test.name))
+      .toEqual(['fail', 'fail2', 'err', 'pass', 'skip'])
+    // A live run keeps arrival order so rows do not jump while streaming.
+    expect(defaultVisibleTests(tests, true)).toEqual(tests)
+  })
+
+  it('produces a character-level diff only for differing single-line values', () => {
+    expect(charDiffSegments('[1, 2, 3]', '[1, 4, 3]')).toEqual({
+      prefix: '[1, ',
+      expectedMid: '2',
+      actualMid: '4',
+      suffix: ', 3]',
     })
-    expect(defaultVisibleTests(tests, true).tests).toEqual(tests)
+    expect(charDiffSegments('abc', 'abcdef')).toEqual({
+      prefix: 'abc',
+      expectedMid: '',
+      actualMid: 'def',
+      suffix: '',
+    })
+    expect(charDiffSegments('same', 'same')).toBeNull()
+    expect(charDiffSegments('multi\nline', 'multi line')).toBeNull()
+  })
+})
+
+describe('daily problem file matching', () => {
+  const files: ProblemFileEntry[] = [
+    { path: 'src/main/java/easy/Q1TwoSum.java', name: 'Q1TwoSum.java', packageSegment: 'easy' },
+    { path: 'src/main/java/easy/Q3622CheckDivisibilityByDigitSumAndProduct2.java', name: 'Q3622CheckDivisibilityByDigitSumAndProduct2.java', packageSegment: 'easy' },
+    { path: 'notes/Q3622CheckDivisibilityByDigitSumAndProduct.md', name: 'Q3622CheckDivisibilityByDigitSumAndProduct.md', packageSegment: 'other' },
+  ]
+
+  it('matches the base class name or a numeric collision suffix, Java files only', () => {
+    expect(findTodayProblemFile(files, {
+      frontendId: '3622',
+      title: 'Check Divisibility by Digit Sum and Product',
+    })).toBe(files[1])
+    expect(findTodayProblemFile(files, { frontendId: '2', title: 'Add Two Numbers' })).toBeNull()
+  })
+})
+
+describe('git result toast copy', () => {
+  it('reports the short hash with file count or push target', () => {
+    const commit = { commitHash: 'a1b2c3d4e5f6', message: 'Add Q1.java', paths: ['Q1.java'] }
+    expect(gitResultToastMessage(1, false, commit, null)).toBe('Committed a1b2c3d · 1 file')
+    expect(gitResultToastMessage(2, true, commit, { output: '', branch: 'main' }))
+      .toBe('Committed a1b2c3d · Pushed to origin/main')
+    expect(gitResultToastMessage(2, false, null, null)).toBe('Committed · 2 files')
+    expect(gitResultToastMessage(1, true, commit, null)).toBe('Committed a1b2c3d · Pushed')
+  })
+
+  it('splits a repo-relative path into directory and basename', () => {
+    expect(gitDirectoryPath('src/main/java/easy/Q1.java')).toBe('src/main/java/easy')
+    expect(gitDirectoryPath('README.md')).toBe('')
   })
 })

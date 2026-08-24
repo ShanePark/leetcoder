@@ -3,8 +3,12 @@ import { open } from '@tauri-apps/plugin-dialog'
 import {
   createBackendClient,
   errorMessage,
+  normalizeGitCommitResult,
+  normalizeGitPushResult,
   type BackendClient,
   type DailyProblem,
+  type GitCommitResult,
+  type GitPushResult,
   type ProblemFileEntry,
   type TestResult,
   type TestCaseResult,
@@ -12,13 +16,16 @@ import {
   type TestPhase,
   type TestRunProgress,
 } from './backend'
+import { classNameFromProblem } from './domain'
 import { JavaEditor, type EditorIssue } from './editor'
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
+import { sanitizeProblemHtml } from './sanitize'
 
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
 const BOTTOM_PANEL_HEIGHT_KEY = 'leetcoder.bottom-panel-height'
 const GIT_FILE_LIST_WIDTH_KEY = 'leetcoder.git-file-list-width'
+const DAILY_DESCRIPTION_KEY = 'leetcoder.daily-description'
 const DEFAULT_BOTTOM_PANEL_HEIGHT = 280
 const MIN_BOTTOM_PANEL_HEIGHT = 180
 const MAX_BOTTOM_PANEL_HEIGHT = 640
@@ -33,11 +40,19 @@ const DAILY_RETRY_INTERVAL_MS = 60_000
 const FILE_CONTEXT_MENU_WIDTH = 96
 const FILE_CONTEXT_MENU_HEIGHT = 38
 const VIEWPORT_MARGIN = 8
+const SAVED_FLASH_MS = 1500
+const TOAST_DISMISS_MS = 3000
+const MAX_VISIBLE_TOASTS = 3
 const FILE_GROUPS: Array<{ key: ProblemFileEntry['packageSegment']; label: string }> = [
   { key: 'easy', label: 'Easy' },
   { key: 'medium', label: 'Medium' },
   { key: 'xhard', label: 'Hard' },
 ]
+/** Files outside the difficulty packages; shown only when the group is non-empty. */
+const OTHER_GROUP: { key: ProblemFileEntry['packageSegment']; label: string } = {
+  key: 'other',
+  label: 'Other',
+}
 
 export type DirectoryPicker = () => Promise<string | null>
 
@@ -185,7 +200,7 @@ export function presentTestResult(result: TestResult): TestResultPresentation {
 
 export function testResultBannerMessage(result: TestResult): string {
   if (result.success) {
-    return 'Test passed.'
+    return 'All tests passed'
   }
   const reason = testFailureMessage(result)
   const phase = normalizeTestPhase(result.phase)
@@ -320,15 +335,89 @@ export function relevantTestStackFrames(details: string | null | undefined): str
     .slice(0, 4)
 }
 
+/**
+ * Every test stays visible. For a finished run the list is bucketed so the
+ * actionable rows come first (failed, then errors, then passed, then
+ * skipped/other) while report order is preserved within each bucket. A live
+ * run keeps arrival order so rows do not jump while results stream in.
+ */
 export function defaultVisibleTests(
   tests: TestCaseResult[],
   isRunning = false,
-): { tests: TestCaseResult[]; hiddenCount: number } {
-  if (isRunning || !tests.some((test) => test.status === 'failed' || test.status === 'error')) {
-    return { tests, hiddenCount: 0 }
+): TestCaseResult[] {
+  if (isRunning) {
+    return tests
   }
-  const visible = tests.filter((test) => test.status === 'failed' || test.status === 'error')
-  return { tests: visible, hiddenCount: tests.length - visible.length }
+  const bucket = (test: TestCaseResult): number => {
+    switch (test.status) {
+      case 'failed':
+        return 0
+      case 'error':
+        return 1
+      case 'skipped':
+        return 3
+      default:
+        return 2
+    }
+  }
+  return tests
+    .map((test, index) => ({ test, index }))
+    .sort((left, right) => bucket(left.test) - bucket(right.test) || left.index - right.index)
+    .map((entry) => entry.test)
+}
+
+/**
+ * Character-level diff for single-line Expected/Actual values: the common
+ * prefix and suffix stay plain while the differing middle of each value is
+ * highlighted. Returns null when a character diff would not help (multi-line
+ * values or equal strings).
+ */
+export function charDiffSegments(
+  expected: string,
+  actual: string,
+): { prefix: string; expectedMid: string; actualMid: string; suffix: string } | null {
+  if (expected === actual || expected.includes('\n') || actual.includes('\n')) {
+    return null
+  }
+  let prefix = 0
+  const maxPrefix = Math.min(expected.length, actual.length)
+  while (prefix < maxPrefix && expected[prefix] === actual[prefix]) {
+    prefix += 1
+  }
+  let suffix = 0
+  while (
+    suffix < maxPrefix - prefix
+    && expected[expected.length - 1 - suffix] === actual[actual.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+  return {
+    prefix: expected.slice(0, prefix),
+    expectedMid: expected.slice(prefix, expected.length - suffix),
+    actualMid: actual.slice(prefix, actual.length - suffix),
+    suffix: expected.slice(expected.length - suffix),
+  }
+}
+
+/**
+ * Find the sidebar entry that already solves today's problem: the class name
+ * must be the problem's base class name or the base name plus a numeric
+ * collision suffix (the repository convention for repeat solves).
+ */
+export function findTodayProblemFile(
+  files: ProblemFileEntry[],
+  problem: Pick<DailyProblem, 'frontendId' | 'title'>,
+): ProblemFileEntry | null {
+  let base: string
+  try {
+    base = classNameFromProblem(problem.frontendId, problem.title)
+  } catch {
+    return null
+  }
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`^${escaped}\\d*$`)
+  return files.find((file) => /\.java$/i.test(file.path)
+    && pattern.test(file.name.replace(/\.java$/i, ''))) ?? null
 }
 
 function isInternalTestFrame(line: string): boolean {
@@ -370,15 +459,68 @@ export function gitFileName(path: string): string {
   return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized
 }
 
-export function defaultGitCommitMessage(paths: string[]): string {
-  const normalized = paths.filter((path) => path.trim().length > 0)
+/** Directory portion of a repo-relative path, or '' for a root-level file. */
+export function gitDirectoryPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/').replace(/\/$/, '')
+  const separator = normalized.lastIndexOf('/')
+  return separator > 0 ? normalized.slice(0, separator) : ''
+}
+
+/**
+ * Auto commit message chosen by change kind: brand-new files read `Add …`,
+ * anything touching an existing file reads `Update …`.
+ */
+export function defaultGitCommitMessage(files: Array<Pick<GitChangedFile, 'path' | 'status'>>): string {
+  const normalized = files.filter((file) => file.path.trim().length > 0)
   if (normalized.length === 0) {
-    return 'Create selected files'
+    return 'Update files'
   }
+  const isNew = (status: string): boolean => status === 'added' || status === 'untracked'
+  const allNew = normalized.every((file) => isNew(file.status))
   if (normalized.length === 1) {
-    return `Create ${gitFileName(normalized[0])}`
+    return `${allNew ? 'Add' : 'Update'} ${gitFileName(normalized[0].path)}`
   }
-  return `Create ${gitFileName(normalized[0])} and ${normalized.length - 1} more`
+  return `${allNew ? 'Add' : 'Update'} ${normalized.length} files`
+}
+
+/** Best-effort commit-result parse; older backends may return anything. */
+function asGitCommitResult(value: unknown): GitCommitResult | null {
+  try {
+    return normalizeGitCommitResult(value)
+  } catch {
+    return null
+  }
+}
+
+/** Best-effort push-result parse; older backends may return anything. */
+function asGitPushResult(value: unknown): GitPushResult | null {
+  try {
+    return normalizeGitPushResult(value)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Success toast for commit / commit-and-push, e.g. `Committed a1b2c3d · 2 files`
+ * or `Committed a1b2c3d · Pushed to origin/main`. Falls back gracefully when a
+ * backend response could not be parsed.
+ */
+export function gitResultToastMessage(
+  fileCount: number,
+  pushed: boolean,
+  commit: GitCommitResult | null,
+  push: GitPushResult | null,
+): string {
+  const files = `${fileCount} file${fileCount === 1 ? '' : 's'}`
+  const committed = commit?.commitHash
+    ? `Committed ${commit.commitHash.slice(0, 7)}`
+    : 'Committed'
+  if (!pushed) {
+    return `${committed} · ${files}`
+  }
+  const pushedLabel = push?.branch ? `Pushed to origin/${push.branch}` : 'Pushed'
+  return `${committed} · ${pushedLabel}`
 }
 
 /** Normalize the backend's Git status payload into the fields the UI needs. */
@@ -1032,6 +1174,14 @@ export class LeetcoderApp {
   private dailyRefreshTimer: ReturnType<typeof setTimeout> | null = null
   private dailyRequestId = 0
   private pendingGitDiffPath: string | null = null
+  private saveWriteInFlight = false
+  private savedFlash = false
+  private savedFlashTimer: ReturnType<typeof setTimeout> | null = null
+  private shortcutsOpen = false
+  private dailyDescriptionOpen = false
+  private errorToastElement: HTMLElement | null = null
+  private sanitizedDescriptionSource: string | null = null
+  private sanitizedDescriptionElement: HTMLElement | null = null
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     FILE_GROUPS.map((group) => group.key),
   )
@@ -1152,16 +1302,29 @@ export class LeetcoderApp {
 
   private readonly handleContextMenuOutside = (event: PointerEvent): void => {
     const menu = this.root.querySelector<HTMLElement>('#file-context-menu')
-    if (!menu || menu.hidden || event.target instanceof Node && menu.contains(event.target)) {
-      return
+    if (menu && !menu.hidden && !(event.target instanceof Node && menu.contains(event.target))) {
+      this.closeFileContextMenu()
     }
-    this.closeFileContextMenu()
+    if (this.shortcutsOpen) {
+      const popover = this.root.querySelector<HTMLElement>('#shortcuts-popover')
+      const trigger = this.root.querySelector<HTMLElement>('#shortcuts-button')
+      const target = event.target instanceof Node ? event.target : null
+      if (!(target && (popover?.contains(target) || trigger?.contains(target)))) {
+        this.setShortcutsOpen(false)
+      }
+    }
   }
 
   private readonly handleContextMenuKeydown = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape' && this.state.contextMenu) {
+    if (event.key !== 'Escape') {
+      return
+    }
+    if (this.state.contextMenu) {
       event.preventDefault()
       this.closeFileContextMenu()
+    } else if (this.shortcutsOpen) {
+      event.preventDefault()
+      this.setShortcutsOpen(false)
     }
   }
 
@@ -1189,6 +1352,7 @@ export class LeetcoderApp {
     this.storage = options.storage ?? safeStorage()
     this.bottomPanelHeight = readBottomPanelHeight(this.storage)
     this.gitFileListWidth = readGitFileListWidth(this.storage)
+    this.dailyDescriptionOpen = this.storage?.getItem(DAILY_DESCRIPTION_KEY) === 'open'
     this.renderShell()
     this.autosave = new AutosaveCoordinator(
       (snapshot) => this.persistSnapshot(snapshot),
@@ -1271,6 +1435,7 @@ export class LeetcoderApp {
     window.removeEventListener('pointerdown', this.handleContextMenuOutside)
     window.removeEventListener('keydown', this.handleContextMenuKeydown)
     this.clearScheduledDailyRefresh()
+    this.clearSavedFlash()
     this.destroyed = true
   }
 
@@ -1278,26 +1443,24 @@ export class LeetcoderApp {
     this.root.innerHTML = `
       <div class="app-shell">
         <header class="app-header">
-          <h1>leetcoder</h1>
-          <div class="repository-toolbar">
-            <strong id="repo-path">Choose a repository</strong>
-            <button id="choose-repository" class="secondary-button" type="button">Choose</button>
-          </div>
+          <span class="wordmark">leetcoder</span>
+          <button id="choose-repository" class="repo-chip" type="button">
+            <span id="repo-path" class="repo-chip-label">Choose repository</span>
+          </button>
         </header>
-
-        <div class="app-status" id="app-status" role="status" aria-live="polite"></div>
 
         <main class="workspace">
           <aside class="sidebar" aria-label="Problem files">
             <div class="sidebar-heading">
-              <h2>Problems</h2>
-              <button id="refresh-files" class="icon-button" type="button" aria-label="Refresh problem files" title="Refresh files"></button>
+              <span class="micro-label">Problems</span>
+              <span id="file-count" class="sidebar-count"></span>
+              <button id="refresh-files" class="icon-button" type="button" aria-label="Refresh problem files" title="Refresh"></button>
             </div>
             <div class="file-search">
               <label class="sr-only" for="file-search">Search problems</label>
               <div class="file-search-field">
                 <span id="file-search-icon" aria-hidden="true"></span>
-                <input id="file-search" type="search" placeholder="Search problems" autocomplete="off" spellcheck="false">
+                <input id="file-search" type="search" placeholder="Search" autocomplete="off" spellcheck="false">
               </div>
             </div>
             <div id="file-list" class="file-list"></div>
@@ -1305,28 +1468,26 @@ export class LeetcoderApp {
 
           <section class="editor-column" aria-label="Code editor">
             <section class="daily-card" aria-label="Today's problem">
-              <div id="daily-content" class="daily-content"></div>
-              <div class="daily-actions">
-                <a id="problem-link" class="problem-link" href="#" target="_blank" rel="noreferrer">Open</a>
-                <button id="create-file" class="primary-button" type="button">New file</button>
-              </div>
+              <div id="daily-header" class="daily-header"></div>
+              <div id="daily-description" class="daily-description" hidden></div>
             </section>
 
             <section class="code-card">
               <div class="code-toolbar">
                 <div class="file-heading">
-                  <strong id="selected-file">No file selected</strong>
-                  <span id="dirty-indicator" class="dirty-indicator" hidden>Unsaved</span>
+                  <span id="selected-file" class="selected-file"></span>
                   <span id="save-status" class="save-status" aria-live="polite"></span>
                 </div>
                 <div class="code-actions">
+                  <button id="shortcuts-button" class="icon-button" type="button" aria-label="Keyboard shortcuts" title="Shortcuts" aria-haspopup="dialog" aria-expanded="false"></button>
                   <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">Ctrl+R</kbd></button>
                 </div>
               </div>
               <div class="editor-host" id="editor-host" aria-label="Java source editor">
                 <div id="editor" class="editor"></div>
-                <div id="editor-empty" class="editor-empty">Choose a file from the left to start coding.</div>
+                <div id="editor-empty" class="editor-empty"></div>
               </div>
+              <div id="shortcuts-popover" class="shortcuts-popover" role="dialog" aria-label="Keyboard shortcuts" hidden></div>
             </section>
           </section>
         </main>
@@ -1346,54 +1507,24 @@ export class LeetcoderApp {
             <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests</button>
             <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git</button>
           </div>
-          <section id="tests-panel" class="results-card" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">
-          <div class="results-heading-row">
-            <div class="results-heading-main">
-              <span id="result-badge" class="result-badge" aria-hidden="true">·</span>
-              <div class="results-heading-copy">
-                <h2 id="results-heading">Tests</h2>
-                <span id="result-phase" class="result-phase">No run yet</span>
-              </div>
-            </div>
-            <div class="result-status-stack">
-              <span id="result-status" class="result-status" aria-live="polite">No run yet</span>
-              <span id="result-elapsed" class="result-elapsed"></span>
-            </div>
-          </div>
-          <div id="test-summary" class="test-summary" aria-live="polite">Run the current class to see results.</div>
-          <div id="failure-panel" class="failure-panel" role="alert" hidden>
-            <strong id="failure-panel-title"></strong>
-            <p id="failure-panel-message"></p>
-          </div>
-          <div id="test-list" class="test-list"></div>
-          <div id="diagnostics" class="diagnostics"></div>
-          <details id="raw-logs" class="raw-logs">
-            <summary id="raw-logs-summary">Details / debug output</summary>
-            <div class="result-columns">
-              <div class="result-pane">
-                <span class="result-label">stdout</span>
-                <pre id="stdout"></pre>
-              </div>
-              <div class="result-pane">
-                <span class="result-label">stderr</span>
-                <pre id="stderr"></pre>
-              </div>
-            </div>
-          </details>
+          <section id="tests-panel" class="tests-panel" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">
+            <div id="test-status-row" class="test-status-row"></div>
+            <div id="test-body" class="test-body"></div>
           </section>
-          <section id="git-panel" class="git-card" role="tabpanel" aria-labelledby="git-tab" hidden>
+          <section id="git-panel" class="git-panel" role="tabpanel" aria-labelledby="git-tab" hidden>
             <div class="git-toolbar">
               <div class="git-heading">
-                <span class="git-branch-icon" aria-hidden="true">⑂</span>
-                <strong id="git-branch">Git changes</strong>
-                <span id="git-file-count" class="git-file-count"></span>
+                <span id="git-branch-icon" class="git-branch-icon" aria-hidden="true"></span>
+                <span class="git-heading-label">Changes</span>
+                <span id="git-file-count" class="git-count"></span>
+                <span id="git-branch" class="git-branch-name"></span>
               </div>
               <div class="git-actions">
-                <button id="git-select-all" class="secondary-button" type="button">Select all</button>
-                <button id="git-select-none" class="secondary-button" type="button">Clear</button>
+                <button id="git-select-all" class="text-button" type="button">Select all</button>
+                <button id="git-select-none" class="text-button" type="button">Clear</button>
               </div>
             </div>
-            <div id="git-status" class="git-status" role="status" aria-live="polite"></div>
+            <div id="git-status" class="git-status" role="status" aria-live="polite" hidden></div>
             <div class="git-workspace">
               <div id="git-file-list" class="git-file-list" aria-label="Changed files"></div>
               <div
@@ -1408,24 +1539,21 @@ export class LeetcoderApp {
               ><span aria-hidden="true"></span></div>
               <div class="git-diff-pane">
                 <div class="git-diff-heading">
-                  <strong id="git-diff-file">Select a changed file</strong>
+                  <span id="git-diff-file" class="git-diff-file">Select a file</span>
                   <span id="git-diff-state" class="git-diff-state"></span>
                 </div>
                 <div id="git-diff" class="git-diff" aria-label="Unified diff"></div>
               </div>
             </div>
             <div class="git-commit-bar">
-              <label class="git-commit-field" for="git-commit-message">
-                <span>Commit message</span>
-                <input id="git-commit-message" type="text" autocomplete="off" spellcheck="false">
-              </label>
-              <div class="git-commit-actions">
-                <button id="git-commit" class="primary-button" type="button">Commit</button>
-                <button id="git-commit-push" class="secondary-button" type="button">Commit &amp; Push</button>
-              </div>
+              <label class="sr-only" for="git-commit-message">Commit message</label>
+              <input id="git-commit-message" type="text" autocomplete="off" spellcheck="false">
+              <button id="git-commit" class="secondary-button" type="button">Commit</button>
+              <button id="git-commit-push" class="primary-button" type="button">Commit &amp; Push</button>
             </div>
           </section>
         </section>
+        <div id="toast-stack" class="toast-stack" role="status" aria-live="polite"></div>
         <div id="file-context-menu" class="file-context-menu" role="menu" aria-label="File actions" hidden>
           <button id="delete-file-action" class="file-context-menu-item" type="button" role="menuitem">
             <span id="delete-file-label">Delete</span>
@@ -1434,16 +1562,90 @@ export class LeetcoderApp {
       </div>
     `
     this.installStaticIcons()
+    this.renderEditorEmptyState()
+    this.renderShortcutsPopoverContent()
   }
 
   private installStaticIcons(): void {
     this.element<HTMLButtonElement>('#choose-repository').prepend(iconFor('folderOpen', 'button-icon'))
     this.element<HTMLButtonElement>('#refresh-files').append(iconFor('refresh', 'button-icon'))
     this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
-    this.element<HTMLAnchorElement>('#problem-link').prepend(iconFor('externalLink', 'button-icon'))
-    this.element<HTMLButtonElement>('#create-file').prepend(iconFor('filePlus', 'button-icon'))
+    this.element<HTMLButtonElement>('#shortcuts-button').append(iconFor('keyboard', 'button-icon'))
     this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
-    this.element<HTMLElement>('#raw-logs-summary').prepend(iconFor('terminal', 'button-icon'))
+    this.element<HTMLElement>('#git-branch-icon').append(iconFor('gitBranch', 'button-icon'))
+  }
+
+  /** The keyboard rows shown in the empty state and the shortcuts popover. */
+  private shortcutRows(): Array<{ label: string; keys: string[] }> {
+    const mac = isMacPlatform()
+    return [
+      { label: 'Save', keys: mac ? ['⌘S'] : ['Ctrl+S'] },
+      { label: 'Run test', keys: mac ? ['⌘R'] : ['Ctrl+R'] },
+      { label: 'Duplicate line', keys: mac ? ['⌘D'] : ['Ctrl+D'] },
+      { label: 'Delete line', keys: mac ? ['⌘⌫'] : ['Ctrl+⌫'] },
+      { label: 'JavaDoc comment', keys: mac ? ['⇧⌘J'] : ['Shift+Ctrl+J'] },
+      { label: 'Autocomplete', keys: mac ? ['⌃Space'] : ['Ctrl+Space'] },
+      { label: 'Go to definition', keys: mac ? ['⌘Click'] : ['Ctrl+Click'] },
+    ]
+  }
+
+  private renderEditorEmptyState(): void {
+    const empty = this.element<HTMLElement>('#editor-empty')
+    empty.innerHTML = ''
+    empty.append(iconFor('fileCode', 'editor-empty-icon'))
+    const copy = document.createElement('p')
+    copy.className = 'editor-empty-copy'
+    copy.textContent = 'Select a problem to start'
+    empty.append(copy)
+    const hints = document.createElement('div')
+    hints.className = 'editor-empty-hints'
+    const mac = isMacPlatform()
+    const pairs: Array<[string, string]> = mac
+      ? [['⌘R', 'Run test'], ['⌘S', 'Save'], ['⌘D', 'Duplicate line'], ['⇧⌘J', 'JavaDoc'], ['⌃Space', 'Complete'], ['⌘Click', 'Definition']]
+      : [['Ctrl+R', 'Run test'], ['Ctrl+S', 'Save'], ['Ctrl+D', 'Duplicate line'], ['Shift+Ctrl+J', 'JavaDoc'], ['Ctrl+Space', 'Complete'], ['Ctrl+Click', 'Definition']]
+    for (const [keys, label] of pairs) {
+      const hint = document.createElement('span')
+      hint.className = 'editor-empty-hint'
+      const kbd = document.createElement('kbd')
+      kbd.textContent = keys
+      hint.append(kbd, document.createTextNode(` ${label}`))
+      hints.append(hint)
+    }
+    empty.append(hints)
+  }
+
+  private renderShortcutsPopoverContent(): void {
+    const popover = this.element<HTMLElement>('#shortcuts-popover')
+    popover.innerHTML = ''
+    for (const row of this.shortcutRows()) {
+      const item = document.createElement('div')
+      item.className = 'shortcut-row'
+      const label = document.createElement('span')
+      label.className = 'shortcut-label'
+      label.textContent = row.label
+      const keys = document.createElement('span')
+      keys.className = 'shortcut-keys'
+      for (const key of row.keys) {
+        const kbd = document.createElement('kbd')
+        kbd.textContent = key
+        keys.append(kbd)
+      }
+      item.append(label, keys)
+      popover.append(item)
+    }
+  }
+
+  private setShortcutsOpen(open: boolean): void {
+    this.shortcutsOpen = open
+    const popover = this.element<HTMLElement>('#shortcuts-popover')
+    const button = this.element<HTMLButtonElement>('#shortcuts-button')
+    if (open) {
+      const anchor = button.getBoundingClientRect()
+      popover.style.top = `${Math.round(anchor.bottom + 6)}px`
+      popover.style.right = `${Math.round(Math.max(8, window.innerWidth - anchor.right))}px`
+    }
+    popover.hidden = !open
+    button.setAttribute('aria-expanded', String(open))
   }
 
   private bindEvents(): void {
@@ -1453,8 +1655,8 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#refresh-files').addEventListener('click', () => {
       void this.refreshFiles()
     })
-    this.element<HTMLButtonElement>('#create-file').addEventListener('click', () => {
-      void this.createFileForToday()
+    this.element<HTMLButtonElement>('#shortcuts-button').addEventListener('click', () => {
+      this.setShortcutsOpen(!this.shortcutsOpen)
     })
     this.element<HTMLInputElement>('#file-search').addEventListener('input', (event) => {
       this.closeFileContextMenu()
@@ -1505,9 +1707,11 @@ export class LeetcoderApp {
       this.selectNoGitFiles()
     })
     this.element<HTMLInputElement>('#git-commit-message').addEventListener('input', (event) => {
+      // Typing must not re-render the panel — a rerender would fight the
+      // caret. Only the commit-control enablement updates directly.
       this.state.git.commitMessage = (event.target as HTMLInputElement).value
-      this.state.git.commitMessageEdited = true
-      this.renderGitPanel()
+      this.state.git.commitMessageEdited = this.state.git.commitMessage.trim().length > 0
+      this.updateGitCommitControls()
     })
     this.element<HTMLButtonElement>('#git-commit').addEventListener('click', () => {
       void this.commitSelectedGitFiles(false)
@@ -1601,7 +1805,6 @@ export class LeetcoderApp {
       this.resetGitState()
       this.resetCurrentFile()
     }
-    this.setMessage('Checking repository…', 'info')
     try {
       const validation = await this.backend.validateProject(path)
       if (!validation.valid) {
@@ -1614,10 +1817,7 @@ export class LeetcoderApp {
       if (remember) {
         this.storage?.setItem(LAST_REPOSITORY_KEY, path)
       }
-      const filesLoaded = await this.refreshFiles(false)
-      if (filesLoaded) {
-        this.setMessage('Repository ready.', 'success')
-      }
+      await this.refreshFiles()
     } catch (error) {
       this.state.projectValid = false
       this.setMessage(errorMessage(error), 'error')
@@ -1627,7 +1827,7 @@ export class LeetcoderApp {
     }
   }
 
-  private async loadDailyProblem(showMessage = true): Promise<void> {
+  private async loadDailyProblem(): Promise<void> {
     if (this.state.dailyLoading) {
       return
     }
@@ -1645,24 +1845,17 @@ export class LeetcoderApp {
       if (!problemDateKey) {
         this.state.dailyRetryPending = true
         this.state.dailyError = 'The daily problem returned an invalid date.'
-        if (showMessage) {
-          this.setMessage(`Could not load today's problem: ${this.state.dailyError}`, 'error')
-        }
       } else if (problemDateKey !== currentDateKey) {
+        // The provider still serves yesterday's problem. Not an error: the
+        // card shows a waiting state and the retry timer keeps polling.
         this.state.dailyRetryPending = true
         this.state.dailyProblemDateKey = problemDateKey
-        this.state.dailyError = `The daily problem is dated ${problemDateKey}; waiting for ${currentDateKey}.`
-        if (showMessage) {
-          this.setMessage(`Could not load today's problem: ${this.state.dailyError}`, 'error')
-        }
+        this.state.dailyError = null
       } else {
         this.state.dailyProblem = problem
         this.state.dailyProblemDateKey = problemDateKey
         this.state.dailyRetryPending = false
         this.state.dailyError = null
-        if (showMessage) {
-          this.setMessage('Daily problem loaded.', 'success')
-        }
       }
     } catch (error) {
       if (this.destroyed || requestId !== this.dailyRequestId) {
@@ -1670,9 +1863,6 @@ export class LeetcoderApp {
       }
       this.state.dailyRetryPending = true
       this.state.dailyError = errorMessage(error)
-      if (showMessage) {
-        this.setMessage(`Could not load today's problem: ${this.state.dailyError}`, 'error')
-      }
     } finally {
       if (!this.destroyed && requestId === this.dailyRequestId) {
         this.state.dailyLoading = false
@@ -1682,7 +1872,7 @@ export class LeetcoderApp {
     }
   }
 
-  private async refreshFiles(showMessage = true): Promise<boolean> {
+  private async refreshFiles(): Promise<boolean> {
     if (!this.state.repoPath || !this.state.projectValid) {
       return false
     }
@@ -1707,10 +1897,6 @@ export class LeetcoderApp {
       this.markGitStale()
       if (selectedFileRemoved) {
         this.resetCurrentFile()
-      }
-      if (showMessage) {
-        const javaFileCount = files.filter((file) => /\.java$/i.test(file.path)).length
-        this.setMessage(`${javaFileCount} Java file${javaFileCount === 1 ? '' : 's'} found.`, 'success')
       }
       return true
     } catch (error) {
@@ -1763,14 +1949,16 @@ export class LeetcoderApp {
       this.state.selectedFqcn = fqcnFromJavaPath(file.path)
       this.state.dirty = false
       this.state.saveError = null
+      this.clearSavedFlash()
       this.suppressEditorChange = true
       try {
         this.editor.setValue(source)
       } finally {
         this.suppressEditorChange = false
       }
+      // Opening a file reveals its group once; the user can still collapse it.
+      this.expandedGroups.add(file.packageSegment)
       this.editor.focus()
-      this.setMessage(`Opened ${file.name}.`, 'success')
     } catch (error) {
       this.setMessage(`Could not open ${file.name}: ${errorMessage(error)}`, 'error')
     } finally {
@@ -1784,7 +1972,7 @@ export class LeetcoderApp {
       return
     }
     if (!this.state.repoPath || !this.state.projectValid || !this.state.dailyProblem) {
-      this.setMessage('Choose a valid repository and load today’s problem first.', 'error')
+      this.setMessage('Choose a repository first', 'error')
       return
     }
     this.state.busy = true
@@ -1801,7 +1989,7 @@ export class LeetcoderApp {
         javaCodeSnippet: problem.javaSnippet,
       })
       this.markGitStale()
-      await this.refreshFiles(false)
+      await this.refreshFiles()
       const createdFile = this.state.files.find((file) => file.path === plan.path) ?? {
         path: plan.path,
         name: plan.fileName,
@@ -1828,6 +2016,7 @@ export class LeetcoderApp {
     this.state.selectedSource = source
     this.state.dirty = source !== this.state.savedSource
     this.state.saveError = null
+    this.clearSavedFlash()
     if (activeRunId !== null) {
       this.discardStaleTestRun(activeRunId)
       this.renderResult()
@@ -1877,7 +2066,13 @@ export class LeetcoderApp {
   }
 
   private async persistSnapshot(snapshot: AutosaveSnapshot): Promise<void> {
-    await this.backend.saveProblemFile(snapshot.repoPath, snapshot.filePath, snapshot.source)
+    this.saveWriteInFlight = true
+    this.renderFileHeading()
+    try {
+      await this.backend.saveProblemFile(snapshot.repoPath, snapshot.filePath, snapshot.source)
+    } finally {
+      this.saveWriteInFlight = false
+    }
     if (snapshot.repoPath !== this.state.repoPath || snapshot.filePath !== this.state.selectedPath) {
       return
     }
@@ -1886,7 +2081,31 @@ export class LeetcoderApp {
     this.state.saveError = null
     this.element<HTMLElement>('#editor-host').dataset.savedSource = snapshot.source
     this.markGitStale()
+    if (!this.state.dirty) {
+      this.flashSavedIndicator()
+    }
     this.renderFileHeading()
+  }
+
+  /** Briefly surface "Saved" after a successful write, then clear it. */
+  private flashSavedIndicator(): void {
+    this.clearSavedFlash()
+    this.savedFlash = true
+    this.savedFlashTimer = setTimeout(() => {
+      this.savedFlashTimer = null
+      this.savedFlash = false
+      if (!this.destroyed && this.root.querySelector('#save-status')) {
+        this.renderFileHeading()
+      }
+    }, SAVED_FLASH_MS)
+  }
+
+  private clearSavedFlash(): void {
+    if (this.savedFlashTimer !== null) {
+      clearTimeout(this.savedFlashTimer)
+      this.savedFlashTimer = null
+    }
+    this.savedFlash = false
   }
 
   private handleSaveError(error: unknown): void {
@@ -1901,7 +2120,7 @@ export class LeetcoderApp {
       return
     }
     if (!this.state.repoPath || !this.state.selectedPath || !this.state.selectedFqcn) {
-      this.setMessage('Choose a Java file before running a test.', 'error')
+      this.setMessage('Select a Java problem file to run', 'info')
       return
     }
     const runSnapshot: TestRunSourceSnapshot = {
@@ -1928,8 +2147,9 @@ export class LeetcoderApp {
     this.state.testRun = run
     this.state.testResult = null
     this.editor.setIssues([])
+    // A starting run always brings the Tests tab forward so progress is visible.
+    this.selectBottomPanelTab('tests')
     this.renderAll()
-    this.setMessage(`Running ${this.state.selectedFqcn}…`, 'info')
     try {
       if (!(await this.flushPendingSave())) {
         if (this.isCurrentTestRun(runId)) {
@@ -1944,7 +2164,6 @@ export class LeetcoderApp {
           run.status = 'error'
           run.error = testFailureMessage(failure)
           this.state.testResult = failure
-          this.setMessage(`Could not save before running the test: ${run.error}`, 'error')
         }
         return
       }
@@ -1969,10 +2188,10 @@ export class LeetcoderApp {
       run.stderr = result.stderr
       run.activeTest = null
       run.error = result.success ? null : testFailureMessage(result)
-      this.setMessage(
-        testResultBannerMessage(result),
-        result.success ? 'success' : 'error',
-      )
+      if (result.success) {
+        // Failures never toast: the Tests panel is already front and center.
+        this.setMessage(testResultBannerMessage(result), 'success')
+      }
     } catch (error) {
       if (this.isCurrentTestRun(runId)) {
         if (!this.isTestRunSourceCurrent(runSnapshot)) {
@@ -1985,7 +2204,6 @@ export class LeetcoderApp {
         run.error = testFailureMessage(failure)
         run.activeTest = null
         this.state.testResult = failure
-        this.setMessage(`Could not run the test: ${run.error}`, 'error')
       }
     } finally {
       this.state.busy = false
@@ -2014,7 +2232,7 @@ export class LeetcoderApp {
     this.state.testResult = null
     this.renderedTestResult = null
     this.editor.setIssues([])
-    this.setMessage('Test result discarded because the source changed while it was running.', 'info')
+    this.setMessage('Run cancelled — file changed', 'info')
   }
 
   private applyTestRunProgress(runId: number, progress: TestRunProgress): void {
@@ -2160,7 +2378,7 @@ export class LeetcoderApp {
     }
     if (tab === 'git' && this.state.repoPath && this.state.projectValid
       && !this.state.busy && !this.state.git.loading) {
-      void this.refreshGitStatus(false)
+      void this.refreshGitStatus()
     }
   }
 
@@ -2251,7 +2469,7 @@ export class LeetcoderApp {
       // poll remains active after an error, while request guards prevent an
       // older response from painting over a newer repository state.
       this.state.git.stale = false
-      void this.refreshGitStatus(false)
+      void this.refreshGitStatus()
     }, this.state.git.stale ? GIT_REFRESH_DEBOUNCE_MS : GIT_POLL_INTERVAL_MS)
   }
 
@@ -2291,7 +2509,7 @@ export class LeetcoderApp {
     if (this.state.dailyRetryPending
       || !this.state.dailyProblem
       || this.state.dailyProblemDateKey !== currentDateKey) {
-      void this.loadDailyProblem(false)
+      void this.loadDailyProblem()
       return
     }
     this.scheduleDailyProblemRefresh()
@@ -2311,17 +2529,17 @@ export class LeetcoderApp {
       return
     }
     this.clearScheduledGitRefresh()
-    void this.refreshGitStatus(false)
+    void this.refreshGitStatus()
   }
 
   private isWindowVisible(): boolean {
     return typeof document === 'undefined' || document.visibilityState !== 'hidden'
   }
 
-  private async refreshGitStatus(showMessage: boolean, allowBusy = false): Promise<void> {
+  private async refreshGitStatus(allowBusy = false): Promise<void> {
     const repoPath = this.state.repoPath
     if (!repoPath || !this.state.projectValid) {
-      this.state.git.error = 'Choose a valid repository before viewing Git changes.'
+      this.state.git.error = 'Choose a repository first'
       this.renderGitPanel()
       return
     }
@@ -2332,13 +2550,12 @@ export class LeetcoderApp {
     const gitBackend = this.backend as unknown as GitBackendClient
     const method = gitBackend.getGitStatus ?? gitBackend.listGitChanges
     if (!method) {
-      this.state.git.error = 'Git integration is not available in this desktop build.'
+      this.state.git.error = 'Not available in this build'
       this.state.git.loadedRepoPath = repoPath
       this.renderGitPanel()
       return
     }
     const previousPaths = this.state.git.selectedPaths
-    const previousDefault = defaultGitCommitMessage(previousPaths)
     const repositoryGeneration = this.repositoryGeneration
     const requestId = ++this.gitStatusRequestId
     this.pendingGitDiffPath = null
@@ -2365,10 +2582,6 @@ export class LeetcoderApp {
       this.state.git.diffByPath = {}
       this.state.git.fallbackDiff = ''
       this.state.git.loadedRepoPath = repoPath
-      if (!this.state.git.commitMessageEdited || this.state.git.commitMessage === previousDefault) {
-        this.state.git.commitMessage = defaultGitCommitMessage(selectedPaths)
-        this.state.git.commitMessageEdited = false
-      }
       const activePath = this.state.git.activePath
       await this.loadGitDiff(
         repoPath,
@@ -2380,22 +2593,11 @@ export class LeetcoderApp {
         return
       }
       this.state.git.stale = false
-      if (showMessage) {
-        this.setMessage(
-          snapshot.files.length === 0
-            ? 'Working tree is clean.'
-            : `${snapshot.files.length} Git change${snapshot.files.length === 1 ? '' : 's'} found.`,
-          'success',
-        )
-      }
     } catch (error) {
       if (!this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, requestId)) {
         return
       }
       this.state.git.error = errorMessage(error)
-      if (showMessage) {
-        this.setMessage(`Could not load Git changes: ${this.state.git.error}`, 'error')
-      }
     } finally {
       if (this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, requestId)) {
         this.state.git.loading = false
@@ -2419,7 +2621,7 @@ export class LeetcoderApp {
     const method = (this.backend as unknown as GitBackendClient).getGitDiff
     if (!method) {
       if (this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, statusRequestId)) {
-        this.state.git.error = 'Git diff is not available in this desktop build.'
+        this.state.git.error = 'Not available in this build'
       }
       return
     }
@@ -2480,13 +2682,8 @@ export class LeetcoderApp {
     if (this.state.busy || this.state.git.busy) {
       return
     }
-    const previousDefault = defaultGitCommitMessage(this.state.git.selectedPaths)
     this.state.git.selectedPaths = paths.filter((path, index) => paths.indexOf(path) === index)
     this.state.git.error = null
-    if (!this.state.git.commitMessageEdited || this.state.git.commitMessage === previousDefault) {
-      this.state.git.commitMessage = defaultGitCommitMessage(this.state.git.selectedPaths)
-      this.state.git.commitMessageEdited = false
-    }
     this.renderGitPanel()
   }
 
@@ -2512,32 +2709,32 @@ export class LeetcoderApp {
     const repoPath = this.state.repoPath
     const paths = [...this.state.git.selectedPaths]
     if (!repoPath || !this.state.projectValid) {
-      this.state.git.error = 'Choose a valid repository before committing.'
+      this.state.git.error = 'Choose a repository first'
       this.renderGitPanel()
       return
     }
     if (paths.length === 0) {
-      this.state.git.error = 'Select at least one changed file to commit.'
+      this.state.git.error = 'Select at least one file to commit'
       this.renderGitPanel()
       return
     }
     const gitBackend = this.backend as unknown as GitBackendClient
     const method = gitBackend.commitGitChanges ?? gitBackend.commitGit
     if (!method) {
-      this.state.git.error = 'Git commit is not available in this desktop build.'
+      this.state.git.error = 'Not available in this build'
       this.renderGitPanel()
       return
     }
     const pushMethod = gitBackend.pushGit
     if (pushAfterCommit && !pushMethod) {
-      this.state.git.error = 'Git push is not available in this desktop build.'
+      this.state.git.error = 'Not available in this build'
       this.renderGitPanel()
       return
     }
-    const message = this.state.git.commitMessage.trim() || defaultGitCommitMessage(paths)
+    const selectedFiles = this.state.git.files.filter((file) => paths.includes(file.path))
+    const message = this.state.git.commitMessage.trim() || defaultGitCommitMessage(selectedFiles)
     const repositoryGeneration = this.repositoryGeneration
     const operationId = ++this.gitOperationId
-    this.state.git.commitMessage = message
     this.state.busy = true
     this.state.git.busy = true
     this.state.git.error = null
@@ -2547,26 +2744,26 @@ export class LeetcoderApp {
       if (!(await this.flushPendingSave()) || !this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
-      await method(repoPath, paths, message)
+      const commitResult = asGitCommitResult(await method(repoPath, paths, message))
       if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
       committed = true
+      let pushResult: GitPushResult | null = null
       if (pushAfterCommit && pushMethod) {
-        await pushMethod(repoPath)
+        pushResult = asGitPushResult(await pushMethod(repoPath))
       }
       if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
+      this.state.git.commitMessage = ''
       this.state.git.commitMessageEdited = false
-      await this.refreshGitStatus(false, true)
+      await this.refreshGitStatus(true)
       if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
       this.setMessage(
-        pushAfterCommit
-          ? `Committed and pushed ${paths.length} file${paths.length === 1 ? '' : 's'}.`
-          : `Committed ${paths.length} file${paths.length === 1 ? '' : 's'}.`,
+        gitResultToastMessage(paths.length, pushAfterCommit, commitResult, pushResult),
         'success',
       )
     } catch (error) {
@@ -2576,7 +2773,7 @@ export class LeetcoderApp {
       const failure = errorMessage(error)
       // Git may have staged paths before a commit failure. Refresh the view so
       // the user can see that mutation while retaining the original error.
-      await this.refreshGitStatus(false, true)
+      await this.refreshGitStatus(true)
       if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
@@ -2604,42 +2801,30 @@ export class LeetcoderApp {
     const panel = this.element<HTMLElement>('#git-panel')
     panel.hidden = this.state.bottomPanelTab !== 'git'
     const git = this.state.git
-    const branch = this.element<HTMLElement>('#git-branch')
-    branch.textContent = git.branch ? git.branch : 'Git changes'
-    this.element<HTMLElement>('#git-file-count').textContent = git.files.length > 0
-      ? `${git.files.length} changed`
-      : ''
+    this.element<HTMLElement>('#git-branch').textContent = git.branch ?? ''
+    const count = this.element<HTMLElement>('#git-file-count')
+    count.textContent = git.files.length > 0 ? String(git.files.length) : ''
+    count.hidden = git.files.length === 0
     const status = this.element<HTMLElement>('#git-status')
-    status.className = 'git-status'
     if (git.error) {
-      status.classList.add('is-error')
+      status.hidden = false
       status.textContent = git.error
-    } else if (git.loading) {
-      status.classList.add('is-loading')
-      status.textContent = 'Loading Git changes…'
-    } else if (git.diffLoading) {
-      status.classList.add('is-loading')
-      status.textContent = 'Loading unified diff…'
-    } else if (git.stale) {
-      status.classList.add('is-loading')
-      status.textContent = 'Updating Git changes…'
-    } else if (git.files.length === 0) {
-      status.textContent = git.loadedRepoPath ? 'Working tree is clean.' : 'Open Git to inspect working-tree changes.'
     } else {
-      status.textContent = `${git.selectedPaths.length} file${git.selectedPaths.length === 1 ? '' : 's'} selected for commit.`
+      status.hidden = true
+      status.textContent = ''
     }
 
     const list = this.element<HTMLElement>('#git-file-list')
     list.innerHTML = ''
-    if (git.loading) {
+    if (git.loading && git.files.length === 0) {
       const loading = document.createElement('div')
       loading.className = 'git-empty git-loading'
-      loading.textContent = 'Loading changes…'
+      loading.textContent = 'Loading…'
       list.append(loading)
     } else if (git.files.length === 0) {
       const empty = document.createElement('div')
       empty.className = 'git-empty'
-      empty.textContent = git.error ? 'Unable to load changes.' : 'No local changes.'
+      empty.textContent = 'No changes'
       list.append(empty)
     } else {
       for (const file of git.files) {
@@ -2663,33 +2848,60 @@ export class LeetcoderApp {
         fileButton.disabled = this.state.busy || git.busy
         fileButton.addEventListener('click', () => this.setActiveGitFile(file.path))
         const statusBadge = document.createElement('span')
-        statusBadge.className = `git-file-status git-file-status-${file.status}`
+        statusBadge.className = `git-file-status git-file-status-${normalizeGitStatusLabel(file.status)}`
         statusBadge.textContent = gitStatusGlyph(file.status)
         statusBadge.setAttribute('aria-label', file.status)
         const fileName = document.createElement('span')
         fileName.className = 'git-file-name'
         fileName.textContent = gitFileName(file.path)
-        const filePath = document.createElement('span')
-        filePath.className = 'git-file-path'
-        filePath.textContent = file.path
+        fileButton.append(statusBadge, fileName)
+        const dirPath = gitDirectoryPath(file.path)
+        if (dirPath) {
+          const filePath = document.createElement('span')
+          filePath.className = 'git-file-path'
+          // The LRM guards keep punctuation from flipping when direction:rtl
+          // is used to ellipsize the head of the path instead of the tail.
+          filePath.textContent = `‎${dirPath}‎`
+          filePath.title = dirPath
+          fileButton.append(filePath)
+        }
         const stats = document.createElement('span')
         stats.className = 'git-file-stats'
-        stats.textContent = gitFileStats(file)
-        fileButton.append(statusBadge, fileName, filePath, stats)
+        if (file.additions !== null) {
+          const additions = document.createElement('span')
+          additions.className = 'git-additions'
+          additions.textContent = `+${file.additions}`
+          stats.append(additions)
+        }
+        if (file.deletions !== null) {
+          const deletions = document.createElement('span')
+          deletions.className = 'git-deletions'
+          deletions.textContent = `−${file.deletions}`
+          stats.append(deletions)
+        }
+        fileButton.append(stats)
         row.append(checkbox, fileButton)
         list.append(row)
       }
     }
 
     const activeFile = git.files.find((file) => file.path === git.activePath)
-    this.element<HTMLElement>('#git-diff-file').textContent = activeFile?.path ?? 'Select a changed file'
-    this.element<HTMLElement>('#git-diff-state').textContent = activeFile ? activeFile.status : ''
+    const diffFile = this.element<HTMLElement>('#git-diff-file')
+    diffFile.textContent = activeFile ? gitFileName(activeFile.path) : 'Select a file'
+    if (activeFile) {
+      diffFile.title = activeFile.path
+    } else {
+      diffFile.removeAttribute('title')
+    }
+    const diffState = this.element<HTMLElement>('#git-diff-state')
+    diffState.textContent = activeFile ? normalizeGitStatusLabel(activeFile.status) : ''
+    diffState.hidden = !activeFile
     const diff = this.element<HTMLElement>('#git-diff')
     diff.innerHTML = ''
     if (git.diffLoading && activeFile && !git.diffByPath[activeFile.path]) {
       const loading = document.createElement('div')
       loading.className = 'git-empty git-loading'
-      loading.textContent = 'Loading diff…'
+      loading.textContent = 'Loading…'
       diff.append(loading)
     } else if (activeFile) {
       const text = git.diffByPath[activeFile.path] ?? ''
@@ -2698,13 +2910,13 @@ export class LeetcoderApp {
       } else {
         const empty = document.createElement('div')
         empty.className = 'git-empty'
-        empty.textContent = 'No diff is available for this file.'
+        empty.textContent = 'No diff available'
         diff.append(empty)
       }
     } else {
       const empty = document.createElement('div')
       empty.className = 'git-empty'
-      empty.textContent = git.files.length === 0 ? 'No changes to show.' : 'Select a changed file to view its diff.'
+      empty.textContent = git.files.length === 0 ? 'No changes' : 'Select a file'
       diff.append(empty)
     }
 
@@ -2712,18 +2924,32 @@ export class LeetcoderApp {
     if (input.value !== git.commitMessage) {
       input.value = git.commitMessage
     }
+    this.updateGitCommitControls()
+    this.applyGitFileListWidth()
+  }
+
+  /**
+   * Commit-bar enablement plus the computed placeholder. Kept separate from
+   * renderGitPanel so typing in the message input never rebuilds the panel
+   * (a rebuild would fight the caret).
+   */
+  private updateGitCommitControls(): void {
+    const git = this.state.git
+    const selectedFiles = git.files.filter((file) => git.selectedPaths.includes(file.path))
+    const input = this.element<HTMLInputElement>('#git-commit-message')
+    input.placeholder = defaultGitCommitMessage(selectedFiles)
     input.disabled = this.state.busy || git.busy || git.files.length === 0
-    this.element<HTMLButtonElement>('#git-commit').disabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
-    this.element<HTMLButtonElement>('#git-commit-push').disabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
+    const commitDisabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
+    this.element<HTMLButtonElement>('#git-commit').disabled = commitDisabled
+    this.element<HTMLButtonElement>('#git-commit-push').disabled = commitDisabled
     this.element<HTMLButtonElement>('#git-select-all').disabled = this.state.busy || git.busy || git.loading || git.files.length === 0
     this.element<HTMLButtonElement>('#git-select-none').disabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
-    this.applyGitFileListWidth()
   }
 
   private renderAll(): void {
     this.cancelScheduledLiveRender()
     this.applyBottomPanelHeight()
-    this.element<HTMLElement>('#repo-path').textContent = this.state.repoPath ?? 'Not selected'
+    this.renderHeader()
     this.renderShortcutLabels()
     this.renderDailyProblem()
     this.renderFiles()
@@ -2734,11 +2960,30 @@ export class LeetcoderApp {
     this.renderContextMenu()
     this.element<HTMLButtonElement>('#choose-repository').disabled = this.state.busy
     this.element<HTMLButtonElement>('#refresh-files').disabled = this.state.busy || !this.state.projectValid
-    this.element<HTMLButtonElement>('#create-file').disabled = this.state.busy || this.state.dailyLoading || !this.state.projectValid || !this.state.dailyProblem
-    this.element<HTMLButtonElement>('#run-test').disabled = this.state.busy || !this.state.selectedPath
+    const runButton = this.element<HTMLButtonElement>('#run-test')
+    runButton.disabled = this.state.busy || !this.state.selectedFqcn
+    if (!this.state.selectedFqcn) {
+      runButton.title = 'Select a Java problem file to run'
+    } else {
+      runButton.removeAttribute('title')
+    }
     this.element<HTMLElement>('#editor-empty').hidden = Boolean(this.state.selectedPath)
     this.element<HTMLElement>('#editor-host').classList.toggle('is-empty', !this.state.selectedPath)
     this.scheduleGitRefreshIfNeeded()
+  }
+
+  private renderHeader(): void {
+    const chip = this.element<HTMLButtonElement>('#choose-repository')
+    const label = this.element<HTMLElement>('#repo-path')
+    if (this.state.repoPath) {
+      label.textContent = gitFileName(this.state.repoPath)
+      chip.title = this.state.repoPath
+      chip.classList.remove('is-empty')
+    } else {
+      label.textContent = 'Choose repository'
+      chip.title = 'Choose repository'
+      chip.classList.add('is-empty')
+    }
   }
 
   private renderShortcutLabels(): void {
@@ -2747,46 +2992,165 @@ export class LeetcoderApp {
   }
 
   private renderDailyProblem(): void {
-    const content = this.element<HTMLElement>('#daily-content')
-    const link = this.element<HTMLAnchorElement>('#problem-link')
-    if (!this.state.dailyProblem) {
-      content.innerHTML = ''
-      const message = document.createElement('p')
-      message.className = this.state.dailyError ? 'error-copy' : 'muted-copy'
-      message.textContent = this.state.dailyError
-        ? `Could not load today’s problem: ${this.state.dailyError}`
-        : this.state.dailyLoading ? 'Fetching today’s problem…' : 'Loading today’s problem…'
-      content.append(message)
+    const header = this.element<HTMLElement>('#daily-header')
+    const description = this.element<HTMLElement>('#daily-description')
+    header.innerHTML = ''
+    const problem = this.state.dailyProblem
+
+    if (!problem) {
+      description.hidden = true
       if (this.state.dailyLoading) {
-        content.append(createIndeterminateProgress('Fetching today’s problem'))
+        header.append(this.renderDailySkeleton())
+      } else if (this.state.dailyError) {
+        header.append(this.renderDailyError())
+      } else {
+        const waiting = document.createElement('span')
+        waiting.className = 'daily-waiting'
+        waiting.textContent = 'Waiting for today’s problem…'
+        header.append(waiting)
       }
-      link.hidden = true
       return
     }
-    const problem = this.state.dailyProblem
-    content.innerHTML = ''
-    content.append(iconFor('calendar', 'daily-icon'))
+
+    const micro = document.createElement('span')
+    micro.className = 'micro-label'
+    micro.textContent = 'Today'
     const number = document.createElement('span')
     number.className = 'problem-number'
     number.textContent = `#${problem.frontendId}`
     const title = document.createElement('strong')
     title.className = 'problem-title'
     title.textContent = problem.title
+    title.title = problem.title
     const difficulty = document.createElement('span')
     difficulty.className = `difficulty difficulty-${problem.difficulty.toLowerCase()}`
     difficulty.textContent = problem.difficulty
-    content.append(number, title, difficulty)
-    if (this.state.dailyLoading) {
-      content.append(createIndeterminateProgress('Fetching today’s problem'))
-    } else if (this.state.dailyError) {
-      const error = document.createElement('span')
-      error.className = 'daily-refresh-error'
-      error.textContent = 'Could not refresh today’s problem.'
-      error.title = this.state.dailyError
-      content.append(error)
-    }
+    header.append(micro, number, title, difficulty)
+
+    const actions = document.createElement('div')
+    actions.className = 'daily-actions'
+
+    const refresh = document.createElement('button')
+    refresh.type = 'button'
+    refresh.className = 'icon-button'
+    refresh.setAttribute('aria-label', 'Refresh today’s problem')
+    refresh.title = 'Refresh'
+    refresh.append(iconFor('refresh', 'button-icon'))
+    refresh.disabled = this.state.busy || this.state.dailyLoading
+    refresh.classList.toggle('is-spinning', this.state.dailyLoading)
+    refresh.addEventListener('click', () => {
+      void this.loadDailyProblem()
+    })
+    actions.append(refresh)
+
+    const link = document.createElement('a')
+    link.className = 'icon-button'
     link.href = problem.url
-    link.hidden = false
+    link.target = '_blank'
+    link.rel = 'noreferrer noopener'
+    link.setAttribute('aria-label', 'Open on LeetCode')
+    link.title = 'Open on LeetCode'
+    link.append(iconFor('externalLink', 'button-icon'))
+    actions.append(link)
+
+    const hasContent = Boolean(problem.content && problem.content.trim().length > 0)
+    if (hasContent) {
+      const toggle = document.createElement('button')
+      toggle.type = 'button'
+      toggle.className = 'icon-button daily-description-toggle'
+      toggle.setAttribute('aria-label', 'Toggle problem description')
+      toggle.setAttribute('aria-expanded', String(this.dailyDescriptionOpen))
+      toggle.setAttribute('aria-controls', 'daily-description')
+      toggle.title = 'Description'
+      toggle.append(iconFor('bookOpen', 'button-icon'))
+      toggle.classList.toggle('is-active', this.dailyDescriptionOpen)
+      toggle.addEventListener('click', () => {
+        this.dailyDescriptionOpen = !this.dailyDescriptionOpen
+        this.storage?.setItem(DAILY_DESCRIPTION_KEY, this.dailyDescriptionOpen ? 'open' : 'closed')
+        this.renderDailyProblem()
+      })
+      actions.append(toggle)
+    }
+
+    const existingFile = findTodayProblemFile(this.state.files, problem)
+    const primary = document.createElement('button')
+    primary.type = 'button'
+    primary.className = 'primary-button daily-primary'
+    primary.textContent = existingFile ? 'Open file' : 'Create file'
+    if (!this.state.projectValid) {
+      primary.disabled = true
+      primary.title = 'Choose a repository first'
+    } else {
+      primary.disabled = this.state.busy
+    }
+    primary.addEventListener('click', () => {
+      if (existingFile) {
+        void this.openFile(existingFile)
+      } else {
+        void this.createFileForToday()
+      }
+    })
+    actions.append(primary)
+    header.append(actions)
+
+    if (hasContent && this.dailyDescriptionOpen) {
+      description.hidden = false
+      this.renderDailyDescription(description, problem.content ?? '')
+    } else {
+      description.hidden = true
+    }
+  }
+
+  private renderDailySkeleton(): HTMLElement {
+    const skeleton = document.createElement('div')
+    skeleton.className = 'daily-skeleton'
+    skeleton.setAttribute('aria-label', 'Loading today’s problem')
+    skeleton.setAttribute('role', 'progressbar')
+    skeleton.setAttribute('aria-busy', 'true')
+    for (const width of ['48px', '220px', '52px']) {
+      const bar = document.createElement('span')
+      bar.className = 'skeleton-bar'
+      bar.style.width = width
+      skeleton.append(bar)
+    }
+    return skeleton
+  }
+
+  private renderDailyError(): HTMLElement {
+    const wrapper = document.createElement('div')
+    wrapper.className = 'daily-error'
+    const message = document.createElement('span')
+    message.className = 'daily-error-copy'
+    message.textContent = 'Couldn’t load today’s problem'
+    if (this.state.dailyError) {
+      message.title = this.state.dailyError
+    }
+    const retry = document.createElement('button')
+    retry.type = 'button'
+    retry.className = 'text-button'
+    retry.textContent = 'Retry'
+    retry.disabled = this.state.dailyLoading
+    retry.addEventListener('click', () => {
+      void this.loadDailyProblem()
+    })
+    wrapper.append(message, retry)
+    return wrapper
+  }
+
+  private renderDailyDescription(container: HTMLElement, content: string): void {
+    // Sanitizing rebuilds a DOM tree; cache it so toggling or unrelated
+    // rerenders do not re-parse the same HTML payload.
+    if (this.sanitizedDescriptionSource !== content || !this.sanitizedDescriptionElement) {
+      const body = document.createElement('div')
+      body.className = 'daily-description-body'
+      body.append(sanitizeProblemHtml(content))
+      this.sanitizedDescriptionSource = content
+      this.sanitizedDescriptionElement = body
+    }
+    if (this.sanitizedDescriptionElement.parentElement !== container) {
+      container.innerHTML = ''
+      container.append(this.sanitizedDescriptionElement)
+    }
   }
 
   private renderFiles(): void {
@@ -2796,21 +3160,19 @@ export class LeetcoderApp {
     if (searchInput.value !== this.state.fileSearch) {
       searchInput.value = this.state.fileSearch
     }
+    const totalCount = this.element<HTMLElement>('#file-count')
     if (!this.state.projectValid) {
+      totalCount.textContent = ''
       const empty = document.createElement('p')
       empty.className = 'muted-copy sidebar-empty'
-      empty.textContent = 'Select the repository folder to see your problems.'
+      empty.textContent = 'Choose a repository to see problems'
       list.append(empty)
       return
     }
 
-    const selectedGroup = this.state.files.find((file) => file.path === this.state.selectedPath)?.packageSegment
-    if (selectedGroup && selectedGroup !== 'other') {
-      this.expandedGroups.add(selectedGroup)
-    }
-
     const searchTerm = this.state.fileSearch.trim()
     const javaFiles = this.state.files.filter((file) => /\.java$/i.test(file.path))
+    totalCount.textContent = javaFiles.length > 0 ? String(javaFiles.length) : ''
     const filteredFiles = filterProblemFiles(javaFiles, searchTerm)
     if (searchTerm && filteredFiles.length === 0) {
       const empty = document.createElement('p')
@@ -2820,50 +3182,42 @@ export class LeetcoderApp {
       return
     }
 
-    for (const group of FILE_GROUPS) {
-      const files = filterProblemFilesByGroup(javaFiles, group.key, searchTerm)
-      if (searchTerm && files.length === 0) {
+    const groups = [...FILE_GROUPS, OTHER_GROUP]
+    const grouped = groups.map((group) => ({
+      group,
+      files: filterProblemFilesByGroup(javaFiles, group.key, searchTerm),
+    }))
+    const anyFiles = grouped.some((entry) => entry.files.length > 0)
+
+    for (const { group, files } of grouped) {
+      // Hide empty groups; when the repository has no files at all, still show
+      // the difficulty skeleton so the structure reads at a glance. The Other
+      // bucket only ever appears when it has files.
+      if (files.length === 0 && (anyFiles || group.key === 'other')) {
         continue
       }
       const section = document.createElement('section')
       section.className = 'file-group'
-      const isCurrentGroup = selectedGroup === group.key
-      const expanded = isCurrentGroup || this.expandedGroups.has(group.key)
+      const expanded = this.expandedGroups.has(group.key)
       section.dataset.expanded = String(expanded)
 
-      const heading = document.createElement('div')
-      heading.className = 'file-group-heading'
       const headingButton = document.createElement('button')
       headingButton.type = 'button'
       headingButton.className = 'file-group-toggle'
       headingButton.setAttribute('aria-expanded', String(expanded))
       headingButton.setAttribute('aria-controls', `file-group-${group.key}`)
-      if (isCurrentGroup) {
-        headingButton.title = 'The current file group stays open'
-      }
       const groupLabel = document.createElement('span')
       groupLabel.className = 'file-group-label'
       groupLabel.append(
         iconFor(expanded ? 'chevronDown' : 'chevronRight', 'group-toggle-icon'),
+        createGroupDot(group.key),
         document.createTextNode(group.label),
       )
       const count = document.createElement('span')
       count.className = 'file-count'
       count.textContent = String(files.length)
       headingButton.append(groupLabel, count)
-      const updateGroupIcon = (nextExpanded: boolean): void => {
-        const previous = groupLabel.querySelector('.group-toggle-icon')
-        previous?.replaceWith(iconFor(nextExpanded ? 'chevronDown' : 'chevronRight', 'group-toggle-icon'))
-      }
       headingButton.addEventListener('click', () => {
-        if (selectedGroup === group.key) {
-          this.expandedGroups.add(group.key)
-          section.dataset.expanded = 'true'
-          headingButton.setAttribute('aria-expanded', 'true')
-          groupList.hidden = false
-          updateGroupIcon(true)
-          return
-        }
         const nextExpanded = !this.expandedGroups.has(group.key)
         if (nextExpanded) {
           this.expandedGroups.add(group.key)
@@ -2873,10 +3227,10 @@ export class LeetcoderApp {
         section.dataset.expanded = String(nextExpanded)
         headingButton.setAttribute('aria-expanded', String(nextExpanded))
         groupList.hidden = !nextExpanded
-        updateGroupIcon(nextExpanded)
+        const previous = groupLabel.querySelector('.group-toggle-icon')
+        previous?.replaceWith(iconFor(nextExpanded ? 'chevronDown' : 'chevronRight', 'group-toggle-icon'))
       })
-      heading.append(headingButton)
-      section.append(heading)
+      section.append(headingButton)
       const groupList = document.createElement('div')
       groupList.className = 'file-group-list'
       groupList.id = `file-group-${group.key}`
@@ -2893,10 +3247,7 @@ export class LeetcoderApp {
         const fileName = document.createElement('span')
         fileName.className = 'file-item-name'
         fileName.textContent = file.name.replace(/\.java$/i, '')
-        button.append(
-          iconFor('fileCode', 'file-item-icon'),
-          fileName,
-        )
+        button.append(fileName)
         button.addEventListener('click', () => {
           void this.openFile(file)
         })
@@ -2975,7 +3326,7 @@ export class LeetcoderApp {
     const method = (this.backend as unknown as FileManagementBackend).deleteProblemFile
     if (!method) {
       this.closeFileContextMenu()
-      this.setMessage('File deletion is not available in this desktop build.', 'error')
+      this.setMessage('Not available in this build', 'error')
       return
     }
     if (!confirmDeleteFile(context.file.name)) {
@@ -2999,7 +3350,7 @@ export class LeetcoderApp {
         this.resetCurrentFile()
       }
       this.markGitStale()
-      await this.refreshFiles(false)
+      await this.refreshFiles()
       if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
@@ -3009,7 +3360,7 @@ export class LeetcoderApp {
         // A backend can report an error after the filesystem mutation has
         // already completed. Re-list files before reporting so the explorer
         // reflects the actual repository state.
-        await this.refreshFiles(false)
+        await this.refreshFiles()
         if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
           return
         }
@@ -3046,209 +3397,228 @@ export class LeetcoderApp {
   private renderFileHeading(): void {
     const selectedFile = this.element<HTMLElement>('#selected-file')
     const file = this.state.files.find((entry) => entry.path === this.state.selectedPath)
-    selectedFile.textContent = file?.name ?? 'No file selected'
-    const dirty = this.element<HTMLElement>('#dirty-indicator')
-    dirty.hidden = !this.state.dirty || this.autosave.status === 'saving'
+    selectedFile.textContent = file?.name ?? ''
     const saveStatus = this.element<HTMLElement>('#save-status')
     saveStatus.className = 'save-status'
+    saveStatus.innerHTML = ''
+    saveStatus.removeAttribute('title')
+    if (!this.state.selectedPath) {
+      this.element<HTMLElement>('#editor-host').dataset.savedSource = this.state.savedSource
+      return
+    }
     if (this.state.saveError) {
       saveStatus.classList.add('is-error')
       saveStatus.textContent = 'Save failed'
       saveStatus.title = this.state.saveError
-    } else if (this.autosave.status === 'saving') {
+    } else if (this.saveWriteInFlight) {
       saveStatus.classList.add('is-saving')
       saveStatus.textContent = 'Saving…'
-      saveStatus.removeAttribute('title')
-    } else {
-      saveStatus.textContent = ''
-      saveStatus.removeAttribute('title')
+    } else if (this.state.dirty || this.autosave.hasPendingChanges) {
+      saveStatus.classList.add('is-unsaved')
+      const dot = document.createElement('span')
+      dot.className = 'save-dot'
+      dot.setAttribute('aria-hidden', 'true')
+      saveStatus.append(dot, document.createTextNode('Unsaved'))
+      saveStatus.title = `Saves automatically · ${isMacPlatform() ? '⌘S' : 'Ctrl+S'}`
+    } else if (this.savedFlash) {
+      saveStatus.classList.add('is-saved')
+      saveStatus.textContent = 'Saved'
     }
     this.element<HTMLElement>('#editor-host').dataset.savedSource = this.state.savedSource
   }
 
   private renderResult(): void {
-    const resultsCard = this.element<HTMLElement>('.results-card')
-    const status = this.element<HTMLElement>('#result-status')
-    const badge = this.element<HTMLElement>('#result-badge')
-    const phaseElement = this.element<HTMLElement>('#result-phase')
-    const elapsedElement = this.element<HTMLElement>('#result-elapsed')
-    const summaryElement = this.element<HTMLElement>('#test-summary')
-    const failurePanel = this.element<HTMLElement>('#failure-panel')
-    const failurePanelTitle = this.element<HTMLElement>('#failure-panel-title')
-    const failurePanelMessage = this.element<HTMLElement>('#failure-panel-message')
-    const testList = this.element<HTMLElement>('#test-list')
-    const diagnosticsElement = this.element<HTMLElement>('#diagnostics')
-    const stdout = this.element<HTMLElement>('#stdout')
-    const stderr = this.element<HTMLElement>('#stderr')
-    const rawLogs = this.element<HTMLDetailsElement>('#raw-logs')
+    const panel = this.element<HTMLElement>('#tests-panel')
+    const statusRow = this.element<HTMLElement>('#test-status-row')
+    const body = this.element<HTMLElement>('#test-body')
     const liveRun = this.state.testRun?.status === 'running' ? this.state.testRun : null
     const result = this.state.testResult ?? (liveRun ? liveSnapshotResult(liveRun) : null)
-    status.className = 'result-status'
-    status.removeAttribute('title')
-    badge.className = 'result-badge'
-    badge.textContent = '·'
-    phaseElement.textContent = 'No run yet'
-    elapsedElement.textContent = ''
-    summaryElement.textContent = ''
-    failurePanel.hidden = true
-    failurePanelTitle.textContent = ''
-    failurePanelMessage.textContent = ''
-    testList.innerHTML = ''
-    diagnosticsElement.innerHTML = ''
-    resultsCard.setAttribute('aria-busy', liveRun ? 'true' : 'false')
+    // Live streaming rebuilds the panel each frame; keep a manually opened
+    // Logs disclosure open across those rebuilds.
+    const previousLogsOpen = body.querySelector<HTMLDetailsElement>('.raw-logs')?.open ?? false
+    statusRow.className = 'test-status-row'
+    statusRow.removeAttribute('title')
+    statusRow.innerHTML = ''
+    body.innerHTML = ''
+    panel.setAttribute('aria-busy', liveRun ? 'true' : 'false')
+
     if (!result) {
-      status.textContent = 'No run yet'
-      summaryElement.textContent = 'Run the current class to see results.'
-      stdout.textContent = ''
-      stderr.textContent = ''
-      rawLogs.open = false
+      statusRow.classList.add('is-idle')
+      const idle = document.createElement('span')
+      idle.className = 'test-idle-copy'
+      const kbd = document.createElement('kbd')
+      kbd.textContent = isMacPlatform() ? '⌘R' : 'Ctrl+R'
+      idle.append(document.createTextNode('Run '), kbd, document.createTextNode(' to test the current file'))
+      statusRow.append(idle)
       this.renderedTestResult = null
       return
     }
+
     const presentation = presentTestResult(result)
     const isRunning = liveRun !== null
-    const isRunnerError = this.state.testRun?.status === 'error'
-      || normalizeTestPhase(result.phase) === 'runner'
+    const phase = normalizeTestPhase(result.phase)
+    const isRunnerError = this.state.testRun?.status === 'error' || phase === 'runner'
     const hasFailure = !result.success || isRunnerError
-    const statusClass = isRunning ? 'is-running' : hasFailure ? 'is-failure' : 'is-success'
-    status.classList.add(statusClass)
-    badge.classList.add(statusClass)
-    badge.textContent = isRunning ? '◌' : !hasFailure ? '✓' : isRunnerError || result.summary.errors > 0 ? '!' : '×'
-    status.textContent = isRunning
-      ? 'Running'
-      : isRunnerError
-        ? 'Error'
-        : hasFailure
-          ? 'Failed'
-          : 'Passed'
-    phaseElement.textContent = isRunning
-      ? `· ${testPhaseLabel(result.phase)}`
-      : testPhaseLabel(result.phase) === 'Tests' ? '' : testPhaseLabel(result.phase)
-    if (isRunning) {
-      elapsedElement.textContent = formatDuration(result.summary.durationMs ?? 0)
-    } else if (result.summary.durationMs !== null && result.summary.durationMs !== undefined) {
-      elapsedElement.textContent = formatDuration(result.summary.durationMs)
-    }
-    const isAssertionFailure = normalizeTestPhase(result.phase) === 'test'
-    const hasFailedTests = result.tests.some((test) => test.status === 'failed' || test.status === 'error')
-    if (!isRunning && !result.success && presentation.failureMessage) {
-      status.title = presentation.failureMessage
-    }
-    // Keep Details / debug output closed by default and preserve any manual
-    // open state while live progress updates replace its contents.
+    const diagnostics = filterTestDiagnostics(result.diagnostics)
+    const errorDiagnostics = diagnostics.filter((entry) => entry.severity.trim().toLowerCase() === 'error')
+    const warningDiagnostics = diagnostics.filter((entry) => entry.severity.trim().toLowerCase() === 'warning')
     this.renderedTestResult = result
-    const summary = result.summary
-    this.renderSummaryBadges(summaryElement, summary, isRunning)
 
-    if (!isRunning && !result.success && (!isAssertionFailure || !hasFailedTests) && presentation.failureMessage) {
-      failurePanel.hidden = false
-      failurePanelTitle.textContent = normalizeTestPhase(result.phase) === 'noTests'
-        ? 'No tests found'
-        : `${presentation.phaseLabel} failed`
-      failurePanelMessage.textContent = presentation.failureMessage
+    if (isRunning) {
+      statusRow.classList.add('is-running')
+      statusRow.append(iconFor('loader', 'test-status-svg is-spinning'))
+      const label = document.createElement('span')
+      label.className = 'test-verdict'
+      label.textContent = liveRunPhaseLabel(result.phase)
+      statusRow.append(label)
+      const factParts = testRunFacts(result.summary)
+      if (factParts.length > 0) {
+        const facts = document.createElement('span')
+        facts.className = 'test-facts'
+        facts.textContent = factParts.join(' · ')
+        statusRow.append(facts)
+      }
+    } else {
+      const verdict = document.createElement('span')
+      verdict.className = 'test-verdict'
+      const factParts: string[] = []
+      if (!hasFailure) {
+        statusRow.classList.add('is-success')
+        statusRow.append(iconFor('check', 'test-status-svg'))
+        verdict.textContent = 'Passed'
+        if (result.summary.total > 0) {
+          factParts.push(`${result.summary.total} test${result.summary.total === 1 ? '' : 's'}`)
+        }
+      } else if (phase === 'compile') {
+        statusRow.classList.add('is-failure')
+        statusRow.append(iconFor('close', 'test-status-svg'))
+        verdict.textContent = 'Compile error'
+        if (errorDiagnostics.length > 0) {
+          factParts.push(`${errorDiagnostics.length} error${errorDiagnostics.length === 1 ? '' : 's'}`)
+        }
+      } else if (phase === 'noTests') {
+        statusRow.classList.add('is-warning')
+        statusRow.append(iconFor('alert', 'test-status-svg'))
+        verdict.textContent = 'No tests ran'
+      } else if (isRunnerError) {
+        statusRow.classList.add('is-error')
+        statusRow.append(iconFor('alert', 'test-status-svg'))
+        verdict.textContent = 'Runner error'
+      } else {
+        statusRow.classList.add('is-failure')
+        statusRow.append(iconFor('close', 'test-status-svg'))
+        verdict.textContent = 'Failed'
+        const failedCount = result.summary.failed + result.summary.errors
+        if (failedCount > 0 && result.summary.total > 0) {
+          factParts.push(`${failedCount} of ${result.summary.total} failed`)
+        }
+      }
+      statusRow.append(verdict)
+      if (result.summary.durationMs !== null && result.summary.durationMs !== undefined && phase !== 'compile') {
+        factParts.push(formatDuration(result.summary.durationMs))
+      }
+      if (factParts.length > 0) {
+        const facts = document.createElement('span')
+        facts.className = 'test-facts'
+        facts.textContent = factParts.join(' · ')
+        statusRow.append(facts)
+      }
+      if (hasFailure && presentation.failureMessage) {
+        statusRow.title = presentation.failureMessage
+      }
     }
 
-    const visibleTests = defaultVisibleTests(result.tests, isRunning)
-    this.renderTestGroups(testList, visibleTests.tests)
-    if (visibleTests.hiddenCount > 0) {
-      const hidden = document.createElement('div')
-      hidden.className = 'test-filter-note'
-      hidden.textContent = `${visibleTests.hiddenCount} non-failing test${visibleTests.hiddenCount === 1 ? '' : 's'} hidden`
-      testList.append(hidden)
+    // Diagnostic cards: errors inline (compile and runner failures alike —
+    // the runner message carries JDK guidance), warnings behind a disclosure.
+    if (!isRunning) {
+      for (const diagnostic of errorDiagnostics) {
+        body.append(this.renderDiagnostic(diagnostic))
+      }
+      if (warningDiagnostics.length > 0) {
+        const details = document.createElement('details')
+        details.className = 'diagnostics-warnings'
+        const heading = document.createElement('summary')
+        heading.textContent = `${warningDiagnostics.length} warning${warningDiagnostics.length === 1 ? '' : 's'}`
+        details.append(heading)
+        for (const diagnostic of warningDiagnostics) {
+          details.append(this.renderDiagnostic(diagnostic))
+        }
+        body.append(details)
+      }
+    }
+
+    // A phase without per-test rows explains itself in a full-width note.
+    const hasFailedTestRows = result.tests.some((test) => test.status === 'failed' || test.status === 'error')
+    if (!isRunning && hasFailure) {
+      if (phase === 'noTests') {
+        const note = document.createElement('div')
+        note.className = 'run-note run-note-no-tests'
+        const hint = document.createElement('p')
+        hint.className = 'run-note-message'
+        hint.textContent = 'No tests were found in this class. Add an @Test method with an assertion.'
+        note.append(hint)
+        body.append(note)
+      } else if (
+        phase !== 'compile'
+        && errorDiagnostics.length === 0
+        && (phase !== 'test' || !hasFailedTestRows)
+        && presentation.failureMessage
+      ) {
+        const note = document.createElement('div')
+        note.className = 'run-note run-note-runner'
+        const message = document.createElement('p')
+        message.className = 'run-note-message'
+        message.textContent = presentation.failureMessage
+        note.append(message)
+        body.append(note)
+      }
+    }
+
+    const list = document.createElement('div')
+    list.className = 'test-list'
+    for (const test of defaultVisibleTests(result.tests, isRunning)) {
+      list.append(this.renderTestCase(test))
     }
     if (isRunning && result.tests.length === 0) {
       const empty = document.createElement('div')
       empty.className = 'test-empty test-empty-running'
-      empty.textContent = `Running · ${testPhaseLabel(result.phase)}…`
-      testList.append(empty)
-    } else if (!isRunning && result.tests.length === 0 && result.phase !== 'compile') {
+      empty.textContent = liveRunPhaseLabel(result.phase)
+      list.append(empty)
+    } else if (!isRunning && result.tests.length === 0 && phase !== 'compile' && phase !== 'noTests' && !isRunnerError) {
       const empty = document.createElement('div')
       empty.className = 'test-empty'
       empty.textContent = 'No tests were reported.'
-      testList.append(empty)
+      list.append(empty)
     }
-    const diagnostics = filterTestDiagnostics(result.diagnostics)
-    if (diagnostics.length > 0) {
-      const details = document.createElement('details')
-      details.className = 'diagnostics-details'
-      const heading = document.createElement('summary')
-      heading.textContent = `Diagnostics (${diagnostics.length})`
-      details.append(heading)
-      for (const diagnostic of diagnostics) {
-        details.append(this.renderDiagnostic(diagnostic))
-      }
-      diagnosticsElement.append(details)
+    if (list.childElementCount > 0) {
+      body.append(list)
     }
-    stdout.textContent = result.stdout || '(no stdout)'
-    stderr.textContent = result.stderr || '(no stderr)'
-  }
 
-  private renderSummaryBadges(
-    container: HTMLElement,
-    summary: TestResult['summary'],
-    isRunning: boolean,
-  ): void {
-    const parts: Array<{ label: string; value: number; className: string }> = [
-      { label: 'total', value: summary.total, className: 'summary-total' },
-      { label: 'passed', value: summary.passed, className: 'summary-passed' },
-      { label: 'failed', value: summary.failed, className: 'summary-failed' },
-      { label: 'errors', value: summary.errors, className: 'summary-errors' },
-      { label: 'skipped', value: summary.skipped, className: 'summary-skipped' },
-    ]
-    const visibleParts = parts.filter((part) => part.value > 0)
-    for (const part of visibleParts) {
-      const badge = document.createElement('span')
-      badge.className = `summary-badge ${part.className}`
-      badge.textContent = `${part.value} ${part.label}`
-      container.append(badge)
-    }
-    if (summary.durationMs !== null && summary.durationMs !== undefined) {
-      const duration = document.createElement('span')
-      duration.className = 'summary-duration'
-      duration.textContent = isRunning ? `· ${formatDuration(summary.durationMs)}` : formatDuration(summary.durationMs)
-      container.append(duration)
-    }
-    if (visibleParts.length === 0 && (summary.durationMs === null || summary.durationMs === undefined)) {
-      const empty = document.createElement('span')
-      empty.className = 'summary-empty'
-      empty.textContent = isRunning ? 'Waiting for test results…' : 'No tests reported.'
-      container.append(empty)
-    }
-  }
-
-  private renderTestGroups(container: HTMLElement, tests: TestCaseResult[]): void {
-    const groups = new Map<string, TestCaseResult[]>()
-    for (const test of tests) {
-      const className = test.className || this.state.selectedFqcn || 'Tests'
-      const group = groups.get(className) ?? []
-      group.push(test)
-      groups.set(className, group)
-    }
-    for (const [className, group] of groups) {
-      const suite = document.createElement('details')
-      suite.className = 'test-suite'
-      suite.open = true
+    const stdoutText = stripAnsi(result.stdout ?? '')
+    const stderrText = stripAnsi(result.stderr ?? '')
+    if (stdoutText.trim().length > 0 || stderrText.trim().length > 0) {
+      const logs = document.createElement('details')
+      logs.className = 'raw-logs'
+      logs.open = previousLogsOpen
       const heading = document.createElement('summary')
-      heading.className = 'test-suite-summary'
-      const suiteIcon = document.createElement('span')
-      suiteIcon.className = 'test-suite-icon'
-      suiteIcon.textContent = '▾'
-      suiteIcon.setAttribute('aria-hidden', 'true')
-      const suiteName = document.createElement('span')
-      suiteName.className = 'test-suite-name'
-      suiteName.textContent = className
-      const suiteCount = document.createElement('span')
-      suiteCount.className = 'test-suite-count'
-      suiteCount.textContent = `${group.length} test${group.length === 1 ? '' : 's'}`
-      heading.append(suiteIcon, suiteName, suiteCount)
-      suite.append(heading)
-      const children = document.createElement('div')
-      children.className = 'test-suite-children'
-      for (const test of group) {
-        children.append(this.renderTestCase(test))
+      heading.textContent = 'Logs'
+      logs.append(heading)
+      for (const [label, text] of [['stdout', stdoutText], ['stderr', stderrText]] as const) {
+        if (text.trim().length === 0) {
+          continue
+        }
+        const pane = document.createElement('div')
+        pane.className = `log-pane log-${label}`
+        const paneLabel = document.createElement('span')
+        paneLabel.className = 'log-label'
+        paneLabel.textContent = label
+        const content = document.createElement('pre')
+        content.className = 'log-content'
+        content.textContent = text
+        pane.append(paneLabel, content)
+        logs.append(pane)
       }
-      suite.append(children)
-      container.append(suite)
+      body.append(logs)
     }
   }
 
@@ -3289,31 +3659,53 @@ export class LeetcoderApp {
         message.textContent = failureSummary
         detail.append(message)
       }
-      if (test.expected !== null && test.expected !== undefined) {
-        detail.append(this.renderValue('Expected', test.expected, 'expected-value'))
+      const hasExpected = test.expected !== null && test.expected !== undefined
+      const hasActual = test.actual !== null && test.actual !== undefined
+      const diff = hasExpected && hasActual ? charDiffSegments(test.expected!, test.actual!) : null
+      if (hasExpected) {
+        detail.append(renderComparisonValue(
+          'Expected',
+          test.expected!,
+          'expected-value',
+          diff ? { prefix: diff.prefix, mid: diff.expectedMid, suffix: diff.suffix } : null,
+        ))
       }
-      if (test.actual !== null && test.actual !== undefined) {
-        detail.append(this.renderValue('Actual', test.actual, 'actual-value'))
+      if (hasActual) {
+        detail.append(renderComparisonValue(
+          'Actual',
+          test.actual!,
+          'actual-value',
+          diff ? { prefix: diff.prefix, mid: diff.actualMid, suffix: diff.suffix } : null,
+        ))
+      }
+      if (test.file && validSourceLine(test.line) !== null) {
+        detail.append(this.renderLocation(test.file, validSourceLine(test.line)!, test.column))
       }
       if (test.details) {
+        const stack = document.createElement('details')
+        stack.className = 'test-full-stack'
+        const stackSummary = document.createElement('summary')
+        stackSummary.textContent = 'Stack trace'
+        stack.append(stackSummary)
         const relevantFrames = relevantTestStackFrames(test.details)
         if (relevantFrames.length > 0) {
           const userFrames = document.createElement('pre')
           userFrames.className = 'test-user-frames'
           userFrames.textContent = relevantFrames.join('\n')
-          detail.append(userFrames)
+          stack.append(userFrames)
         }
-        const fullStack = document.createElement('details')
-        fullStack.className = 'test-full-stack'
-        const fullStackSummary = document.createElement('summary')
-        fullStackSummary.textContent = 'Full stack trace'
         const stacktrace = document.createElement('pre')
         stacktrace.className = 'test-stacktrace'
         stacktrace.textContent = test.details
-        fullStack.append(fullStackSummary, stacktrace)
-        detail.append(fullStack)
+        stack.append(stacktrace)
+        detail.append(stack)
       }
       if (hasOutput) {
+        const outputDetails = document.createElement('details')
+        outputDetails.className = 'test-output-details'
+        const outputSummary = document.createElement('summary')
+        outputSummary.textContent = 'Output'
+        outputDetails.append(outputSummary)
         const outputGrid = document.createElement('div')
         outputGrid.className = 'test-output'
         for (const [label, value] of [['stdout', test.stdout], ['stderr', test.stderr]] as const) {
@@ -3327,47 +3719,41 @@ export class LeetcoderApp {
           outputLabel.textContent = label
           const output = document.createElement('pre')
           output.className = 'test-output-content'
-          output.textContent = value
+          output.textContent = stripAnsi(value)
           pane.append(outputLabel, output)
           outputGrid.append(pane)
         }
-        detail.append(outputGrid)
-      }
-      if (test.file && validSourceLine(test.line) !== null) {
-        detail.append(this.renderLocation(test.file, validSourceLine(test.line)!, test.column))
+        outputDetails.append(outputGrid)
+        detail.append(outputDetails)
       }
       row.append(detail)
     }
     return row
   }
 
-  private renderValue(label: string, value: string, className: string): HTMLElement {
-    const wrapper = document.createElement('div')
-    wrapper.className = `failure-value ${className}`
-    const title = document.createElement('span')
-    title.className = 'failure-value-label'
-    title.textContent = `${label}:`
-    const content = document.createElement('code')
-    content.textContent = value
-    wrapper.append(title, content)
-    return wrapper
-  }
-
   private renderDiagnostic(diagnostic: TestDiagnostic): HTMLElement {
-    const row = document.createElement('div')
-    row.className = `diagnostic diagnostic-${diagnostic.severity}`
-    const icon = document.createElement('span')
-    icon.className = 'diagnostic-icon'
-    icon.textContent = diagnostic.severity === 'warning' ? '!' : '×'
-    icon.setAttribute('aria-hidden', 'true')
+    const card = document.createElement('div')
+    card.className = `diagnostic diagnostic-${diagnostic.severity}`
+    const header = document.createElement('div')
+    header.className = 'diagnostic-header'
+    header.append(iconFor(diagnostic.severity === 'warning' ? 'alert' : 'close', 'diagnostic-icon'))
     const message = document.createElement('span')
     message.className = 'diagnostic-message'
     message.textContent = diagnostic.message
-    row.append(icon, message)
-    if (diagnostic.file && validSourceLine(diagnostic.line) !== null) {
-      row.append(this.renderLocation(diagnostic.file, validSourceLine(diagnostic.line)!, diagnostic.column))
+    header.append(message)
+    card.append(header)
+    if (diagnostic.sourceLine) {
+      const snippet = document.createElement('pre')
+      snippet.className = 'diagnostic-snippet'
+      snippet.textContent = diagnostic.caret
+        ? `${diagnostic.sourceLine}\n${diagnostic.caret}`
+        : diagnostic.sourceLine
+      card.append(snippet)
     }
-    return row
+    if (diagnostic.file && validSourceLine(diagnostic.line) !== null) {
+      card.append(this.renderLocation(diagnostic.file, validSourceLine(diagnostic.line)!, diagnostic.column))
+    }
+    return card
   }
 
   private renderLocation(file: string, line: number, column?: number | null): HTMLElement {
@@ -3377,7 +3763,7 @@ export class LeetcoderApp {
     const matchesCurrentFile = Boolean(this.state.selectedPath && sourcePathsMatch(this.state.selectedPath, file))
     location.append(
       iconFor('locate', 'result-location-icon'),
-      document.createTextNode(`${file}:${line}${column ? `:${column}` : ''}`),
+      document.createTextNode(`${sourceBasename(file)}:${line}${column ? `:${column}` : ''}`),
     )
     if (matchesCurrentFile) {
       location.title = 'Reveal this line in the editor'
@@ -3386,7 +3772,7 @@ export class LeetcoderApp {
       })
     } else {
       location.disabled = true
-      location.title = 'This location belongs to another source file'
+      location.title = `${file} — this location belongs to another source file`
     }
     return location
   }
@@ -3394,25 +3780,79 @@ export class LeetcoderApp {
   private statusIcon(status: string): HTMLElement {
     const icon = document.createElement('span')
     icon.className = `test-status-icon test-status-${status}`
-    icon.textContent = status === 'passed'
-      ? '✓'
-      : status === 'failed'
-        ? '×'
-        : status === 'error'
-          ? '!'
-          : status === 'skipped'
-            ? '–'
-            : status === 'running'
-              ? '◌'
-              : '·'
     icon.setAttribute('aria-label', status)
+    switch (status) {
+      case 'passed':
+        icon.append(iconFor('check', 'test-status-svg'))
+        break
+      case 'failed':
+        icon.append(iconFor('close', 'test-status-svg'))
+        break
+      case 'error':
+        icon.append(iconFor('alert', 'test-status-svg'))
+        break
+      case 'running':
+        icon.append(iconFor('loader', 'test-status-svg is-spinning'))
+        break
+      case 'skipped':
+        icon.textContent = '–'
+        break
+      default:
+        icon.textContent = '·'
+    }
     return icon
   }
 
   private setMessage(message: string, tone: 'info' | 'success' | 'error'): void {
-    const status = this.element<HTMLElement>('#app-status')
-    status.textContent = message
-    status.dataset.tone = tone
+    const stack = this.element<HTMLElement>('#toast-stack')
+    if (tone === 'error' && this.errorToastElement) {
+      // A newer error replaces the previous one instead of stacking.
+      this.errorToastElement.remove()
+      this.errorToastElement = null
+    }
+    const toast = document.createElement('div')
+    toast.className = `toast toast-${tone}`
+    toast.append(iconFor(tone === 'success' ? 'check' : tone === 'error' ? 'alert' : 'info', 'toast-icon'))
+    const copy = document.createElement('span')
+    copy.className = 'toast-copy'
+    const firstLine = message.split(/\r?\n/, 1)[0]
+    copy.textContent = tone === 'error' ? firstLine : message
+    if (tone === 'error' && firstLine !== message) {
+      toast.title = message
+    }
+    toast.append(copy)
+    if (tone === 'error') {
+      toast.setAttribute('role', 'alert')
+      const close = document.createElement('button')
+      close.type = 'button'
+      close.className = 'toast-close'
+      close.setAttribute('aria-label', 'Dismiss')
+      close.append(iconFor('close', 'toast-close-icon'))
+      close.addEventListener('click', () => {
+        toast.remove()
+        if (this.errorToastElement === toast) {
+          this.errorToastElement = null
+        }
+      })
+      toast.append(close)
+      this.errorToastElement = toast
+    }
+    stack.append(toast)
+    while (stack.children.length > MAX_VISIBLE_TOASTS) {
+      const oldest = stack.firstElementChild
+      if (!oldest) {
+        break
+      }
+      if (oldest === this.errorToastElement) {
+        this.errorToastElement = null
+      }
+      oldest.remove()
+    }
+    if (tone !== 'error') {
+      setTimeout(() => {
+        toast.remove()
+      }, TOAST_DISMISS_MS)
+    }
   }
 
   private element<T extends HTMLElement>(selector: string): T {
@@ -3458,6 +3898,14 @@ function safeStorage(): Storage | undefined {
   }
 }
 
+/** The 6px colored difficulty dot in a sidebar group heading. */
+function createGroupDot(groupKey: ProblemFileEntry['packageSegment']): HTMLElement {
+  const dot = document.createElement('span')
+  dot.className = `group-dot group-dot-${groupKey}`
+  dot.setAttribute('aria-hidden', 'true')
+  return dot
+}
+
 function isMacPlatform(): boolean {
   if (typeof navigator === 'undefined') {
     return false
@@ -3472,14 +3920,70 @@ function formatDuration(durationMs: number): string {
   return `${(durationMs / 1000).toFixed(2)}s`
 }
 
-function createIndeterminateProgress(label: string): HTMLElement {
-  const progress = document.createElement('span')
-  progress.className = 'indeterminate-progress'
-  progress.setAttribute('role', 'progressbar')
-  progress.setAttribute('aria-label', label)
-  progress.setAttribute('aria-valuetext', 'In progress')
-  progress.setAttribute('aria-busy', 'true')
-  return progress
+/** Live status-row copy: early phases read as compiling, later as running. */
+function liveRunPhaseLabel(phase: TestPhase): string {
+  const normalized = phase.trim().toLowerCase().replace(/[\s_-]/g, '')
+  if (
+    normalized === 'starting'
+    || normalized === 'compiling'
+    || normalized === 'compile'
+    || normalized === 'compilation'
+  ) {
+    return 'Compiling…'
+  }
+  return 'Running tests…'
+}
+
+/** Non-zero result counts for the finished status row, actionable first. */
+function testRunFacts(summary: TestResult['summary']): string[] {
+  const parts: string[] = []
+  if (summary.failed > 0) {
+    parts.push(`${summary.failed} failed`)
+  }
+  if (summary.errors > 0) {
+    parts.push(`${summary.errors} error${summary.errors === 1 ? '' : 's'}`)
+  }
+  if (summary.passed > 0) {
+    parts.push(`${summary.passed} passed`)
+  }
+  if (summary.skipped > 0) {
+    parts.push(`${summary.skipped} skipped`)
+  }
+  return parts
+}
+
+function stripAnsi(text: string): string {
+  return text.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
+}
+
+/**
+ * Expected/Actual row. When a char-level diff is available the differing
+ * middle is wrapped in a <mark> so the mismatch reads at a glance.
+ */
+function renderComparisonValue(
+  label: string,
+  value: string,
+  className: string,
+  diff: { prefix: string; mid: string; suffix: string } | null,
+): HTMLElement {
+  const wrapper = document.createElement('div')
+  wrapper.className = `failure-value ${className}`
+  const title = document.createElement('span')
+  title.className = 'failure-value-label'
+  title.textContent = label
+  const content = document.createElement('code')
+  content.className = 'failure-value-content'
+  if (diff) {
+    content.append(document.createTextNode(diff.prefix))
+    const mark = document.createElement('mark')
+    mark.className = 'diff-mark'
+    mark.textContent = diff.mid
+    content.append(mark, document.createTextNode(diff.suffix))
+  } else {
+    content.textContent = value
+  }
+  wrapper.append(title, content)
+  return wrapper
 }
 
 export type UnifiedDiffLineKind = 'context' | 'addition' | 'deletion' | 'hunk' | 'no-newline'
@@ -3611,13 +4115,6 @@ function gitStatusGlyph(status: string): string {
     default:
       return 'M'
   }
-}
-
-function gitFileStats(file: GitChangedFile): string {
-  const parts: string[] = []
-  if (file.additions !== null) parts.push(`+${file.additions}`)
-  if (file.deletions !== null) parts.push(`-${file.deletions}`)
-  return parts.join(' ')
 }
 
 export function deleteFileConfirmationMessage(fileName: string): string {

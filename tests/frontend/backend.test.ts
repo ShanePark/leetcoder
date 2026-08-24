@@ -112,6 +112,32 @@ describe('backend client', () => {
     })
   })
 
+  it('always resolves the daily problem description content to a string or null', async () => {
+    const fetchDaily = (extra: Record<string, unknown>) => {
+      const invoke: Invoke = async (command) => {
+        expect(command).toBe('fetch_daily_problem')
+        return {
+          date: '2026-08-24',
+          frontendId: 1,
+          title: 'Two Sum',
+          titleSlug: 'two-sum',
+          difficulty: 'EASY',
+          url: 'https://leetcode.com/problems/two-sum/',
+          ...extra,
+        }
+      }
+      return createBackendClient(invoke).fetchDailyProblem()
+    }
+
+    // The description HTML is passed through untrimmed.
+    await expect(fetchDaily({ content: ' <p>Given an array of integers…</p>\n' })).resolves.toMatchObject({
+      content: ' <p>Given an array of integers…</p>\n',
+    })
+    await expect(fetchDaily({ content: null })).resolves.toMatchObject({ content: null })
+    await expect(fetchDaily({})).resolves.toMatchObject({ content: null })
+    await expect(fetchDaily({ content: '  \n\t ' })).resolves.toMatchObject({ content: null })
+  })
+
   it('normalizes structured test results for the result panel', () => {
     const result = normalizeTestResult({
       success: false,
@@ -159,6 +185,62 @@ describe('backend client', () => {
     expect(result.phase).toBe('compile')
     expect(result.summary).toMatchObject({ total: 0, failed: 0 })
     expect(result.diagnostics[0]).toMatchObject({ message: 'cannot find symbol', file: 'Solution.java', line: 8 })
+  })
+
+  it('keeps javac source lines and caret markers on diagnostics', () => {
+    const result = normalizeTestResult({
+      success: false,
+      phase: 'compile',
+      summary: {},
+      tests: [],
+      diagnostics: [{
+        severity: 'error',
+        file: 'Solution.java',
+        line: 8,
+        column: 23,
+        message: 'cannot find symbol',
+        source: '        return valuee + 1;',
+        caret: '                      ^',
+      }],
+      stdout: '',
+      stderr: 'compile failed',
+    })
+
+    expect(result.diagnostics[0]).toMatchObject({
+      origin: 'javac',
+      sourceLine: '        return valuee + 1;',
+      caret: '                      ^',
+    })
+  })
+
+  it('maps runner and junit sentinel sources to diagnostic origins', () => {
+    const result = normalizeTestResult({
+      success: false,
+      phase: 'runner',
+      summary: {},
+      tests: [],
+      diagnostics: [
+        { severity: 'error', message: 'runner crashed', source: 'runner', caret: null },
+        { severity: 'error', message: 'report unreadable', source: 'junit', caret: 'stale caret' },
+      ],
+      stdout: '',
+      stderr: '',
+    })
+
+    expect(result.diagnostics[0]).toMatchObject({ origin: 'runner', sourceLine: null, caret: null })
+    expect(result.diagnostics[1]).toMatchObject({ origin: 'junit', sourceLine: null, caret: null })
+  })
+
+  it('defaults diagnostics without a source field to a javac origin', () => {
+    const result = normalizeTestResult({
+      success: false,
+      structuredResults: {
+        diagnostics: [{ message: 'cannot find symbol', filePath: 'Solution.java', lineNumber: 8 }],
+        tests: [],
+      },
+    })
+
+    expect(result.diagnostics[0]).toMatchObject({ origin: 'javac', sourceLine: null, caret: null })
   })
 
   it('normalizes no-tests and runner phases from the Rust result enum', () => {

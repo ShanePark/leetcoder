@@ -11,6 +11,7 @@ export interface DailyProblem {
   difficulty: string
   url: string
   javaSnippet?: string | null
+  content?: string | null
 }
 
 /** A Java source file returned by the repository file-list command. */
@@ -81,6 +82,9 @@ export interface TestDiagnostic {
   file?: string | null
   line?: number | null
   column?: number | null
+  origin?: 'javac' | 'runner' | 'junit'
+  sourceLine?: string | null
+  caret?: string | null
 }
 
 export interface TestResult {
@@ -307,6 +311,7 @@ function normalizeDailyProblem(value: unknown): DailyProblem {
     throw new Error('The daily problem response was missing required fields.')
   }
 
+  const content = stringValue(value.content)
   return {
     date: stringValue(value.date) ?? '',
     frontendId: String(frontendId),
@@ -315,6 +320,8 @@ function normalizeDailyProblem(value: unknown): DailyProblem {
     difficulty,
     url,
     javaSnippet: stringValue(value.javaSnippet) ?? stringValue(value.java_snippet),
+    // Trim only to test emptiness; the description HTML itself is kept intact.
+    content: content !== undefined && content.trim().length > 0 ? content : null,
   }
 }
 
@@ -709,6 +716,10 @@ function normalizeDiagnostics(value: unknown): TestDiagnostic[] {
   return value.map((entry) => {
     const diagnostic = isRecord(entry) ? entry : {}
     const severity = stringValue(diagnostic.severity) ?? stringValue(diagnostic.level) ?? 'error'
+    // Rust reuses `source` both for the offending javac source line and for
+    // the "runner"/"junit" sentinels marking runner/report-level failures.
+    const rawSource = stringValue(diagnostic.source)
+    const sentinel = rawSource === 'runner' || rawSource === 'junit' ? rawSource : undefined
     return {
       message: typeof entry === 'string'
         ? entry
@@ -733,6 +744,11 @@ function normalizeDiagnostics(value: unknown): TestDiagnostic[] {
           ?? diagnostic.sourceColumn
           ?? diagnostic.source_column,
       ),
+      origin: sentinel ?? 'javac',
+      sourceLine: sentinel === undefined && rawSource !== undefined && rawSource.trim().length > 0
+        ? rawSource
+        : null,
+      caret: sentinel === undefined ? stringValue(diagnostic.caret) ?? null : null,
     }
   })
 }

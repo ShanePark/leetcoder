@@ -14,6 +14,7 @@ query dailyProblem {
       title
       titleSlug
       difficulty
+      content
       codeSnippets {
         lang
         langSlug
@@ -97,6 +98,12 @@ pub(crate) fn parse_daily_problem(body: &str) -> Result<DailyProblem, String> {
         .map(normalize_link)
         .unwrap_or_else(|| format!("https://leetcode.com/problems/{title_slug}/"));
 
+    let content = question
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+
     let java_code_snippet = question
         .get("codeSnippets")
         .and_then(Value::as_array)
@@ -125,6 +132,7 @@ pub(crate) fn parse_daily_problem(body: &str) -> Result<DailyProblem, String> {
         title_slug,
         url: link,
         java_snippet: java_code_snippet,
+        content,
     })
 }
 
@@ -180,6 +188,7 @@ mod tests {
                 "title": "Check Divisibility by Digit Sum and Product",
                 "titleSlug": "check-divisibility-by-digit-sum-and-product",
                 "difficulty": "Easy",
+                "content": "<p>You are given a positive integer <code>n</code>.</p>",
                 "codeSnippets": [
                   {"lang": "C++", "langSlug": "cpp", "code": "class Solution {};"},
                   {"lang": "Java", "langSlug": "java", "code": "class Solution { public boolean check(int n) { return true; } }"}
@@ -195,6 +204,10 @@ mod tests {
         assert_eq!(
             problem.java_snippet.as_deref(),
             Some("class Solution { public boolean check(int n) { return true; } }")
+        );
+        assert_eq!(
+            problem.content.as_deref(),
+            Some("<p>You are given a positive integer <code>n</code>.</p>")
         );
     }
 
@@ -216,7 +229,38 @@ mod tests {
         }"#;
         let problem = parse_daily_problem(body).unwrap();
         assert!(problem.java_snippet.is_none());
+        assert!(problem.content.is_none());
         assert_eq!(problem.url, "https://leetcode.com/problems/one/");
+    }
+
+    #[test]
+    fn null_or_blank_content_is_none() {
+        let template = |content: &str| {
+            format!(
+                r#"{{
+                  "data": {{
+                    "activeDailyCodingChallengeQuestion": {{
+                      "date": "2026-08-22",
+                      "question": {{
+                        "questionFrontendId": "1",
+                        "title": "One",
+                        "titleSlug": "one",
+                        "difficulty": "Easy",
+                        "content": {content}
+                      }}
+                    }}
+                  }}
+                }}"#
+            )
+        };
+        assert!(parse_daily_problem(&template("null"))
+            .unwrap()
+            .content
+            .is_none());
+        assert!(parse_daily_problem(&template(r#""  \n  ""#))
+            .unwrap()
+            .content
+            .is_none());
     }
 
     #[test]

@@ -6,7 +6,8 @@ import {
   startCompletion,
 } from '@codemirror/autocomplete'
 import { java } from '@codemirror/lang-java'
-import { indentOnInput, indentUnit } from '@codemirror/language'
+import { HighlightStyle, indentOnInput, indentUnit, syntaxHighlighting } from '@codemirror/language'
+import { tags } from '@lezer/highlight'
 import {
   copyLineDown,
   defaultKeymap,
@@ -36,8 +37,105 @@ import {
   keymap,
   lineNumbers,
 } from '@codemirror/view'
-import { oneDark } from '@codemirror/theme-one-dark'
 import { javaCompletions, javaIdentifierAt, resolveJavaDefinition } from './completions'
+
+/**
+ * Editor palette derived from the design tokens in styles.css. Keep the two
+ * files in sync:
+ *   background      = --bg        (#0d1017)
+ *   surface         = --surface-2 (#171c27, panels/tooltips)
+ *   text            = --text      (#e8ecf4)
+ *   textDim         = --text-dim  (#98a2b6)
+ *   textFaint       = --text-faint(#5d6778)
+ *   accent          = --accent    (#5b9dff)
+ *   green           = --green     (#3ecf8e)
+ *   amber           = --amber     (#ffbf3f)
+ *   red             = --red       (#ff5c7a)
+ * Syntax-only colors (no styles.css counterpart): violet #c792ea for
+ * keywords, blue #82aaff for types/classes.
+ */
+const editorPalette = {
+  background: '#0d1017',
+  surface: '#171c27',
+  text: '#e8ecf4',
+  textDim: '#98a2b6',
+  textFaint: '#5d6778',
+  accent: '#5b9dff',
+  green: '#3ecf8e',
+  amber: '#ffbf3f',
+  red: '#ff5c7a',
+  violet: '#c792ea',
+  blue: '#82aaff',
+  selection: 'rgba(91, 157, 255, 0.22)',
+  activeLine: 'rgba(255, 255, 255, 0.04)',
+} as const
+
+const leetcoderTheme = EditorView.theme({
+  '&': {
+    color: editorPalette.text,
+    backgroundColor: editorPalette.background,
+    fontSize: '14px',
+    height: '100%',
+  },
+  '.cm-content': {
+    caretColor: editorPalette.accent,
+  },
+  '.cm-cursor, .cm-dropCursor': {
+    borderLeftColor: editorPalette.accent,
+  },
+  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
+    backgroundColor: editorPalette.selection,
+  },
+  '.cm-selectionMatch': {
+    backgroundColor: 'rgba(91, 157, 255, 0.14)',
+  },
+  '.cm-activeLine': {
+    backgroundColor: editorPalette.activeLine,
+  },
+  '.cm-gutters': {
+    backgroundColor: editorPalette.background,
+    color: editorPalette.textFaint,
+    border: 'none',
+  },
+  '.cm-activeLineGutter': {
+    backgroundColor: editorPalette.activeLine,
+    color: editorPalette.textDim,
+  },
+  '.cm-specialChar': {
+    color: editorPalette.red,
+  },
+  '.cm-matchingBracket, &.cm-focused .cm-matchingBracket': {
+    backgroundColor: 'rgba(91, 157, 255, 0.18)',
+    outline: 'none',
+  },
+  '.cm-tooltip': {
+    backgroundColor: editorPalette.surface,
+    color: editorPalette.text,
+    border: '1px solid rgba(148, 163, 190, 0.18)',
+    borderRadius: '8px',
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': {
+    backgroundColor: 'rgba(91, 157, 255, 0.13)',
+    color: editorPalette.text,
+  },
+  '.cm-panels': {
+    backgroundColor: editorPalette.surface,
+    color: editorPalette.text,
+  },
+}, { dark: true })
+
+const leetcoderHighlight = HighlightStyle.define([
+  { tag: [tags.keyword, tags.modifier, tags.controlKeyword, tags.operatorKeyword, tags.definitionKeyword, tags.self], color: editorPalette.violet },
+  { tag: [tags.string, tags.character, tags.special(tags.string)], color: editorPalette.green },
+  { tag: [tags.number, tags.integer, tags.float, tags.bool, tags.null], color: editorPalette.amber },
+  { tag: [tags.comment, tags.blockComment, tags.lineComment, tags.docComment], color: editorPalette.textFaint, fontStyle: 'italic' },
+  { tag: [tags.typeName, tags.className, tags.namespace, tags.standard(tags.typeName)], color: editorPalette.blue },
+  { tag: [tags.annotation, tags.meta], color: editorPalette.amber },
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: editorPalette.text },
+  { tag: [tags.punctuation, tags.separator, tags.bracket, tags.operator], color: editorPalette.textDim },
+  { tag: [tags.propertyName, tags.variableName], color: editorPalette.text },
+  { tag: tags.invalid, color: editorPalette.red },
+])
 
 export interface EditorCallbacks {
   onChange?: (source: string) => void
@@ -508,7 +606,8 @@ export class JavaEditor {
     const state = EditorState.create({
       doc: '',
       extensions: [
-        oneDark,
+        leetcoderTheme,
+        syntaxHighlighting(leetcoderHighlight),
         java(),
         lineNumbers(),
         highlightActiveLineGutter(),

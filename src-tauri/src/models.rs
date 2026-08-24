@@ -22,6 +22,7 @@ pub struct DailyProblem {
     pub title_slug: String,
     pub url: String,
     pub java_snippet: Option<String>,
+    pub content: Option<String>,
 }
 
 /// A source file path relative to the selected repository root.

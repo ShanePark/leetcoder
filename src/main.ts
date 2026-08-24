@@ -1,13 +1,23 @@
 import './styles.css'
 
+import type { AppOptions } from './app'
 import { LeetcoderApp } from './app'
+import { createDevMockBackend, createDevMockStorage, isDevMockActive } from './dev-mock'
 
 const root = document.querySelector<HTMLElement>('#app')
 if (!root) {
   throw new Error('leetcoder root element was not found.')
 }
 
-const app = new LeetcoderApp(root)
+const options: AppOptions = isDevMockActive()
+  ? {
+    backend: createDevMockBackend(),
+    storage: createDevMockStorage(),
+    directoryPicker: async () => '/Users/shane/ps',
+  }
+  : {}
+
+const app = new LeetcoderApp(root, options)
 void bootstrap(app)
 
 async function bootstrap(editorApp: LeetcoderApp): Promise<void> {

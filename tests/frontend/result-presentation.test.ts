@@ -91,6 +91,7 @@ describe('test result failure presentation', () => {
       failureMessage: null,
       rawLogsOpen: false,
     })
+    expect(testResultBannerMessage(run)).toBe('All tests passed')
   })
 
   it('prefers an error diagnostic over an earlier warning', () => {
