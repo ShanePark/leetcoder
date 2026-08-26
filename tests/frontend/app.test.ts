@@ -25,7 +25,11 @@ import {
   fqcnFromJavaPath,
   gitDirectoryPath,
   gitResultToastMessage,
+  isCloseAllTabsShortcut,
+  isCloseTabShortcut,
   isCurrentRepositoryRefresh,
+  isFileTabsShiftWheel,
+  isMacPlatform,
   normalizeGitDiff,
   normalizeGitStatus,
   normalizeDailyProblemDateKey,
@@ -135,6 +139,40 @@ describe('file explorer actions', () => {
     expect(replacementTabIndex(2, 2)).toBe(1)
     expect(replacementTabIndex(0, 0)).toBeNull()
     expect(replacementTabIndex(2, 3)).toBeNull()
+  })
+
+  it('recognizes Apple platforms from explicit platform values', () => {
+    expect(isMacPlatform('MacIntel')).toBe(true)
+    expect(isMacPlatform('Linux x86_64')).toBe(false)
+    expect(isMacPlatform('Win32', 'iPhone Safari')).toBe(true)
+  })
+
+  it('matches Cmd+W on macOS and Alt+W on other platforms only', () => {
+    const base = { key: 'w', shiftKey: false, altKey: false, metaKey: false, ctrlKey: false }
+
+    expect(isCloseTabShortcut({ ...base, metaKey: true }, true)).toBe(true)
+    expect(isCloseTabShortcut({ ...base, altKey: true }, true)).toBe(false)
+    expect(isCloseTabShortcut({ ...base, metaKey: true, shiftKey: true }, true)).toBe(false)
+    expect(isCloseTabShortcut({ ...base, altKey: true }, false)).toBe(true)
+    expect(isCloseTabShortcut({ ...base, metaKey: true }, false)).toBe(false)
+    expect(isCloseTabShortcut({ ...base, altKey: true, ctrlKey: true }, false)).toBe(false)
+  })
+
+  it('matches Cmd+Shift+W on macOS and Alt+Shift+W on other platforms only', () => {
+    const base = { key: 'w', shiftKey: true, altKey: false, metaKey: false, ctrlKey: false }
+
+    expect(isCloseAllTabsShortcut({ ...base, metaKey: true }, true)).toBe(true)
+    expect(isCloseAllTabsShortcut({ ...base, altKey: true }, true)).toBe(false)
+    expect(isCloseAllTabsShortcut({ ...base, metaKey: true, shiftKey: false }, true)).toBe(false)
+    expect(isCloseAllTabsShortcut({ ...base, altKey: true }, false)).toBe(true)
+    expect(isCloseAllTabsShortcut({ ...base, metaKey: true }, false)).toBe(false)
+    expect(isCloseAllTabsShortcut({ ...base, altKey: true, ctrlKey: true }, false)).toBe(false)
+  })
+
+  it('requires Shift for file-tab wheel scrolling', () => {
+    expect(isFileTabsShiftWheel({ deltaY: 120, shiftKey: true })).toBe(true)
+    expect(isFileTabsShiftWheel({ deltaY: 120, shiftKey: false })).toBe(false)
+    expect(isFileTabsShiftWheel({ deltaY: 0, shiftKey: true })).toBe(false)
   })
 
   it('normalizes safe rename input and rejects paths or invalid basenames', () => {

@@ -10,12 +10,15 @@ import type { EditorView } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildTestRunMarkers,
   findJavaTestMethodAt,
+  findJavaTestMethodMarkers,
   formatJavaDocClipboard,
   isJavaDocAltShortcut,
   isLineDeleteAltShortcut,
   isLineDuplicateAltShortcut,
   planJavaDocInsertion,
+  testRunShortcutLabel,
 } from '../../src/editor'
 
 function javaState(source: string): EditorState {
@@ -120,6 +123,71 @@ describe('Java test method lookup', () => {
     const state = javaState(source)
 
     expect(findJavaTestMethodAt(state, source.indexOf('junit'))).toBe('test_2$')
+  })
+
+  it('extracts one gutter marker per real test annotation and skips comments, strings, and helpers', () => {
+    const source = [
+      'class Solution {',
+      '    // @Test void fakeComment() {}',
+      '    String text = "@Test void fakeString() {}";',
+      '    @DisplayName("qualified")',
+      '    @org.junit.jupiter.api.Test',
+      '    void test_2$() {}',
+      '    void helper() {}',
+      '    @Test void testInline() {}',
+      '    @Test void 테스트() {}',
+      '}',
+    ].join('\n')
+    const state = javaState(source)
+
+    expect(findJavaTestMethodMarkers(state)).toEqual([
+      {
+        methodName: 'test_2$',
+        from: source.lastIndexOf('\n', source.indexOf('@org.junit.jupiter.api.Test')) + 1,
+        line: 5,
+      },
+      {
+        methodName: 'testInline',
+        from: source.lastIndexOf('\n', source.indexOf('@Test void testInline')) + 1,
+        line: 8,
+      },
+      {
+        methodName: '테스트',
+        from: source.lastIndexOf('\n', source.indexOf('@Test void 테스트')) + 1,
+        line: 9,
+      },
+    ])
+  })
+
+  it('recomputes marker positions after document edits and builds sorted gutter ranges', () => {
+    const source = [
+      'class Solution {',
+      '    @Test void first() {}',
+      '}',
+    ].join('\n')
+    const state = javaState(source)
+    const inserted = state.update({
+      changes: { from: 0, insert: '// heading\n' },
+    }).state
+    const markers = findJavaTestMethodMarkers(inserted)
+
+    expect(markers).toEqual([{
+      methodName: 'first',
+      from: inserted.doc.line(3).from,
+      line: 3,
+    }])
+    const gutterMarkers = buildTestRunMarkers(markers, 'Shift+Ctrl+R')
+    const cursor = gutterMarkers.iter()
+    expect(gutterMarkers.size).toBe(1)
+    expect(cursor.from).toBe(markers[0].from)
+    expect(cursor.to).toBe(markers[0].from)
+    cursor.next()
+    expect(cursor.value).toBeNull()
+  })
+
+  it('uses the platform-specific selected-test shortcut label', () => {
+    expect(testRunShortcutLabel('other')).toBe('Shift+Ctrl+R')
+    expect(testRunShortcutLabel('mac')).toBe('⇧⌘R')
   })
 })
 

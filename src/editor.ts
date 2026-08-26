@@ -107,6 +107,34 @@ const leetcoderTheme = EditorView.theme({
     backgroundColor: editorPalette.activeLine,
     color: editorPalette.textDim,
   },
+  '.cm-test-gutter': {
+    minWidth: '22px',
+  },
+  '.cm-test-run-button': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '18px',
+    height: '18px',
+    padding: '0',
+    border: '0',
+    borderRadius: '4px',
+    backgroundColor: 'transparent',
+    color: editorPalette.green,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    fontSize: '12px',
+    lineHeight: '1',
+    opacity: '0.8',
+  },
+  '.cm-test-run-button:hover': {
+    backgroundColor: 'rgba(62, 207, 142, 0.14)',
+    opacity: '1',
+  },
+  '.cm-test-run-button:focus-visible': {
+    outline: `2px solid ${editorPalette.accent}`,
+    outlineOffset: '1px',
+  },
   '.cm-specialChar': {
     color: editorPalette.red,
   },
@@ -150,6 +178,20 @@ export interface EditorCallbacks {
   onRunTestAtCursor?: (methodName: string | null) => boolean | void
 }
 
+export type TestRunShortcutPlatform = 'mac' | 'other'
+
+/** The platform-specific shortcut shown on each source-level test action. */
+export function testRunShortcutLabel(platform: TestRunShortcutPlatform): string {
+  return platform === 'mac' ? '⇧⌘R' : 'Shift+Ctrl+R'
+}
+
+function isMacPlatform(): boolean {
+  if (typeof navigator === 'undefined') {
+    return false
+  }
+  return /Mac|iPhone|iPad|iPod/i.test(`${navigator.platform} ${navigator.userAgent}`)
+}
+
 const JAVA_IDENTIFIER_START = /^(?:[$_]|\p{ID_Start})$/u
 const JAVA_IDENTIFIER_PART = /^(?:[$\p{ID_Continue}])$/u
 
@@ -190,28 +232,76 @@ export function findJavaTestMethodAt(
   if (!node || boundedPosition < node.from || boundedPosition >= node.to) {
     return null
   }
+  return testMethodNameAndAnnotation(source, node)?.methodName ?? null
+}
 
-  const modifiers = node.getChild('Modifiers')
+/**
+ * A source-level run action for one Java @Test method. `from` is the start of
+ * the @Test annotation (or, for a same-line annotation/declaration, the
+ * declaration line), which is the position used by the CodeMirror gutter.
+ */
+export interface JavaTestMethodMarker {
+  methodName: string
+  /** Document position at the start of the annotation's line, as required by CodeMirror gutters. */
+  from: number
+  line: number
+}
+
+function testMethodNameAndAnnotation(
+  source: string,
+  method: ReturnType<typeof syntaxTree>['topNode'],
+): { methodName: string; annotationFrom: number } | null {
+  const modifiers = method.getChild('Modifiers')
+  let annotationFrom: number | null = null
   let hasTest = false
   for (let child = modifiers?.firstChild; child; child = child.nextSibling) {
     if (child.name !== 'MarkerAnnotation' && child.name !== 'Annotation') {
       continue
     }
-    if (isTestAnnotation(source.slice(child.from, child.to).trim())) {
-      hasTest = true
-      break
+    const annotation = source.slice(child.from, child.to).trim()
+    if (!isTestAnnotation(annotation)) {
+      continue
     }
+    hasTest = true
+    annotationFrom = child.from
+    break
   }
-  if (!hasTest) {
+  if (!hasTest || annotationFrom === null) {
     return null
   }
-
-  const definition = node.getChild('Definition')
+  const definition = method.getChild('Definition')
   if (!definition) {
     return null
   }
   const methodName = source.slice(definition.from, definition.to)
-  return isJavaIdentifier(methodName) ? methodName : null
+  return isJavaIdentifier(methodName) ? { methodName, annotationFrom } : null
+}
+
+/**
+ * Extract all test methods from the current Java syntax tree. This deliberately
+ * uses syntax nodes instead of text matching so comments, strings, and
+ * annotation-looking text cannot create source run actions.
+ */
+export function findJavaTestMethodMarkers(state: EditorState): JavaTestMethodMarker[] {
+  const source = state.doc.toString()
+  const markers: JavaTestMethodMarker[] = []
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name !== 'MethodDeclaration') {
+        return
+      }
+      const testMethod = testMethodNameAndAnnotation(source, node.node)
+      if (!testMethod) {
+        return
+      }
+      markers.push({
+        methodName: testMethod.methodName,
+        from: state.doc.lineAt(testMethod.annotationFrom).from,
+        line: state.doc.lineAt(testMethod.annotationFrom).number,
+      })
+    },
+  })
+  return markers.sort((left, right) => left.from - right.from)
 }
 
 /** A source position that should be surfaced in the editor gutter. */
@@ -512,6 +602,53 @@ class FailureMarker extends GutterMarker {
   }
 }
 
+class TestRunMarker extends GutterMarker {
+  constructor(
+    private readonly methodName: string,
+    private readonly shortcutLabel: string,
+  ) {
+    super()
+  }
+
+  eq(other: GutterMarker): boolean {
+    return other instanceof TestRunMarker
+      && other.methodName === this.methodName
+      && other.shortcutLabel === this.shortcutLabel
+  }
+
+  toDOM(): Node {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'cm-test-run-button'
+    button.textContent = '▶'
+    button.dataset.testMethod = this.methodName
+    const label = `Run ${this.methodName} (${this.shortcutLabel})`
+    button.setAttribute('aria-label', label)
+    button.title = label
+    return button
+  }
+}
+
+/** Build gutter markers from the syntax-tree extraction result. */
+export function buildTestRunMarkers(
+  markers: readonly JavaTestMethodMarker[],
+  shortcutLabel: string,
+): RangeSet<GutterMarker> {
+  const builder = new RangeSetBuilder<GutterMarker>()
+  const orderedMarkers = [...markers].sort((left, right) => left.from - right.from)
+  for (const marker of orderedMarkers) {
+    builder.add(marker.from, marker.from, new TestRunMarker(marker.methodName, shortcutLabel))
+  }
+  return builder.finish()
+}
+
+const testMethodMarkers = StateField.define<readonly JavaTestMethodMarker[]>({
+  create: (state) => findJavaTestMethodMarkers(state),
+  update(value, transaction) {
+    return transaction.docChanged ? findJavaTestMethodMarkers(transaction.state) : value
+  },
+})
+
 function buildFailureMarkers(state: EditorState, issues: readonly EditorIssue[]): RangeSet<GutterMarker> {
   const byLine = new Map<number, { issue: EditorIssue; line: NonNullable<ReturnType<typeof safeLine>> }>()
   for (const issue of issues) {
@@ -632,6 +769,14 @@ export class JavaEditor {
       // Ctrl/Cmd+Shift+R refresh shortcut from escaping the editor.
       return callbacks.onRunTestAtCursor?.(methodName) !== false
     }
+    const shortcutLabel = testRunShortcutLabel(isMacPlatform() ? 'mac' : 'other')
+    const testMethodFromGutterEvent = (event: Event): string | null => {
+      const target = event.target
+      if (!(target instanceof Element)) {
+        return null
+      }
+      return target.closest<HTMLElement>('.cm-test-run-button')?.dataset.testMethod ?? null
+    }
     const insertJavaDoc = (view: EditorView): boolean => {
       const selection = view.state.selection.main
       if (!selection.empty) {
@@ -688,12 +833,38 @@ export class JavaEditor {
         java(),
         lineNumbers(),
         highlightActiveLineGutter(),
+        testMethodMarkers,
         failureMarkers,
         failureDecorations,
         definitionHover,
         gutter({
           class: 'cm-failure-gutter',
           markers: (view) => view.state.field(failureMarkers),
+        }),
+        gutter({
+          class: 'cm-test-gutter',
+          markers: (view) => buildTestRunMarkers(
+            view.state.field(testMethodMarkers),
+            shortcutLabel,
+          ),
+          domEventHandlers: {
+            mousedown: (_view, _line, event) => {
+              if (!testMethodFromGutterEvent(event)) {
+                return false
+              }
+              event.stopPropagation()
+              return true
+            },
+            click: (_view, _line, event) => {
+              const methodName = testMethodFromGutterEvent(event)
+              if (!methodName) {
+                return false
+              }
+              event.stopPropagation()
+              callbacks.onRunTestAtCursor?.(methodName)
+              return true
+            },
+          },
         }),
         history(),
         drawSelection(),

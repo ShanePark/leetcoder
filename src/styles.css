@@ -834,28 +834,6 @@ kbd {
   background: var(--surface);
 }
 
-.file-tabs-nav-button {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  min-height: 36px;
-  color: var(--text-dim);
-  font-size: 20px;
-  line-height: 1;
-}
-
-.file-tabs-nav-button:hover:not(:disabled) {
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.file-tabs-nav-button:disabled {
-  color: var(--text-faint);
-  opacity: 0.45;
-}
-
 .file-tabs {
   display: flex;
   flex: 1 1 auto;
@@ -867,7 +845,11 @@ kbd {
   overflow-y: hidden;
   padding: 4px 8px 0;
   background: var(--surface);
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+.file-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .file-tab {
@@ -1174,6 +1156,15 @@ kbd {
 .bottom-panel-actions .primary-button {
   min-height: 28px;
   padding: 0 10px;
+}
+
+.selected-test-shortcut-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .bottom-panel-tab {
