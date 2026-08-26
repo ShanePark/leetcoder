@@ -43,7 +43,13 @@ import {
   keymap,
   lineNumbers,
 } from '@codemirror/view'
-import { javaCompletions, javaIdentifierAt, resolveJavaDefinition } from './completions'
+import {
+  addJavaTypeImports,
+  JAVA_TYPE_IMPORTS,
+  javaCompletions,
+  javaIdentifierAt,
+  resolveJavaDefinition,
+} from './completions'
 
 /**
  * Editor palette derived from the design tokens in styles.css. Keep the two
@@ -201,6 +207,80 @@ function isJavaIdentifier(value: string): boolean {
     && JAVA_IDENTIFIER_START.test(characters[0])
     && characters.slice(1).every((character) => JAVA_IDENTIFIER_PART.test(character))
 }
+
+function previousNonWhitespace(source: string, position: number): string {
+  let cursor = position - 1
+  while (cursor >= 0 && /\s/.test(source[cursor])) cursor -= 1
+  return cursor >= 0 ? source[cursor] : ''
+}
+
+function nextNonWhitespace(source: string, position: number): string {
+  let cursor = position
+  while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1
+  return cursor < source.length ? source[cursor] : ''
+}
+
+function referencedJavaImportTypes(state: EditorState): Set<string> {
+  const source = state.doc.toString()
+  const definitions = new Set<string>()
+  const tree = syntaxTree(state)
+  tree.iterate({
+    enter(node) {
+      if (node.name === 'Definition') definitions.add(source.slice(node.from, node.to))
+    },
+  })
+
+  const typeNames = new Set<string>()
+  tree.iterate({
+    enter(node) {
+      const name = source.slice(node.from, node.to)
+      if (!JAVA_TYPE_IMPORTS[name]) return
+
+      if (node.name === 'TypeName') {
+        // The final component of a fully qualified type is also a TypeName.
+        // Only an unqualified first component should request an import.
+        if (previousNonWhitespace(source, node.from) !== '.') typeNames.add(name)
+        return
+      }
+
+      // Static factories and utilities such as List.of() and Arrays.sort()
+      // are parsed as Identifier receivers rather than TypeName nodes.
+      if (node.name === 'Identifier'
+        && !definitions.has(name)
+        && previousNonWhitespace(source, node.from) !== '.'
+        && nextNonWhitespace(source, node.to) === '.') {
+        typeNames.add(name)
+      }
+    },
+  })
+  return typeNames
+}
+
+function minimalDocumentChange(before: string, after: string) {
+  let from = 0
+  while (from < before.length && from < after.length && before[from] === after[from]) from += 1
+
+  let beforeTo = before.length
+  let afterTo = after.length
+  while (beforeTo > from && afterTo > from && before[beforeTo - 1] === after[afterTo - 1]) {
+    beforeTo -= 1
+    afterTo -= 1
+  }
+  return { from, to: beforeTo, insert: after.slice(from, afterTo) }
+}
+
+export const javaAutoImports = EditorState.transactionFilter.of((transaction) => {
+  if (!transaction.docChanged || !transaction.isUserEvent('input')) return transaction
+
+  const source = transaction.newDoc.toString()
+  const updated = addJavaTypeImports(source, referencedJavaImportTypes(transaction.state))
+  if (updated === source) return transaction
+
+  return [
+    transaction,
+    { changes: minimalDocumentChange(source, updated), sequential: true },
+  ]
+})
 
 function isTestAnnotation(annotation: string): boolean {
   const withoutArguments = annotation.slice(1, annotation.indexOf('(') >= 0
@@ -831,6 +911,7 @@ export class JavaEditor {
         leetcoderTheme,
         syntaxHighlighting(leetcoderHighlight),
         java(),
+        javaAutoImports,
         lineNumbers(),
         highlightActiveLineGutter(),
         testMethodMarkers,
