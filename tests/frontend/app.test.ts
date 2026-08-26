@@ -21,6 +21,7 @@ import {
   normalizeGitStatus,
   normalizeDailyProblemDateKey,
   parseUnifiedDiffLines,
+  RepositoryPickerCoordinator,
   relevantTestStackFrames,
   nextUtcMidnightDelayMs,
   utcDateKey,
@@ -144,6 +145,38 @@ describe('repository refresh generations', () => {
       repositoryGeneration: 2,
       requestId: 8,
     }, current)).toBe(true)
+  })
+})
+
+describe('RepositoryPickerCoordinator', () => {
+  it('allows only one picker request until the active request finishes', async () => {
+    let finishPicker: ((path: string | null) => void) | undefined
+    const picker = vi.fn(() => new Promise<string | null>((resolve) => {
+      finishPicker = resolve
+    }))
+    const coordinator = new RepositoryPickerCoordinator()
+
+    const first = coordinator.open(picker)
+    const duplicate = coordinator.open(picker)
+
+    expect(first).not.toBeNull()
+    expect(duplicate).toBeNull()
+    expect(coordinator.isOpen).toBe(true)
+    expect(picker).toHaveBeenCalledTimes(1)
+
+    finishPicker?.('/repo')
+    await expect(first).resolves.toBe('/repo')
+    expect(coordinator.isOpen).toBe(false)
+  })
+
+  it('can open again after cancellation or failure', async () => {
+    const coordinator = new RepositoryPickerCoordinator()
+
+    await expect(coordinator.open(async () => null)).resolves.toBeNull()
+    await expect(coordinator.open(async () => {
+      throw new Error('picker failed')
+    })).rejects.toThrow('picker failed')
+    await expect(coordinator.open(async () => '/repo')).resolves.toBe('/repo')
   })
 })
 

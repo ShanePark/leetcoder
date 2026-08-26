@@ -24,6 +24,7 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            commands::choose_repository,
             commands::validate_project,
             commands::fetch_daily_problem,
             commands::list_problem_files,

@@ -1,4 +1,4 @@
-import { open } from '@tauri-apps/plugin-dialog'
+import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 
 import {
   createBackendClient,
@@ -55,6 +55,33 @@ const OTHER_GROUP: { key: ProblemFileEntry['packageSegment']; label: string } = 
 }
 
 export type DirectoryPicker = () => Promise<string | null>
+
+/**
+ * Allows only one native repository picker at a time. Native pickers can be
+ * hidden by another window on some Linux desktops, so repeated clicks must
+ * not create an unbounded stack of dialogs while the first request is open.
+ */
+export class RepositoryPickerCoordinator {
+  private pending = false
+
+  get isOpen(): boolean {
+    return this.pending
+  }
+
+  open(picker: DirectoryPicker): Promise<string | null> | null {
+    if (this.pending) {
+      return null
+    }
+    this.pending = true
+    return (async (): Promise<string | null> => {
+      try {
+        return await picker()
+      } finally {
+        this.pending = false
+      }
+    })()
+  }
+}
 
 export interface AppOptions {
   backend?: BackendClient
@@ -1111,6 +1138,7 @@ export class LeetcoderApp {
   private readonly root: HTMLElement
   private readonly backend: BackendClient
   private readonly directoryPicker: DirectoryPicker
+  private readonly repositoryPicker = new RepositoryPickerCoordinator()
   private readonly storage: Storage | undefined
   private readonly state: AppState = {
     repoPath: null,
@@ -1767,13 +1795,20 @@ export class LeetcoderApp {
     if (this.state.busy) {
       return
     }
+    const selection = this.repositoryPicker.open(this.directoryPicker)
+    if (!selection) {
+      return
+    }
+    this.renderAll()
     try {
-      const selectedPath = await this.directoryPicker()
+      const selectedPath = await selection
       if (selectedPath) {
         await this.selectRepository(selectedPath, true)
       }
     } catch (error) {
       this.setMessage(errorMessage(error), 'error')
+    } finally {
+      this.renderAll()
     }
   }
 
@@ -2958,7 +2993,7 @@ export class LeetcoderApp {
     this.renderBottomPanelTabs()
     this.renderGitPanel()
     this.renderContextMenu()
-    this.element<HTMLButtonElement>('#choose-repository').disabled = this.state.busy
+    this.element<HTMLButtonElement>('#choose-repository').disabled = this.state.busy || this.repositoryPicker.isOpen
     this.element<HTMLButtonElement>('#refresh-files').disabled = this.state.busy || !this.state.projectValid
     const runButton = this.element<HTMLButtonElement>('#run-test')
     runButton.disabled = this.state.busy || !this.state.selectedFqcn
@@ -2975,6 +3010,13 @@ export class LeetcoderApp {
   private renderHeader(): void {
     const chip = this.element<HTMLButtonElement>('#choose-repository')
     const label = this.element<HTMLElement>('#repo-path')
+    chip.setAttribute('aria-busy', String(this.repositoryPicker.isOpen))
+    if (this.repositoryPicker.isOpen) {
+      label.textContent = 'Choosing repository…'
+      chip.title = 'The repository picker is already open'
+      chip.classList.remove('is-empty')
+      return
+    }
     if (this.state.repoPath) {
       label.textContent = gitFileName(this.state.repoPath)
       chip.title = this.state.repoPath
@@ -3879,15 +3921,7 @@ function fqcnFromJavaPath(path: string): string | null {
 }
 
 async function defaultDirectoryPicker(): Promise<string | null> {
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    title: 'Select your leetcoder repository',
-  })
-  if (Array.isArray(selected)) {
-    return selected[0] ?? null
-  }
-  return selected
+  return tauriInvoke<string | null>('choose_repository')
 }
 
 function safeStorage(): Storage | undefined {

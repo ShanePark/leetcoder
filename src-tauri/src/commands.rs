@@ -8,6 +8,37 @@ use crate::models::{
 use crate::repository;
 use crate::runner;
 use std::sync::Arc;
+use tauri_plugin_dialog::DialogExt;
+
+/// Opens one folder picker attached to the leetcoder window.
+///
+/// The dialog plugin's JavaScript command only assigns a parent on Windows
+/// and macOS. Assigning it here on Linux gives the desktop portal the parent
+/// window identifier, which keeps the picker in front of this application.
+#[tauri::command]
+pub async fn choose_repository(window: tauri::Window) -> Result<Option<String>, String> {
+    let (sender, mut receiver) = tauri::async_runtime::channel(1);
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Select your leetcoder repository")
+        .pick_folder(move |selected| {
+            let _ = sender.blocking_send(selected);
+        });
+
+    let selected = receiver
+        .recv()
+        .await
+        .ok_or_else(|| "The repository picker closed unexpectedly.".to_string())?;
+    selected
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|error| format!("The selected repository path was invalid: {error}"))
+        })
+        .transpose()
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn validate_project(repo_path: String) -> ProjectValidation {
