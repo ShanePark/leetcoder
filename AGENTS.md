@@ -36,7 +36,7 @@
 ## Desktop verification and installation
 
 - Frontend-only checks (`npm run build`) do not update the desktop application launched from the Dock.
-- After completing any source change that affects desktop behavior, run the relevant automated checks and then run `leetcoder-rebuild` before reporting the work complete.
-- `leetcoder-rebuild` performs the Tauri production build, atomically installs the new binary used by the Dock launcher, and restarts leetcoder.
+- After completing any source change that affects desktop behavior, run the relevant automated checks and then run `npm run rebuild` before reporting the work complete.
+- `npm run rebuild` performs the platform-specific Tauri production build, atomically installs the new binary used by the macOS Dock or Ubuntu application launcher, and restarts leetcoder.
 - If the rebuild command is unavailable or fails, do not claim that the Dock application was updated. Report the blocker and the build log location instead.
 - Preserve unrelated working-tree changes while building and installing.

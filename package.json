@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "rebuild": "node scripts/leetcoder-rebuild.mjs",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
