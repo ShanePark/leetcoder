@@ -21,6 +21,12 @@ export interface ProblemFileEntry {
   packageSegment: 'easy' | 'medium' | 'xhard' | 'other'
 }
 
+/** The path and source returned after a file mutation. */
+export interface ProblemFileContent {
+  relativePath: string
+  content: string
+}
+
 /** A path reported by Git as changed in the selected repository. */
 export interface GitFileChange {
   path: string
@@ -115,7 +121,11 @@ export interface BackendClient {
   createProblemFile(repoPath: string, plan: ProblemFilePlan): Promise<void>
   saveProblemFile(repoPath: string, path: string, content: string): Promise<void>
   deleteProblemFile(repoPath: string, path: string): Promise<void>
+  duplicateProblemFile(repoPath: string, path: string): Promise<ProblemFileContent>
+  renameProblemFile(repoPath: string, path: string, newPath: string): Promise<ProblemFileContent>
   listGitChanges(repoPath: string): Promise<GitFileChange[]>
+  discardGitChanges(repoPath: string, path: string): Promise<void>
+  showInFileManager(repoPath: string, path: string): Promise<void>
   getGitDiff(repoPath: string, paths: string[]): Promise<string>
   commitGit(repoPath: string, paths: string[], message: string): Promise<GitCommitResult>
   pushGit(repoPath: string): Promise<GitPushResult>
@@ -123,6 +133,7 @@ export interface BackendClient {
     repoPath: string,
     fullyQualifiedClassName: string,
     onProgress?: TestRunProgressHandler,
+    testMethod?: string,
   ): Promise<TestResult>
 }
 
@@ -190,9 +201,31 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
       await invoke<unknown>('delete_problem_file', { repoPath, path })
     },
 
+    async duplicateProblemFile(repoPath, path) {
+      const response = await invoke<unknown>('duplicate_problem_file', { repoPath, path })
+      return normalizeProblemFileContent(response, 'duplicate')
+    },
+
+    async renameProblemFile(repoPath, path, newPath) {
+      const response = await invoke<unknown>('rename_problem_file', {
+        repoPath,
+        path,
+        newPath,
+      })
+      return normalizeProblemFileContent(response, 'rename')
+    },
+
     async listGitChanges(repoPath) {
       const response = await invoke<unknown>('list_git_changes', { repoPath })
       return normalizeGitChanges(response)
+    },
+
+    async discardGitChanges(repoPath, path) {
+      await invoke<unknown>('discard_git_changes', { repoPath, path })
+    },
+
+    async showInFileManager(repoPath, path) {
+      await invoke<unknown>('show_in_file_manager', { repoPath, path })
     },
 
     async getGitDiff(repoPath, paths) {
@@ -210,7 +243,7 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
       return normalizeGitPushResult(response)
     },
 
-    async runProblemTest(repoPath, fullyQualifiedClassName, onProgress) {
+    async runProblemTest(repoPath, fullyQualifiedClassName, onProgress, testMethod) {
       // The channel is intentionally passed even when the caller does not
       // subscribe. Rust commands use it to report lifecycle events, and a
       // no-op listener keeps the invoke contract identical for every caller.
@@ -220,11 +253,15 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
           onProgress?.(progress)
         }
       })
-      const response = await invoke<unknown>('run_problem_test', {
+      const args: Record<string, unknown> = {
         repoPath,
         fullyQualifiedClassName,
         onEvent,
-      })
+      }
+      if (testMethod !== undefined) {
+        args.testMethod = testMethod
+      }
+      const response = await invoke<unknown>('run_problem_test', args)
       return normalizeTestResult(response)
     },
   }
@@ -353,6 +390,20 @@ function normalizeProblemFiles(value: unknown): ProblemFileEntry[] {
     // this list to Java files at render time.
     .filter((file) => /\.(?:java|kt)$/i.test(file.path))
     .sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function normalizeProblemFileContent(value: unknown, operation: 'duplicate' | 'rename'): ProblemFileContent {
+  if (!isRecord(value)) {
+    throw new Error(`The file ${operation} response was invalid.`)
+  }
+  const relativePath = stringValue(value.relativePath)
+    ?? stringValue(value.relative_path)
+    ?? stringValue(value.path)
+  const content = stringValue(value.content) ?? stringValue(value.source)
+  if (!relativePath || content === undefined) {
+    throw new Error(`The file ${operation} response was missing path or source content.`)
+  }
+  return { relativePath, content }
 }
 
 export function normalizeGitChanges(value: unknown): GitFileChange[] {

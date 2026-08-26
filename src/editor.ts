@@ -6,7 +6,13 @@ import {
   startCompletion,
 } from '@codemirror/autocomplete'
 import { java } from '@codemirror/lang-java'
-import { HighlightStyle, indentOnInput, indentUnit, syntaxHighlighting } from '@codemirror/language'
+import {
+  HighlightStyle,
+  indentOnInput,
+  indentUnit,
+  syntaxHighlighting,
+  syntaxTree,
+} from '@codemirror/language'
 import { tags } from '@lezer/highlight'
 import {
   copyLineDown,
@@ -141,6 +147,71 @@ export interface EditorCallbacks {
   onChange?: (source: string) => void
   onSave?: () => boolean | void
   onRun?: () => boolean | void
+  onRunTestAtCursor?: (methodName: string | null) => boolean | void
+}
+
+const JAVA_IDENTIFIER_START = /^(?:[$_]|\p{ID_Start})$/u
+const JAVA_IDENTIFIER_PART = /^(?:[$\p{ID_Continue}])$/u
+
+function isJavaIdentifier(value: string): boolean {
+  const characters = [...value]
+  return characters.length > 0
+    && JAVA_IDENTIFIER_START.test(characters[0])
+    && characters.slice(1).every((character) => JAVA_IDENTIFIER_PART.test(character))
+}
+
+function isTestAnnotation(annotation: string): boolean {
+  const withoutArguments = annotation.slice(1, annotation.indexOf('(') >= 0
+    ? annotation.indexOf('(')
+    : undefined).trim()
+  const simpleName = withoutArguments.slice(withoutArguments.lastIndexOf('.') + 1)
+  return simpleName === 'Test'
+}
+
+/**
+ * Return the Java @Test method containing a CodeMirror document position.
+ *
+ * MethodDeclaration nodes include their modifiers, declaration, parameters,
+ * and body, so a single range check covers all of the places where a user
+ * reasonably expects a test-only run shortcut to work. The Java syntax tree
+ * also keeps comments and string contents out of the declaration nodes.
+ */
+export function findJavaTestMethodAt(
+  state: EditorState,
+  position = state.selection.main.head,
+): string | null {
+  const source = state.doc.toString()
+  const boundedPosition = Math.max(0, Math.min(position, source.length))
+  let node: ReturnType<typeof syntaxTree>['topNode'] | null = syntaxTree(state)
+    .resolveInner(boundedPosition, 1)
+  while (node && node.name !== 'MethodDeclaration') {
+    node = node.parent
+  }
+  if (!node || boundedPosition < node.from || boundedPosition >= node.to) {
+    return null
+  }
+
+  const modifiers = node.getChild('Modifiers')
+  let hasTest = false
+  for (let child = modifiers?.firstChild; child; child = child.nextSibling) {
+    if (child.name !== 'MarkerAnnotation' && child.name !== 'Annotation') {
+      continue
+    }
+    if (isTestAnnotation(source.slice(child.from, child.to).trim())) {
+      hasTest = true
+      break
+    }
+  }
+  if (!hasTest) {
+    return null
+  }
+
+  const definition = node.getChild('Definition')
+  if (!definition) {
+    return null
+  }
+  const methodName = source.slice(definition.from, definition.to)
+  return isJavaIdentifier(methodName) ? methodName : null
 }
 
 /** A source position that should be surfaced in the editor gutter. */
@@ -555,6 +626,12 @@ export class JavaEditor {
   constructor(parent: HTMLElement, callbacks: EditorCallbacks = {}) {
     const save = () => callbacks.onSave?.() !== false
     const run = () => callbacks.onRun?.() !== false
+    const runTestAtCursor = (view: EditorView): boolean => {
+      const methodName = findJavaTestMethodAt(view.state)
+      // Returning true even when no callback is installed keeps the browser's
+      // Ctrl/Cmd+Shift+R refresh shortcut from escaping the editor.
+      return callbacks.onRunTestAtCursor?.(methodName) !== false
+    }
     const insertJavaDoc = (view: EditorView): boolean => {
       const selection = view.state.selection.main
       if (!selection.empty) {
@@ -636,6 +713,7 @@ export class JavaEditor {
         Prec.high(keymap.of([
           { key: 'Mod-s', run: save },
           { key: 'Mod-r', run },
+          { key: 'Shift-Mod-r', run: runTestAtCursor, preventDefault: true },
           { key: 'Shift-Mod-j', run: insertJavaDoc },
           // IntelliJ-style line editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while

@@ -1,4 +1,5 @@
 import { copyLineDown, deleteLine, history, undo } from '@codemirror/commands'
+import { java } from '@codemirror/lang-java'
 import {
   EditorSelection,
   EditorState,
@@ -9,12 +10,20 @@ import type { EditorView } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
 
 import {
+  findJavaTestMethodAt,
   formatJavaDocClipboard,
   isJavaDocAltShortcut,
   isLineDeleteAltShortcut,
   isLineDuplicateAltShortcut,
   planJavaDocInsertion,
 } from '../../src/editor'
+
+function javaState(source: string): EditorState {
+  return EditorState.create({
+    doc: source,
+    extensions: [java()],
+  })
+}
 
 function applyDeleteLine(state: EditorState): EditorState {
   let transaction: TransactionSpec | null = null
@@ -44,6 +53,75 @@ function applyUndo(state: EditorState): { handled: boolean; state: EditorState }
   })
   return { handled, state: nextState }
 }
+
+describe('Java test method lookup', () => {
+  it('finds a test from its annotation, declaration, or nested body', () => {
+    const source = [
+      'class Solution {',
+      '    @Test',
+      '    public void test1() {',
+      '        if (true) {',
+      '            String brace = "}";',
+      '        }',
+      '    }',
+      '    @Test',
+      '    public void test2() {}',
+      '}',
+    ].join('\n')
+    const state = javaState(source)
+
+    expect(findJavaTestMethodAt(state, source.indexOf('@Test') + 2)).toBe('test1')
+    expect(findJavaTestMethodAt(state, source.indexOf('test1') + 2)).toBe('test1')
+    expect(findJavaTestMethodAt(state, source.indexOf('String brace') + 2)).toBe('test1')
+    expect(findJavaTestMethodAt(state, source.indexOf('test2') + 2)).toBe('test2')
+  })
+
+  it('returns null between methods and outside test methods', () => {
+    const source = [
+      'class Solution {',
+      '    @Test void test1() {}',
+      '',
+      '    void helper() {}',
+      '',
+      '    @Test void test2() {}',
+      '}',
+    ].join('\n')
+    const state = javaState(source)
+
+    expect(findJavaTestMethodAt(state, source.indexOf('helper'))).toBeNull()
+    expect(findJavaTestMethodAt(state, source.indexOf('helper()') + 'helper()'.length)).toBeNull()
+    const gapBeforeTest2 = source.indexOf('\n\n    @Test', source.indexOf('helper')) + 1
+    expect(findJavaTestMethodAt(state, gapBeforeTest2)).toBeNull()
+    expect(findJavaTestMethodAt(state, source.indexOf('}') + 1)).toBeNull()
+  })
+
+  it('ignores annotation-looking text in comments and strings', () => {
+    const source = [
+      'class Solution {',
+      '    // @Test void fakeComment() {}',
+      '    String text = "@Test void fakeString() {}";',
+      '    @Test void actual_test() {}',
+      '}',
+    ].join('\n')
+    const state = javaState(source)
+
+    expect(findJavaTestMethodAt(state, source.indexOf('fakeComment'))).toBeNull()
+    expect(findJavaTestMethodAt(state, source.indexOf('fakeString'))).toBeNull()
+    expect(findJavaTestMethodAt(state, source.indexOf('actual_test') + 2)).toBe('actual_test')
+  })
+
+  it('supports qualified Test annotations and keeps Java identifier names intact', () => {
+    const source = [
+      'class Solution {',
+      '    @org.junit.jupiter.api.Test',
+      '    void test_2$() {}',
+      '}',
+    ].join('\n')
+    const state = javaState(source)
+
+    expect(findJavaTestMethodAt(state, source.indexOf('junit'))).toBe('test_2$')
+  })
+})
 
 describe('JavaDoc editor helpers', () => {
   it('plans an indented JavaDoc above a class and places the cursor after the body prefix', () => {

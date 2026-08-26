@@ -41,6 +41,14 @@ pub struct ProblemFileArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RenameProblemFileArgs {
+    pub project_root: String,
+    pub relative_path: String,
+    pub new_relative_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateProblemFileArgs {
     pub project_root: String,
     pub relative_path: String,
@@ -59,6 +67,8 @@ pub struct ProblemFileContent {
 pub struct RunProblemTestArgs {
     pub project_root: String,
     pub fully_qualified_class_name: String,
+    #[serde(default)]
+    pub test_method: Option<String>,
 }
 
 /// A path with changes in the selected repository.

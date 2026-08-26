@@ -3,7 +3,7 @@ use crate::leetcode;
 use crate::models::{
     CreateProblemFileArgs, DailyProblem, GitCommitResult, GitFileChange, GitPushResult,
     ProblemFileArgs, ProblemFileContent, ProblemFileList, ProblemTestEvent, ProblemTestResult,
-    ProjectValidation, RunProblemTestArgs,
+    ProjectValidation, RenameProblemFileArgs, RunProblemTestArgs,
 };
 use crate::repository;
 use crate::runner;
@@ -98,8 +98,42 @@ pub fn delete_problem_file(repo_path: String, path: String) -> Result<(), String
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn duplicate_problem_file(
+    repo_path: String,
+    path: String,
+) -> Result<ProblemFileContent, String> {
+    repository::duplicate_problem_file(ProblemFileArgs {
+        project_root: repo_path,
+        relative_path: path,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn rename_problem_file(
+    repo_path: String,
+    path: String,
+    new_path: String,
+) -> Result<ProblemFileContent, String> {
+    repository::rename_problem_file(RenameProblemFileArgs {
+        project_root: repo_path,
+        relative_path: path,
+        new_relative_path: new_path,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn list_git_changes(repo_path: String) -> Result<Vec<GitFileChange>, String> {
     git::list_changes(&repo_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn discard_git_changes(repo_path: String, path: String) -> Result<(), String> {
+    git::discard_changes(&repo_path, &path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn show_in_file_manager(repo_path: String, path: String) -> Result<(), String> {
+    git::show_in_file_manager(&repo_path, &path)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -125,6 +159,7 @@ pub fn push_git(repo_path: String) -> Result<GitPushResult, String> {
 pub async fn run_problem_test(
     repo_path: String,
     fully_qualified_class_name: String,
+    test_method: Option<String>,
     on_event: tauri::ipc::Channel<ProblemTestEvent>,
 ) -> Result<ProblemTestResult, String> {
     let sink = Arc::new(move |event| {
@@ -137,6 +172,7 @@ pub async fn run_problem_test(
             RunProblemTestArgs {
                 project_root: repo_path,
                 fully_qualified_class_name,
+                test_method,
             },
             Some(sink),
         )

@@ -1,18 +1,27 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  accordionGroupKeys,
   AutosaveCoordinator,
   charDiffSegments,
   clampBottomPanelHeight,
+  clampContextMenuPosition,
+  clampDailyDescriptionHeight,
   clampGitFileListWidth,
+  clampSidebarWidth,
   conciseTestFailureMessage,
+  discardGitChangesConfirmationMessage,
+  discardGitChangesWarningMessage,
   deleteFileConfirmationMessage,
   defaultGitCommitMessage,
   defaultVisibleTests,
+  duplicateFileName,
   filterProblemFiles,
   filterProblemFilesByGroup,
   filterTestDiagnostics,
   findTodayProblemFile,
+  findFileAfterDuplicate,
+  findRestoredFileAfterGitRename,
   fqcnFromJavaPath,
   gitDirectoryPath,
   gitResultToastMessage,
@@ -20,9 +29,12 @@ import {
   normalizeGitDiff,
   normalizeGitStatus,
   normalizeDailyProblemDateKey,
+  normalizeJavaFileName,
   parseUnifiedDiffLines,
+  replacementTabIndex,
   RepositoryPickerCoordinator,
   relevantTestStackFrames,
+  testOutputSegments,
   nextUtcMidnightDelayMs,
   utcDateKey,
 } from '../../src/app'
@@ -60,6 +72,91 @@ describe('file search', () => {
     expect(filterProblemFiles(files, '   ')).toEqual(files)
     expect(filterProblemFilesByGroup(files, 'easy', 'q')).toEqual(files.slice(0, 2))
     expect(filterProblemFilesByGroup(files, 'medium', 'two')).toEqual([])
+  })
+})
+
+describe('file explorer actions', () => {
+  it('keeps only one problem difficulty group expanded at a time', () => {
+    expect(accordionGroupKeys('easy', true)).toEqual(['easy'])
+    expect(accordionGroupKeys('medium', true)).toEqual(['medium'])
+    expect(accordionGroupKeys('xhard', true)).toEqual(['xhard'])
+    expect(accordionGroupKeys('other', true)).toEqual(['other'])
+    expect(accordionGroupKeys('medium', false)).toEqual([])
+  })
+
+  it('chooses the first free numeric suffix before the Java extension', () => {
+    const name = 'Q2904ShortestAndLexicographicallySmallestBeautifulString.java'
+    expect(duplicateFileName(name, [name])).toBe(
+      'Q2904ShortestAndLexicographicallySmallestBeautifulString2.java',
+    )
+    expect(duplicateFileName(name, [name, name.replace('.java', '2.java')])).toBe(
+      'Q2904ShortestAndLexicographicallySmallestBeautifulString3.java',
+    )
+  })
+
+  it('finds the newly-created duplicate after refreshing the explorer', () => {
+    const original: ProblemFileEntry = {
+      path: 'src/main/java/easy/Q2904ShortestAndLexicographicallySmallestBeautifulString.java',
+      name: 'Q2904ShortestAndLexicographicallySmallestBeautifulString.java',
+      packageSegment: 'easy',
+    }
+    const duplicate: ProblemFileEntry = {
+      ...original,
+      path: original.path.replace('.java', '2.java'),
+      name: original.name.replace('.java', '2.java'),
+    }
+    expect(findFileAfterDuplicate(
+      [original, duplicate],
+      new Set([original.path]),
+      original,
+      { relativePath: duplicate.path },
+    )).toEqual(duplicate)
+  })
+
+  it('finds the original entry restored after discarding a staged rename', () => {
+    const restored: ProblemFileEntry = {
+      path: 'src/main/java/easy/Q2904ShortestAndLexicographicallySmallestBeautifulString.java',
+      name: 'Q2904ShortestAndLexicographicallySmallestBeautifulString.java',
+      packageSegment: 'easy',
+    }
+    expect(findRestoredFileAfterGitRename([restored], {
+      path: restored.path.replace('.java', 'Renamed.java'),
+      originalPath: restored.path,
+    })).toEqual(restored)
+    expect(findRestoredFileAfterGitRename([restored], {
+      path: restored.path,
+      originalPath: restored.path,
+    })).toBeNull()
+  })
+
+  it('selects the right tab first, then the left tab when closing the last tab', () => {
+    expect(replacementTabIndex(2, 0)).toBe(0)
+    expect(replacementTabIndex(2, 1)).toBe(1)
+    expect(replacementTabIndex(2, 2)).toBe(1)
+    expect(replacementTabIndex(0, 0)).toBeNull()
+    expect(replacementTabIndex(2, 3)).toBeNull()
+  })
+
+  it('normalizes safe rename input and rejects paths or invalid basenames', () => {
+    expect(normalizeJavaFileName('Q2904Copy')).toBe('Q2904Copy.java')
+    expect(normalizeJavaFileName('Q2904Copy.JAVA')).toBe('Q2904Copy.JAVA')
+    expect(normalizeJavaFileName('../Q2904Copy.java')).toBeNull()
+    expect(normalizeJavaFileName('Q2904?.java')).toBeNull()
+  })
+
+  it('keeps the sidebar within its own bounds and leaves editor room', () => {
+    expect(clampSidebarWidth(100, 1200)).toBe(180)
+    expect(clampSidebarWidth(700, 1200)).toBe(520)
+    expect(clampSidebarWidth(500, 800)).toBe(433)
+    expect(clampSidebarWidth(Number.NaN, 1200)).toBe(248)
+  })
+
+  it('keeps the open description within bounds while preserving editor space', () => {
+    expect(clampDailyDescriptionHeight(40, 800)).toBe(120)
+    expect(clampDailyDescriptionHeight(1000, 800)).toBe(534)
+    expect(clampDailyDescriptionHeight(400, 900)).toBe(400)
+    expect(clampDailyDescriptionHeight(Number.NaN, 900)).toBe(220)
+    expect(clampDailyDescriptionHeight(500, 300)).toBe(120)
   })
 })
 
@@ -198,6 +295,9 @@ describe('Git panel helpers', () => {
     expect(normalizeGitStatus({
       changes: [{ path: 'Q2.java', status: 'modified', indexStatus: '.', worktreeStatus: 'M' }],
     }).files[0].staged).toBe(false)
+    expect(normalizeGitStatus({
+      changes: [{ path: 'renamed/Q1.java', originalPath: 'original/Q1.java', status: 'renamed' }],
+    }).files[0].originalPath).toBe('original/Q1.java')
   })
 
   it('splits a multi-file unified diff by repository-relative path', () => {
@@ -310,6 +410,14 @@ describe('Git panel helpers', () => {
     expect(clampGitFileListWidth(700, 900)).toBe(617)
     expect(clampGitFileListWidth(Number.POSITIVE_INFINITY, 400)).toBe(180)
     expect(deleteFileConfirmationMessage('Q1.java')).toBe('Delete Q1.java?\n\nThis cannot be undone.')
+    expect(discardGitChangesConfirmationMessage('src/Q1.java')).toContain('all staged and unstaged changes')
+    expect(discardGitChangesConfirmationMessage('src/Q1.java')).toContain('Untracked/new files will be deleted')
+    expect(discardGitChangesConfirmationMessage('src/Q1.java')).toContain('cannot be undone')
+    expect(discardGitChangesWarningMessage()).toBe(
+      'This permanently discards all staged and unstaged changes. Untracked/new files will be deleted. This cannot be undone.',
+    )
+    expect(clampContextMenuPosition(900, 780, 190, 76, 1000, 800)).toEqual({ x: 802, y: 716 })
+    expect(clampContextMenuPosition(-10, -20, 190, 76, 1000, 800)).toEqual({ x: 8, y: 8 })
   })
 
   it('uses UTC dates and schedules just after the next UTC midnight', () => {
@@ -330,6 +438,24 @@ describe('Git panel helpers', () => {
 })
 
 describe('test failure and diagnostic presentation helpers', () => {
+  it('creates continuous output segments without empty stream placeholders', () => {
+    expect(testOutputSegments('hello\n', '')).toEqual([
+      { stream: 'stdout', text: 'hello\n' },
+    ])
+    expect(testOutputSegments('', 'warning\n')).toEqual([
+      { stream: 'stderr', text: 'warning\n' },
+    ])
+    expect(testOutputSegments('out\n', 'err\n')).toEqual([
+      { stream: 'stdout', text: 'out\n' },
+      { stream: 'stderr', text: 'err\n' },
+    ])
+    expect(testOutputSegments('out', 'err')).toEqual([
+      { stream: 'stdout', text: 'out\n' },
+      { stream: 'stderr', text: 'err' },
+    ])
+    expect(testOutputSegments('\u001b[31m \u001b[0m', '\n\t')).toEqual([])
+  })
+
   it('keeps a concise assertion and user frames while filtering internal frames', () => {
     const test: TestCaseResult = {
       name: 'asserts',

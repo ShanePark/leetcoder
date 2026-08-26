@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 
@@ -17,6 +17,247 @@ pub(crate) fn list_changes(project_root: &str) -> Result<Vec<GitFileChange>, Str
     )?;
     let output = require_success("Git status", output)?;
     parse_status(&output.stdout)
+}
+
+/// Discard every local change represented by one current Git status row.
+///
+/// The status is intentionally re-read inside this operation.  A row in the
+/// UI is only a hint: the worktree may have changed between rendering and the
+/// user's confirmation.  Tracked paths are restored from HEAD (both index and
+/// worktree), while untracked and staged-added paths are removed from the
+/// index and worktree.  A staged rename is treated as one logical change and
+/// restores its original path after removing the destination.
+pub(crate) fn discard_changes(project_root: &str, requested_path: &str) -> Result<(), String> {
+    let root = canonical_git_root(project_root)?;
+    let requested = validate_git_operation_path(&root, requested_path)?;
+    let changes = list_changes_at_root(&root)?;
+    let change = changes
+        .iter()
+        .find(|change| {
+            change.path == requested || change.original_path.as_deref() == Some(requested.as_str())
+        })
+        .cloned()
+        .ok_or_else(|| format!("The selected path is not currently changed: {requested}"))?;
+
+    let current_path = validate_git_operation_path(&root, &change.path)?;
+    let original_path = change
+        .original_path
+        .as_deref()
+        .map(|path| validate_git_operation_path(&root, path))
+        .transpose()?;
+
+    let mut related_paths = vec![current_path.clone()];
+    if let Some(original_path) = original_path.as_deref() {
+        if !related_paths.iter().any(|path| path == original_path) {
+            related_paths.push(original_path.to_string());
+        }
+    }
+
+    // An unborn repository has no tree to restore from.  Every indexed path
+    // is an addition, so removing the index entries and worktree paths is the
+    // only meaningful interpretation of discard.
+    if !has_head(&root) {
+        for path in &related_paths {
+            remove_from_index(&root, path)?;
+        }
+        for path in &related_paths {
+            remove_worktree_file(&root, path)?;
+        }
+        return Ok(());
+    }
+
+    if is_untracked_change(&change) {
+        remove_worktree_file(&root, &current_path)?;
+        return Ok(());
+    }
+
+    // A staged add has no path in HEAD.  Restore cannot match it against the
+    // source tree, so remove it explicitly from both Git and the worktree.
+    if change.index_status == "A" || change.index_status == "?" {
+        remove_from_index(&root, &current_path)?;
+        remove_worktree_file(&root, &current_path)?;
+        return Ok(());
+    }
+
+    if change.index_status == "R" {
+        // The destination is an added path in the index, so restore the
+        // original first would leave the rename destination behind. Remove
+        // the destination and then restore the original from HEAD.
+        remove_from_index(&root, &current_path)?;
+        remove_worktree_file(&root, &current_path)?;
+        if let Some(original_path) = original_path.as_deref() {
+            restore_from_head(&root, &[original_path.to_string()])?;
+        }
+        return Ok(());
+    }
+
+    // A copy has an untouched source path.  Discard only the copied target so
+    // unrelated edits to the source are not lost.
+    if change.index_status == "C" {
+        remove_from_index(&root, &current_path)?;
+        remove_worktree_file(&root, &current_path)?;
+        return Ok(());
+    }
+
+    restore_from_head(&root, &related_paths)
+}
+
+/// Reveal a changed path in the system file manager.  The path is resolved
+/// relative to the selected repository and never accepted as an arbitrary
+/// absolute path.  If the file was deleted after the Git row was rendered,
+/// the nearest existing repository directory is revealed instead.
+pub(crate) fn show_in_file_manager(project_root: &str, requested_path: &str) -> Result<(), String> {
+    let root = canonical_git_root(project_root)?;
+    let path = validate_git_operation_path(&root, requested_path)?;
+    let target = file_manager_target(&root, &path)?;
+    tauri_plugin_opener::reveal_item_in_dir(&target)
+        .map_err(|error| format!("Unable to show '{}' in the file manager: {error}", path))
+}
+
+fn is_untracked_change(change: &GitFileChange) -> bool {
+    change.index_status == "?" && change.worktree_status == "?"
+}
+
+/// Validate a Git path before any command or filesystem mutation.  In
+/// addition to the existing canonical-boundary check, reject symlinked path
+/// components so an operation cannot be redirected outside the repository by
+/// a link created after the row was listed.
+fn validate_git_operation_path(root: &Path, path: &str) -> Result<String, String> {
+    let relative = validate_git_relative_path(path)?;
+    let normalized = git_path_string(&relative);
+    validate_git_path_components(root, &normalized)?;
+    validate_worktree_path(root, &normalized)?;
+    Ok(normalized)
+}
+
+fn validate_git_path_components(root: &Path, path: &str) -> Result<(), String> {
+    let mut current = root.to_path_buf();
+    for component in Path::new(path).components() {
+        let Component::Normal(value) = component else {
+            continue;
+        };
+        current.push(value);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("Symlinked Git paths are not allowed: {path}"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!("Unable to inspect Git path '{path}': {error}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_from_index(root: &Path, path: &str) -> Result<(), String> {
+    let args = [
+        "rm".to_string(),
+        "--cached".to_string(),
+        "--ignore-unmatch".to_string(),
+        "-f".to_string(),
+        "--".to_string(),
+        git_pathspec(path),
+    ];
+    let output = run_git(root, args.iter())?;
+    require_success("Git index cleanup", output).map(|_| ())
+}
+
+fn remove_worktree_file(root: &Path, path: &str) -> Result<(), String> {
+    validate_git_operation_path(root, path)?;
+    let lexical = root.join(path);
+    let metadata = match std::fs::symlink_metadata(&lexical) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Unable to inspect Git path '{path}': {error}")),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(format!("Symlinked Git paths are not allowed: {path}"));
+    }
+    if !metadata.is_file() {
+        return Err(format!("Git path is not a regular file: {path}"));
+    }
+    std::fs::remove_file(&lexical)
+        .map_err(|error| format!("Unable to remove Git path '{path}': {error}"))
+}
+
+fn restore_from_head(root: &Path, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![
+        "restore".to_string(),
+        "--source=HEAD".to_string(),
+        "--staged".to_string(),
+        "--worktree".to_string(),
+        "--".to_string(),
+    ];
+    args.extend(paths.iter().map(|path| git_pathspec(path)));
+    require_success("Git restore", run_git(root, args.iter())?).map(|_| ())
+}
+
+fn file_manager_target(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let lexical = root.join(path);
+    match std::fs::symlink_metadata(&lexical) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(format!("Symlinked Git paths are not allowed: {path}"));
+            }
+            let canonical = std::fs::canonicalize(&lexical)
+                .map_err(|error| format!("Unable to resolve Git path '{path}': {error}"))?;
+            if !is_within(root, &canonical) {
+                return Err(format!("Git path escapes projectRoot: {path}"));
+            }
+            Ok(canonical)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            existing_parent_for_file_manager(root, &lexical, path)
+        }
+        Err(error) => Err(format!("Unable to inspect Git path '{path}': {error}")),
+    }
+}
+
+fn existing_parent_for_file_manager(
+    root: &Path,
+    lexical: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let mut candidate = lexical.parent();
+    while let Some(path) = candidate {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(format!(
+                        "Symlinked Git paths are not allowed: {requested_path}"
+                    ));
+                }
+                if !metadata.is_dir() {
+                    return Err(format!(
+                        "Git path parent is not a directory: {requested_path}"
+                    ));
+                }
+                let canonical = std::fs::canonicalize(path).map_err(|error| {
+                    format!("Unable to resolve Git path parent '{requested_path}': {error}")
+                })?;
+                if !is_within(root, &canonical) {
+                    return Err(format!("Git path escapes projectRoot: {requested_path}"));
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                candidate = path.parent();
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Unable to inspect Git path parent '{requested_path}': {error}"
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "Unable to resolve Git path parent '{requested_path}'"
+    ))
 }
 
 /// Return one unified patch for the selected paths.
@@ -690,6 +931,146 @@ mod tests {
         assert_eq!(changes[1].status, "M");
         assert_eq!(changes[1].index_status, ".");
         assert_eq!(changes[1].worktree_status, "M");
+    }
+
+    #[test]
+    fn discard_restores_unstaged_staged_and_mixed_tracked_changes() {
+        let directory = fixture();
+        let root = directory.path().to_str().unwrap();
+        let tracked = directory.path().join("tracked.txt");
+
+        fs::write(&tracked, "unstaged\n").expect("unstaged change");
+        discard_changes(root, "tracked.txt").expect("discard unstaged change");
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "before\n");
+        assert!(list_changes(root).unwrap().is_empty());
+
+        fs::write(&tracked, "staged\n").expect("staged change");
+        run_fixture_git(directory.path(), &["add", "--", "tracked.txt"]);
+        discard_changes(root, "tracked.txt").expect("discard staged change");
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "before\n");
+        assert!(list_changes(root).unwrap().is_empty());
+
+        fs::write(&tracked, "staged\n").expect("staged content");
+        run_fixture_git(directory.path(), &["add", "--", "tracked.txt"]);
+        fs::write(&tracked, "staged and unstaged\n").expect("mixed content");
+        discard_changes(root, "tracked.txt").expect("discard mixed change");
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "before\n");
+        assert!(list_changes(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn discard_removes_untracked_and_staged_added_files() {
+        let directory = fixture();
+        let root = directory.path().to_str().unwrap();
+        let untracked = directory.path().join("untracked.txt");
+        fs::write(&untracked, "untracked\n").expect("untracked file");
+        discard_changes(root, "untracked.txt").expect("discard untracked file");
+        assert!(!untracked.exists());
+        assert!(list_changes(root).unwrap().is_empty());
+
+        let added = directory.path().join("added.txt");
+        fs::write(&added, "added\n").expect("staged added file");
+        run_fixture_git(directory.path(), &["add", "--", "added.txt"]);
+        discard_changes(root, "added.txt").expect("discard staged added file");
+        assert!(!added.exists());
+        assert!(list_changes(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn discard_restores_deleted_files_and_staged_renames() {
+        let directory = fixture();
+        let root = directory.path().to_str().unwrap();
+        let tracked = directory.path().join("tracked.txt");
+        fs::remove_file(&tracked).expect("delete tracked file");
+        discard_changes(root, "tracked.txt").expect("discard deleted file");
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "before\n");
+        assert!(list_changes(root).unwrap().is_empty());
+
+        let renamed = directory.path().join("renamed.txt");
+        fs::rename(&tracked, &renamed).expect("rename tracked file");
+        run_fixture_git(directory.path(), &["add", "--all"]);
+        let changes = list_changes(root).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "renamed.txt");
+        assert_eq!(changes[0].original_path.as_deref(), Some("tracked.txt"));
+        // Either side of a freshly listed rename resolves to the same logical
+        // status row; the UI normally passes the destination path.
+        discard_changes(root, "tracked.txt").expect("discard staged rename");
+        assert!(!renamed.exists());
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "before\n");
+        assert!(list_changes(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn discard_rechecks_status_before_mutating_the_worktree() {
+        let directory = fixture();
+        let root = directory.path().to_str().unwrap();
+        let error = discard_changes(root, "tracked.txt").unwrap_err();
+        assert!(error.contains("not currently changed"));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("tracked.txt")).unwrap(),
+            "before\n"
+        );
+    }
+
+    #[test]
+    fn discard_handles_unborn_head_changes() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        run_fixture_git(directory.path(), &["init", "--quiet"]);
+        let root = directory.path().to_str().unwrap();
+
+        let untracked = directory.path().join("untracked.txt");
+        fs::write(&untracked, "untracked\n").expect("untracked file");
+        discard_changes(root, "untracked.txt").expect("discard unborn untracked file");
+        assert!(!untracked.exists());
+
+        let added = directory.path().join("added.txt");
+        fs::write(&added, "added\n").expect("unborn staged file");
+        run_fixture_git(directory.path(), &["add", "--", "added.txt"]);
+        discard_changes(root, "added.txt").expect("discard unborn staged file");
+        assert!(!added.exists());
+        assert!(list_changes(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn discard_and_file_manager_reject_unsafe_paths() {
+        let directory = fixture();
+        let root = directory.path().to_str().unwrap();
+        assert!(discard_changes(root, "../outside.txt")
+            .unwrap_err()
+            .contains("may not contain '..'"));
+        assert!(show_in_file_manager(root, "/outside.txt")
+            .unwrap_err()
+            .contains("must be relative"));
+
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let link = directory.path().join("linked.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path().join("outside.txt"), &link).expect("symlink");
+        #[cfg(unix)]
+        {
+            fs::write(outside.path().join("outside.txt"), "outside\n").expect("outside file");
+            assert!(show_in_file_manager(root, "linked.txt")
+                .unwrap_err()
+                .contains("Symlinked Git paths"));
+        }
+    }
+
+    #[test]
+    fn file_manager_target_uses_existing_file_or_nearest_parent() {
+        let directory = fixture();
+        let root = std::fs::canonicalize(directory.path()).expect("canonical root");
+        let existing = file_manager_target(&root, "tracked.txt").expect("existing target");
+        assert_eq!(existing, root.join("tracked.txt"));
+
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested).expect("nested directory");
+        let deleted = file_manager_target(&root, "nested/deleted.txt").expect("parent target");
+        assert_eq!(deleted, std::fs::canonicalize(nested).unwrap());
+
+        let missing_parent =
+            file_manager_target(&root, "missing/deleted.txt").expect("repository root target");
+        assert_eq!(missing_parent, root);
     }
 
     #[test]
