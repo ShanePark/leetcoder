@@ -9,6 +9,8 @@ import {
   normalizeTestResult,
   normalizeTestRunProgress,
   type Invoke,
+  type Listen,
+  type RepositoryFilesChanged,
 } from '../../src/backend'
 
 describe('backend client', () => {
@@ -514,5 +516,72 @@ describe('backend client', () => {
   it('uses a non-zero legacy exit code when success is absent', () => {
     expect(normalizeTestResult({ stdout: '', stderr: '', exitCode: 1 }).success).toBe(false)
     expect(normalizeTestResult({ stdout: '', stderr: '', exitCode: 0 }).success).toBe(true)
+  })
+})
+
+describe('repository watcher bridge', () => {
+  const noopListen: Listen = async () => () => {}
+
+  it('starts and stops the watcher with the repository path', async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
+    const invoke: Invoke = async (command, args) => {
+      calls.push({ command, args })
+      return undefined as never
+    }
+    const client = createBackendClient(invoke, noopListen)
+
+    await client.watchRepository('/home/shane/leetcode')
+    await client.stopWatchingRepository()
+
+    expect(calls).toEqual([
+      { command: 'watch_repository', args: { repoPath: '/home/shane/leetcode' } },
+      { command: 'unwatch_repository', args: undefined },
+    ])
+  })
+
+  it('forwards watcher payloads and hands back the unsubscribe function', async () => {
+    let emit: ((message: { payload: unknown }) => void) | null = null
+    let unsubscribed = false
+    const listen: Listen = async (event, handler) => {
+      expect(event).toBe('repository-files-changed')
+      emit = handler
+      return () => {
+        unsubscribed = true
+      }
+    }
+    const seen: RepositoryFilesChanged[] = []
+    const client = createBackendClient(async () => undefined as never, listen)
+
+    const unsubscribe = await client.onRepositoryFilesChanged((change) => seen.push(change))
+    emit!({ payload: { paths: ['src/Q1.java'], structural: true } })
+    emit!({ payload: { paths: ['src/Q2.java'] } })
+
+    expect(seen).toEqual([
+      { paths: ['src/Q1.java'], structural: true },
+      { paths: ['src/Q2.java'], structural: false },
+    ])
+
+    unsubscribe()
+    expect(unsubscribed).toBe(true)
+  })
+
+  it('ignores watcher payloads that carry no usable paths', async () => {
+    let emit: ((message: { payload: unknown }) => void) | null = null
+    const listen: Listen = async (_event, handler) => {
+      emit = handler
+      return () => {}
+    }
+    let received = 0
+    const client = createBackendClient(async () => undefined as never, listen)
+
+    await client.onRepositoryFilesChanged(() => {
+      received += 1
+    })
+    emit!({ payload: null })
+    emit!({ payload: { structural: true } })
+    emit!({ payload: { paths: [] } })
+    emit!({ payload: { paths: [7, null] } })
+
+    expect(received).toBe(0)
   })
 })

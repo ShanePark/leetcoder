@@ -2354,3 +2354,70 @@ summary.test-row-summary:hover {
 .discard-git-confirm:hover:not(:disabled) {
   filter: brightness(1.1);
 }
+
+.shortcuts-dialog {
+  display: flex;
+  width: min(560px, 100%);
+  max-height: min(640px, 100%);
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-3);
+  box-shadow: var(--shadow-menu);
+}
+
+.shortcuts-title {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.shortcuts-body {
+  display: flex;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.shortcuts-group-title {
+  margin-bottom: 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.shortcuts-list {
+  display: grid;
+  align-items: baseline;
+  gap: 6px 14px;
+  grid-template-columns: max-content 1fr;
+}
+
+.shortcuts-keys {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.shortcuts-description {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.shortcuts-note {
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.shortcuts-actions {
+  display: flex;
+  justify-content: flex-end;
+}

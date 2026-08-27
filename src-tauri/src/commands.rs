@@ -7,6 +7,7 @@ use crate::models::{
 };
 use crate::repository;
 use crate::runner;
+use crate::watcher;
 use std::sync::Arc;
 use tauri_plugin_dialog::DialogExt;
 
@@ -179,4 +180,18 @@ pub async fn run_problem_test(
     })
     .await
     .map_err(|error| format!("Problem test worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn watch_repository(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, watcher::RepositoryWatcher>,
+    repo_path: String,
+) -> Result<(), String> {
+    watcher::watch(app, &state, &repo_path)
+}
+
+#[tauri::command]
+pub fn unwatch_repository(state: tauri::State<'_, watcher::RepositoryWatcher>) {
+    watcher::unwatch(&state);
 }

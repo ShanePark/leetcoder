@@ -1,7 +1,14 @@
 {
-  "$schema": "../gen/schemas/desktop-capability-schema.json",
+  "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for the leetcoder main window.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-destroy", "dialog:default", "opener:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-destroy",
+    "dialog:default",
+    "opener:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
+  ]
 }

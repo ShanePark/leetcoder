@@ -6,6 +6,36 @@
 - Do not invent requirements, broaden scope, or add speculative abstractions or dependencies.
 - Follow existing conventions and preserve unrelated behavior and work.
 - Write clear code. Comment only non-obvious rationale, invariants, or constraints.
+- Keyboard shortcuts follow the policy in `## Keyboard Shortcuts` below.
+
+## Keyboard Shortcuts
+
+The goal is one set of muscle memory across a MacBook and a Linux machine. On a
+Mac keyboard the modifier next to the space bar is `Cmd`; on a Linux keyboard
+the key in that same place is `Alt`. So a shortcut is defined by the *physical
+key* the thumb lands on, and `Cmd` on macOS pairs with `Alt` on Linux — not
+with `Ctrl`.
+
+- Declare every shortcut in `src/shortcuts.ts`. It is the single source of
+  truth: the keymap, the in-app list, and every button, tooltip, and gutter
+  hint read from it. Never hardcode a shortcut label anywhere else — call
+  `shortcutLabel(id, macPlatform)`.
+- Bind each shortcut as both `Mod-<key>` and `Alt-<key>`. `Mod` is `Cmd` on
+  macOS and `Ctrl` elsewhere, so this registers the Mac chord, its Linux twin,
+  and the `Ctrl` form that other editors train.
+- `Alt-` is the form Linux advertises and `Mod-` is the form macOS advertises.
+  `platformBindings` orders them; the `Ctrl` twin stays bound but is never the
+  primary label. Save shows as `Alt+S` on Linux and `⌘S` on macOS; JavaDoc as
+  `Alt+Shift+J` and `⇧⌘J`.
+- Exceptions are shortcuts that are the same chord on both platforms already —
+  `Ctrl-Space`, and IntelliJ chords the user asked for verbatim such as
+  `Mod-Alt-l` for reformat. These get no `Alt-` twin.
+- macOS turns `Option`+letter into a typed glyph, so CodeMirror's key names do
+  not match those bindings. Every `Alt-` shortcut also needs a matcher in
+  `src/editor.ts` that works from `event.code`, registered in
+  `altShortcutCommands`.
+- Non-macOS labels print modifiers in the order `Ctrl`, `Alt`, `Shift`; macOS
+  labels use the stacked glyphs in the order the binding is written.
 
 ## Delegation and Parallel Work
 

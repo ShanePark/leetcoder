@@ -512,6 +512,15 @@ export function createDevMockBackend(): BackendClient & {
         exitCode: failed === 0 ? 0 : 1,
       }
     },
+
+    // The browser preview has no filesystem watcher behind it.
+    async watchRepository(): Promise<void> {},
+
+    async stopWatchingRepository(): Promise<void> {},
+
+    async onRepositoryFilesChanged(): Promise<() => void> {
+      return () => {}
+    },
   }
 }
 

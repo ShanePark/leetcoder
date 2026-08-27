@@ -3,12 +3,18 @@ import {
   closeBrackets,
   closeBracketsKeymap,
   completionKeymap,
+  completionStatus,
   startCompletion,
 } from '@codemirror/autocomplete'
 import { java } from '@codemirror/lang-java'
 import {
   HighlightStyle,
+  codeFolding,
+  foldEffect,
+  foldGutter,
+  foldService,
   indentOnInput,
+  indentRange,
   indentUnit,
   syntaxHighlighting,
   syntaxTree,
@@ -21,6 +27,8 @@ import {
   history,
   historyKeymap,
   indentWithTab,
+  redo,
+  undo,
 } from '@codemirror/commands'
 import {
   EditorState,
@@ -35,6 +43,7 @@ import {
   Decoration,
   EditorView,
   GutterMarker,
+  ViewPlugin,
   drawSelection,
   gutter,
   highlightActiveLine,
@@ -42,6 +51,7 @@ import {
   highlightSpecialChars,
   keymap,
   lineNumbers,
+  type ViewUpdate,
 } from '@codemirror/view'
 import {
   addJavaTypeImports,
@@ -50,6 +60,14 @@ import {
   javaIdentifierAt,
   resolveJavaDefinition,
 } from './completions'
+import type { ClipboardBridge } from './clipboard'
+import { createClipboardBridge } from './clipboard'
+import { shortcutLabel } from './shortcuts'
+import {
+  formatJavaSource,
+  importBlockRange,
+  removeUnusedJavaTypeImports,
+} from './java-format'
 
 /**
  * Editor palette derived from the design tokens in styles.css. Keep the two
@@ -115,6 +133,32 @@ const leetcoderTheme = EditorView.theme({
   },
   '.cm-test-gutter': {
     minWidth: '22px',
+  },
+  '.cm-foldGutter': {
+    minWidth: '14px',
+  },
+  '.cm-foldGutter .cm-gutterElement': {
+    color: editorPalette.textFaint,
+    cursor: 'pointer',
+    padding: '0 2px',
+  },
+  '.cm-foldGutter .cm-gutterElement:hover': {
+    color: editorPalette.textDim,
+  },
+  '.cm-foldPlaceholder': {
+    margin: '0 2px',
+    padding: '0 6px',
+    border: '1px solid rgba(148, 163, 190, 0.24)',
+    borderRadius: '4px',
+    backgroundColor: editorPalette.surface,
+    color: editorPalette.textDim,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    fontSize: '12px',
+  },
+  '.cm-foldPlaceholder:hover': {
+    borderColor: editorPalette.accent,
+    color: editorPalette.text,
   },
   '.cm-test-run-button': {
     display: 'inline-flex',
@@ -182,13 +226,16 @@ export interface EditorCallbacks {
   onSave?: () => boolean | void
   onRun?: () => boolean | void
   onRunTestAtCursor?: (methodName: string | null) => boolean | void
+  onShowShortcuts?: () => void
+  /** Overridable so tests can drive cut and paste without a system clipboard. */
+  clipboard?: ClipboardBridge
 }
 
 export type TestRunShortcutPlatform = 'mac' | 'other'
 
 /** The platform-specific shortcut shown on each source-level test action. */
 export function testRunShortcutLabel(platform: TestRunShortcutPlatform): string {
-  return platform === 'mac' ? '⇧⌘R' : 'Shift+Ctrl+R'
+  return shortcutLabel('run-test-at-cursor', platform === 'mac')
 }
 
 function isMacPlatform(): boolean {
@@ -281,6 +328,124 @@ export const javaAutoImports = EditorState.transactionFilter.of((transaction) =>
     { changes: minimalDocumentChange(source, updated), sequential: true },
   ]
 })
+
+/**
+ * Imports this editor added stop being useful once their last reference is
+ * gone. Pruning waits for a short pause instead of running on every keystroke
+ * so an import does not vanish and come back while its type name is retyped,
+ * and it leaves the type currently under the cursor alone for the same reason.
+ */
+const IMPORT_PRUNE_DELAY_MS = 700
+
+const javaImportPruning = ViewPlugin.fromClass(class {
+  private timer: ReturnType<typeof setTimeout> | null = null
+
+  constructor(private readonly view: EditorView) {}
+
+  update(update: ViewUpdate): void {
+    if (!update.docChanged) {
+      return
+    }
+    if (this.timer !== null) {
+      clearTimeout(this.timer)
+    }
+    this.timer = setTimeout(() => {
+      this.timer = null
+      this.prune()
+    }, IMPORT_PRUNE_DELAY_MS)
+  }
+
+  destroy(): void {
+    if (this.timer !== null) {
+      clearTimeout(this.timer)
+    }
+  }
+
+  private prune(): void {
+    const state = this.view.state
+    if (completionStatus(state) === 'active') {
+      return
+    }
+    const source = state.doc.toString()
+    const typing = javaIdentifierAt(source, state.selection.main.head)?.name ?? null
+    const updated = removeUnusedJavaTypeImports(source, typing)
+    if (updated === source) {
+      return
+    }
+    this.view.dispatch({
+      changes: minimalDocumentChange(source, updated),
+      userEvent: 'delete.import',
+    })
+  }
+})
+
+/**
+ * Fold the leading `import` block as one unit. Only its first line reports a
+ * range, which is the shape CodeMirror's fold gutter and `foldable` expect.
+ */
+const javaImportFolding = foldService.of((state, lineStart) => {
+  const block = importBlockRange(state.doc.toString())
+  if (!block || block.count < 2 || block.from !== lineStart || block.to <= block.from) {
+    return null
+  }
+  return { from: block.from, to: block.to }
+})
+
+const javaFolding = codeFolding({
+  preparePlaceholder: (state, range) => (
+    state.doc.sliceString(range.from, range.from + 6) === 'import' ? 'import \u2026' : '\u2026'
+  ),
+  placeholderDOM: (_view, onclick, prepared) => {
+    const element = document.createElement('span')
+    element.className = 'cm-foldPlaceholder'
+    element.textContent = typeof prepared === 'string' ? prepared : '\u2026'
+    element.title = 'Expand'
+    element.setAttribute('aria-label', 'Expand folded lines')
+    element.addEventListener('click', onclick)
+    return element
+  },
+})
+
+/**
+ * Reformat the whole document: tidy imports and whitespace, then re-indent
+ * through the Java language support, which already has the syntax tree.
+ */
+export function reformatJavaDocument(view: EditorView): boolean {
+  const source = view.state.doc.toString()
+  const formatted = formatJavaSource(source)
+  if (formatted !== source) {
+    view.dispatch({ changes: minimalDocumentChange(source, formatted), userEvent: 'format' })
+  }
+  const indentation = indentRange(view.state, 0, view.state.doc.length)
+  if (!indentation.empty) {
+    view.dispatch({ changes: indentation, userEvent: 'format' })
+  }
+  return true
+}
+
+/**
+ * The line blocks `deleteLine` would remove for the current selection. A
+ * selection that ends exactly at a line start does not include that line.
+ */
+export function selectedLineBlocks(state: EditorState): Array<{ from: number; to: number }> {
+  const blocks: Array<{ from: number; to: number }> = []
+  for (const range of state.selection.ranges) {
+    const startLine = state.doc.lineAt(range.from)
+    let endLine = state.doc.lineAt(range.to)
+    if (range.to > range.from && endLine.from === range.to) {
+      endLine = state.doc.lineAt(range.to - 1)
+    }
+    const from = startLine.from
+    const to = Math.min(state.doc.length, endLine.to + 1)
+    const previous = blocks[blocks.length - 1]
+    if (previous && previous.to >= from) {
+      previous.to = to
+    } else {
+      blocks.push({ from, to })
+    }
+  }
+  return blocks
+}
 
 function isTestAnnotation(annotation: string): boolean {
   const withoutArguments = annotation.slice(1, annotation.indexOf('(') >= 0
@@ -505,6 +670,56 @@ export function isLineDeleteAltShortcut(event: JavaDocAltShortcutEvent): boolean
     && !event.shiftKey
     && !event.metaKey
     && !event.ctrlKey
+}
+
+/**
+ * macOS turns Option+letter into a typed glyph, so CodeMirror's key names
+ * never match those bindings. These matchers work from `event.code`, which
+ * stays on the physical key.
+ */
+function isPlainAltShortcut(event: JavaDocAltShortcutEvent, code: string): boolean {
+  return event.code === code
+    && event.altKey
+    && !event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the Option+X form when the keymap cannot consume it. */
+export function isLineCutAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyX')
+}
+
+/** Match the Option+V form when the keymap cannot consume it. */
+export function isPasteAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyV')
+}
+
+/** Match the Option+/ form that opens the shortcut list. */
+export function isShortcutHelpAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'Slash')
+}
+
+/** Match the Option+Z form when the keymap cannot consume it. */
+export function isUndoAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyZ')
+}
+
+/** Match the Shift+Option+Z form when the keymap cannot consume it. */
+export function isRedoAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyZ'
+    && event.altKey
+    && event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match Cmd/Ctrl+Option+L, the reformat shortcut, on either platform. */
+export function isReformatShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyL'
+    && event.altKey
+    && !event.shiftKey
+    && (event.metaKey || event.ctrlKey)
 }
 
 function lineAt(source: string, position: number): SourceLine {
@@ -850,6 +1065,59 @@ export class JavaEditor {
       return callbacks.onRunTestAtCursor?.(methodName) !== false
     }
     const shortcutLabel = testRunShortcutLabel(isMacPlatform() ? 'mac' : 'other')
+    const clipboard = callbacks.clipboard ?? createClipboardBridge()
+    const showShortcuts = (): boolean => {
+      callbacks.onShowShortcuts?.()
+      return true
+    }
+
+    /** Cut the selection, or the whole line when nothing is selected. */
+    const cutSelectionOrLine = (view: EditorView): boolean => {
+      const state = view.state
+      const selected = state.selection.ranges.filter((range) => !range.empty)
+      if (selected.length > 0) {
+        const text = selected
+          .map((range) => state.sliceDoc(range.from, range.to))
+          .join(state.lineBreak)
+        void clipboard.writeText(text)
+        view.dispatch({ ...state.replaceSelection(''), userEvent: 'delete.cut' })
+        return true
+      }
+      const text = selectedLineBlocks(state)
+        .map((block) => state.sliceDoc(block.from, block.to))
+        .join('')
+      if (!text) {
+        return false
+      }
+      void clipboard.writeText(text)
+      return deleteLine(view)
+    }
+
+    // Cmd/Ctrl+X already reaches the browser's own cut handling, which knows
+    // how to place a selection on the clipboard. Only the line form, which the
+    // browser has no notion of, needs to be taken over here.
+    const cutLineWithoutSelection = (view: EditorView): boolean => (
+      view.state.selection.ranges.every((range) => range.empty) && cutSelectionOrLine(view)
+    )
+
+    const pasteFromClipboard = (view: EditorView): boolean => {
+      void clipboard.readText().then((text) => {
+        if (!text) {
+          return
+        }
+        const state = view.state
+        const insert = state.selection.ranges.length === 1
+          ? formatJavaDocClipboard(text, state.doc.toString(), state.selection.main.head)
+          : text
+        view.dispatch({
+          ...state.replaceSelection(insert),
+          userEvent: 'input.paste',
+          scrollIntoView: true,
+        })
+      })
+      return true
+    }
+
     const testMethodFromGutterEvent = (event: Event): string | null => {
       const target = event.target
       if (!(target instanceof Element)) {
@@ -905,6 +1173,23 @@ export class JavaEditor {
       view.dispatch({ effects: setDefinitionHover.of(null) })
     }
 
+    // macOS reports Option+key as a typed glyph, so these bindings cannot be
+    // matched by name in the keymap above and are recognized by physical key.
+    const altShortcutCommands: Array<[
+      (event: JavaDocAltShortcutEvent) => boolean,
+      (view: EditorView) => boolean,
+    ]> = [
+      [isJavaDocAltShortcut, insertJavaDoc],
+      [isLineDuplicateAltShortcut, copyLineDown],
+      [isLineDeleteAltShortcut, deleteLine],
+      [isLineCutAltShortcut, cutSelectionOrLine],
+      [isPasteAltShortcut, pasteFromClipboard],
+      [isShortcutHelpAltShortcut, showShortcuts],
+      [isRedoAltShortcut, redo],
+      [isUndoAltShortcut, undo],
+      [isReformatShortcut, reformatJavaDocument],
+    ]
+
     const state = EditorState.create({
       doc: '',
       extensions: [
@@ -912,7 +1197,11 @@ export class JavaEditor {
         syntaxHighlighting(leetcoderHighlight),
         java(),
         javaAutoImports,
+        javaImportPruning,
+        javaFolding,
+        javaImportFolding,
         lineNumbers(),
+        foldGutter(),
         highlightActiveLineGutter(),
         testMethodMarkers,
         failureMarkers,
@@ -963,10 +1252,16 @@ export class JavaEditor {
           indentWithTab,
         ]),
         Prec.high(keymap.of([
+          // Every shortcut is bound in both its Mod and Alt form: macOS uses
+          // Cmd, and Linux, which has no Cmd key, uses Alt for the same keys.
           { key: 'Mod-s', run: save },
+          { key: 'Alt-s', run: save },
           { key: 'Mod-r', run },
+          { key: 'Alt-r', run },
           { key: 'Shift-Mod-r', run: runTestAtCursor, preventDefault: true },
+          { key: 'Shift-Alt-r', run: runTestAtCursor, preventDefault: true },
           { key: 'Shift-Mod-j', run: insertJavaDoc },
+          { key: 'Shift-Alt-j', run: insertJavaDoc },
           // IntelliJ-style line editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while
           // preserving the document's configured line separator.
@@ -974,6 +1269,15 @@ export class JavaEditor {
           { key: 'Alt-d', run: copyLineDown, preventDefault: true },
           { key: 'Mod-Backspace', run: deleteLine, preventDefault: true },
           { key: 'Alt-Backspace', run: deleteLine, preventDefault: true },
+          { key: 'Mod-x', run: cutLineWithoutSelection },
+          { key: 'Alt-x', run: cutSelectionOrLine, preventDefault: true },
+          { key: 'Alt-v', run: pasteFromClipboard, preventDefault: true },
+          { key: 'Alt-z', run: undo, preventDefault: true },
+          { key: 'Shift-Alt-z', run: redo, preventDefault: true },
+          // Mod-/ stays on the default keymap's comment toggle, so only the
+          // Alt form opens the shortcut list.
+          { key: 'Alt-/', run: showShortcuts, preventDefault: true },
+          { key: 'Mod-Alt-l', run: reformatJavaDocument, preventDefault: true },
           { key: 'Ctrl-Space', run: startCompletion },
           { key: 'Cmd-Space', run: startCompletion },
         ])),
@@ -1023,19 +1327,11 @@ export class JavaEditor {
             return false
           },
           keydown: (event, view) => {
-            if (!isJavaDocAltShortcut(event)) {
-              if (!isLineDuplicateAltShortcut(event) && !isLineDeleteAltShortcut(event)) {
-                return false
-              }
-              const handled = isLineDuplicateAltShortcut(event)
-                ? copyLineDown(view)
-                : deleteLine(view)
-              if (handled) {
-                event.preventDefault()
-              }
-              return handled
+            const command = altShortcutCommands.find(([matches]) => matches(event))?.[1]
+            if (!command) {
+              return false
             }
-            const handled = insertJavaDoc(view)
+            const handled = command(view)
             if (handled) {
               event.preventDefault()
             }
@@ -1064,6 +1360,40 @@ export class JavaEditor {
       // user should be able to undo back to the empty bootstrap document.
       annotations: Transaction.addToHistory.of(false),
     })
+    this.foldImports()
+  }
+
+  /**
+   * Adopt a version of the same file that changed on disk.
+   *
+   * Unlike `setValue` this keeps the cursor where it was, because the user did
+   * not navigate anywhere; another editor simply wrote the file they are
+   * already looking at.
+   */
+  reloadExternalValue(source: string): void {
+    const current = this.getValue()
+    if (source === current) {
+      return
+    }
+    const selection = this.view.state.selection.main
+    this.view.dispatch({
+      changes: { from: 0, to: current.length, insert: source },
+      selection: {
+        anchor: Math.min(selection.anchor, source.length),
+        head: Math.min(selection.head, source.length),
+      },
+      annotations: Transaction.addToHistory.of(false),
+    })
+    this.foldImports()
+  }
+
+  /** Collapse the leading import block, the way an IDE opens a file. */
+  foldImports(): void {
+    const block = importBlockRange(this.getValue())
+    if (!block || block.count < 2 || block.to <= block.from) {
+      return
+    }
+    this.view.dispatch({ effects: foldEffect.of({ from: block.from, to: block.to }) })
   }
 
   focus(): void {

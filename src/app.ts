@@ -15,12 +15,20 @@ import {
   type TestDiagnostic,
   type TestPhase,
   type TestRunProgress,
+  type RepositoryFilesChanged,
 } from './backend'
 import { classNameFromProblem } from './domain'
-import { JavaEditor, type EditorIssue } from './editor'
+import { JavaEditor, isShortcutHelpAltShortcut, type EditorIssue } from './editor'
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
 import { sanitizeProblemHtml } from './sanitize'
+import {
+  SHORTCUT_SECTIONS,
+  formatShortcut,
+  platformBindings,
+  shortcutHints,
+  shortcutLabel,
+} from './shortcuts'
 
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
 const BOTTOM_PANEL_HEIGHT_KEY = 'leetcoder.bottom-panel-height'
@@ -1392,6 +1400,10 @@ export class LeetcoderApp {
   private suppressEditorChange = false
   private repositoryGeneration = 0
   private refreshRequestId = 0
+  private externalReloadInFlight = false
+  private stopWatchingFiles: (() => void) | null = null
+  private shortcutsDialogOpen = false
+  private shortcutsDialogFocusTarget: HTMLElement | null = null
   private testRunGeneration = 0
   private nextOpenTabId = 1
   private closePreparation: Promise<void> | null = null
@@ -1436,6 +1448,13 @@ export class LeetcoderApp {
     accordionGroupKeys('easy', true),
   )
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
+    if (isShortcutHelpAltShortcut(event)) {
+      // The shortcut list has to be reachable from anywhere, including the
+      // file explorer and the run panel.
+      event.preventDefault()
+      this.toggleShortcutsDialog()
+      return
+    }
     if (isCloseAllTabsShortcut(event, currentIsMacPlatform())) {
       // Handle this before the editor guard so the entire tab strip can close
       // while CodeMirror has focus, without allowing the native window to
@@ -1698,7 +1717,10 @@ export class LeetcoderApp {
     if (event.key !== 'Escape') {
       return
     }
-    if (this.gitDiscardDialogFile) {
+    if (this.shortcutsDialogOpen) {
+      event.preventDefault()
+      this.closeShortcutsDialog()
+    } else if (this.gitDiscardDialogFile) {
       event.preventDefault()
       this.closeDiscardGitDialog()
     } else if (this.renameTargetFile) {
@@ -1763,6 +1785,9 @@ export class LeetcoderApp {
         void this.runCurrentTest()
         return true
       },
+      onShowShortcuts: () => {
+        this.openShortcutsDialog()
+      },
       onRunTestAtCursor: (methodName) => {
         if (!methodName) {
           this.setMessage('Place the cursor inside an @Test method to run only that test.', 'info')
@@ -1777,6 +1802,13 @@ export class LeetcoderApp {
   }
 
   async start(): Promise<void> {
+    try {
+      this.stopWatchingFiles = await this.backend.onRepositoryFilesChanged(
+        this.handleRepositoryFilesChanged,
+      )
+    } catch {
+      // Without the watcher the editor still syncs on window focus.
+    }
     await this.loadDailyProblem()
     const rememberedPath = this.storage?.getItem(LAST_REPOSITORY_KEY) ?? null
     if (rememberedPath) {
@@ -1840,6 +1872,9 @@ export class LeetcoderApp {
     window.removeEventListener('keydown', this.handleContextMenuKeydown)
     this.clearScheduledDailyRefresh()
     this.clearSavedFlash()
+    this.stopWatchingFiles?.()
+    this.stopWatchingFiles = null
+    void this.backend.stopWatchingRepository().catch(() => {})
     this.destroyed = true
   }
 
@@ -1933,8 +1968,8 @@ export class LeetcoderApp {
               <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git</button>
             </div>
             <div class="bottom-panel-actions" role="group" aria-label="Test actions">
-              <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">Shift+Ctrl+R</kbd></span>
-              <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">Ctrl+R</kbd></button>
+              <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">Alt+Shift+R</kbd></span>
+              <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">Alt+R</kbd></button>
             </div>
           </div>
           <section id="tests-panel" class="tests-panel" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">
@@ -2014,6 +2049,16 @@ export class LeetcoderApp {
             </div>
           </form>
         </div>
+        <div id="shortcuts-dialog" class="dialog-backdrop" hidden>
+          <div class="shortcuts-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+            <h2 id="shortcuts-title" class="shortcuts-title">Keyboard shortcuts</h2>
+            <div id="shortcuts-body" class="shortcuts-body"></div>
+            <p class="shortcuts-note">macOS and Linux use the same physical keys. Where macOS has Cmd, Linux has Alt, so Alt is the primary modifier here; the Ctrl forms stay bound as well.</p>
+            <div class="shortcuts-actions">
+              <button id="close-shortcuts" class="text-button" type="button">Close</button>
+            </div>
+          </div>
+        </div>
         <div id="discard-git-dialog" class="dialog-backdrop" hidden>
           <form id="discard-git-form" class="discard-git-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-git-title" aria-describedby="discard-git-message">
             <h2 id="discard-git-title" class="discard-git-title">Discard changes?</h2>
@@ -2050,11 +2095,7 @@ export class LeetcoderApp {
     empty.append(copy)
     const hints = document.createElement('div')
     hints.className = 'editor-empty-hints'
-    const mac = currentIsMacPlatform()
-    const pairs: Array<[string, string]> = mac
-      ? [['⌘R', 'Run test'], ['⇧⌘R', 'Run selected test'], ['⌘S', 'Save'], ['⌘D', 'Duplicate line'], ['⇧⌘J', 'JavaDoc'], ['⌃Space', 'Complete'], ['⌘Click', 'Definition']]
-      : [['Ctrl+R', 'Run test'], ['Shift+Ctrl+R', 'Run selected test'], ['Ctrl+S', 'Save'], ['Ctrl+D', 'Duplicate line'], ['Shift+Ctrl+J', 'JavaDoc'], ['Ctrl+Space', 'Complete'], ['Ctrl+Click', 'Definition']]
-    for (const [keys, label] of pairs) {
+    for (const [keys, label] of shortcutHints(currentIsMacPlatform())) {
       const hint = document.createElement('span')
       hint.className = 'editor-empty-hint'
       const kbd = document.createElement('kbd')
@@ -2170,6 +2211,14 @@ export class LeetcoderApp {
     })
     this.element<HTMLButtonElement>('#cancel-discard-git').addEventListener('click', () => {
       this.closeDiscardGitDialog()
+    })
+    this.element<HTMLButtonElement>('#close-shortcuts').addEventListener('click', () => {
+      this.closeShortcutsDialog()
+    })
+    this.element<HTMLElement>('#shortcuts-dialog').addEventListener('pointerdown', (event) => {
+      if (event.target === event.currentTarget) {
+        this.closeShortcutsDialog()
+      }
     })
     this.element<HTMLElement>('#discard-git-dialog').addEventListener('pointerdown', (event) => {
       if (event.target === event.currentTarget) {
@@ -2291,6 +2340,7 @@ export class LeetcoderApp {
       // Clear the old document before loading the new repository. Relative
       // paths can be identical across repositories and must never reuse the
       // previous source, FQCN, or test output.
+      void this.backend.stopWatchingRepository().catch(() => {})
       this.state.repoPath = null
       this.state.projectValid = false
       this.state.files = []
@@ -2312,6 +2362,11 @@ export class LeetcoderApp {
         this.storage?.setItem(LAST_REPOSITORY_KEY, path)
       }
       await this.refreshFiles()
+      try {
+        await this.backend.watchRepository(path)
+      } catch {
+        // Losing the watcher only costs live updates, not the repository.
+      }
     } catch (error) {
       this.state.projectValid = false
       this.setMessage(errorMessage(error), 'error')
@@ -3197,11 +3252,87 @@ export class LeetcoderApp {
     this.scheduleDailyProblemRefresh()
   }
 
+  private readonly handleRepositoryFilesChanged = (change: RepositoryFilesChanged): void => {
+    if (this.destroyed || !this.state.repoPath || !this.state.projectValid) {
+      return
+    }
+    if (change.structural) {
+      void this.refreshFiles()
+    }
+    const path = this.state.selectedPath
+    if (path && change.paths.some((changed) => sameFilePath(changed, path))) {
+      void this.reloadOpenFileFromDisk(path)
+    }
+  }
+
+  /**
+   * Adopt an external edit to the file currently open in the editor.
+   *
+   * A write this application started is already in the buffer, so it reloads
+   * to the same text and changes nothing. When the buffer holds edits that
+   * have not reached disk the local version wins: silently replacing unsaved
+   * work cannot be undone by the user, while a stale buffer can be refreshed.
+   */
+  private async reloadOpenFileFromDisk(path: string): Promise<void> {
+    const repoPath = this.state.repoPath
+    if (!repoPath
+      || this.destroyed
+      || this.externalReloadInFlight
+      || this.saveWriteInFlight
+      || this.fileOpenInProgress) {
+      return
+    }
+    this.externalReloadInFlight = true
+    const repositoryGeneration = this.repositoryGeneration
+    try {
+      const source = await this.backend.readProblemFile(repoPath, path)
+      if (this.destroyed
+        || this.repositoryGeneration !== repositoryGeneration
+        || this.state.repoPath !== repoPath
+        || this.state.selectedPath !== path
+        || source === this.state.savedSource) {
+        return
+      }
+      if (this.state.dirty || this.autosave.hasPendingChanges) {
+        this.setMessage(
+          `${gitFileName(path)} changed on disk. Your unsaved edits were kept.`,
+          'info',
+        )
+        return
+      }
+      this.state.savedSource = source
+      this.state.selectedSource = source
+      this.state.dirty = false
+      this.state.saveError = null
+      this.element<HTMLElement>('#editor-host').dataset.savedSource = source
+      this.suppressEditorChange = true
+      try {
+        this.editor.reloadExternalValue(source)
+      } finally {
+        this.suppressEditorChange = false
+      }
+      this.editor.setIssues([])
+      this.markGitStale()
+      this.renderFileHeading()
+      this.updateFileTabState()
+    } catch {
+      // A file that was deleted or moved is reconciled by the file-list
+      // refresh that the same watcher event triggers.
+    } finally {
+      this.externalReloadInFlight = false
+    }
+  }
+
   private handleAppVisibilityReturn(): void {
     if (!this.isWindowVisible() || this.destroyed) {
       return
     }
     this.refreshDailyProblemIfStale()
+    // Filesystem events can be missed while the window is hidden, so returning
+    // to it re-checks the open file the way an IDE syncs on frame activation.
+    if (this.state.selectedPath && this.state.projectValid) {
+      void this.reloadOpenFileFromDisk(this.state.selectedPath)
+    }
     if (this.state.bottomPanelTab !== 'git'
       || !this.state.projectValid
       || !this.state.repoPath
@@ -3667,7 +3798,7 @@ export class LeetcoderApp {
     const runButton = this.element<HTMLButtonElement>('#run-test')
     runButton.disabled = this.state.busy || !this.state.selectedFqcn
     const mac = currentIsMacPlatform()
-    const runShortcut = mac ? '⌘R' : 'Ctrl+R'
+    const runShortcut = shortcutLabel('run-test', mac)
     runButton.setAttribute('aria-label', `Run all tests (${runShortcut})`)
     runButton.title = this.state.selectedFqcn
       ? `Run all tests (${runShortcut})`
@@ -3798,9 +3929,9 @@ export class LeetcoderApp {
 
   private renderShortcutLabels(): void {
     const mac = currentIsMacPlatform()
-    const modifier = mac ? '⌘' : 'Ctrl+'
-    this.element<HTMLElement>('#run-shortcut').textContent = `${modifier}R`
-    this.element<HTMLElement>('#run-selected-shortcut').textContent = mac ? '⇧⌘R' : 'Shift+Ctrl+R'
+    this.element<HTMLElement>('#run-shortcut').textContent = shortcutLabel('run-test', mac)
+    this.element<HTMLElement>('#run-selected-shortcut').textContent =
+      shortcutLabel('run-test-at-cursor', mac)
   }
 
   private renderDailyProblem(): void {
@@ -4313,6 +4444,83 @@ export class LeetcoderApp {
       return
     }
     this.element<HTMLButtonElement>('#git-tab').focus()
+  }
+
+  private toggleShortcutsDialog(): void {
+    if (this.shortcutsDialogOpen) {
+      this.closeShortcutsDialog()
+    } else {
+      this.openShortcutsDialog()
+    }
+  }
+
+  private openShortcutsDialog(): void {
+    if (this.shortcutsDialogOpen) {
+      return
+    }
+    const active = document.activeElement
+    this.shortcutsDialogFocusTarget = active instanceof HTMLElement ? active : null
+    this.shortcutsDialogOpen = true
+    this.renderShortcutsDialog()
+    queueMicrotask(() => {
+      if (this.shortcutsDialogOpen) {
+        this.element<HTMLButtonElement>('#close-shortcuts').focus()
+      }
+    })
+  }
+
+  private closeShortcutsDialog(): void {
+    if (!this.shortcutsDialogOpen) {
+      return
+    }
+    this.shortcutsDialogOpen = false
+    const target = this.shortcutsDialogFocusTarget
+    this.shortcutsDialogFocusTarget = null
+    this.renderShortcutsDialog()
+    if (target && target.isConnected && !target.closest('[hidden]')) {
+      target.focus()
+    } else {
+      this.editor.focus()
+    }
+  }
+
+  private renderShortcutsDialog(): void {
+    const dialog = this.element<HTMLElement>('#shortcuts-dialog')
+    dialog.hidden = !this.shortcutsDialogOpen
+    const body = this.element<HTMLElement>('#shortcuts-body')
+    body.innerHTML = ''
+    if (!this.shortcutsDialogOpen) {
+      return
+    }
+    const mac = currentIsMacPlatform()
+    for (const section of SHORTCUT_SECTIONS) {
+      const group = document.createElement('section')
+      group.className = 'shortcuts-group'
+      const heading = document.createElement('h3')
+      heading.className = 'shortcuts-group-title'
+      heading.textContent = section.title
+      group.append(heading)
+      const list = document.createElement('dl')
+      list.className = 'shortcuts-list'
+      for (const entry of section.entries) {
+        const keys = document.createElement('dt')
+        keys.className = 'shortcuts-keys'
+        for (const [index, binding] of platformBindings(entry, mac).entries()) {
+          if (index > 0) {
+            keys.append(document.createTextNode(' / '))
+          }
+          const key = document.createElement('kbd')
+          key.textContent = formatShortcut(binding, mac)
+          keys.append(key)
+        }
+        const description = document.createElement('dd')
+        description.className = 'shortcuts-description'
+        description.textContent = entry.description
+        list.append(keys, description)
+      }
+      group.append(list)
+      body.append(group)
+    }
   }
 
   private openDiscardGitDialog(): void {
@@ -4925,7 +5133,7 @@ export class LeetcoderApp {
       dot.className = 'save-dot'
       dot.setAttribute('aria-hidden', 'true')
       saveStatus.append(dot, document.createTextNode('Unsaved'))
-      saveStatus.title = `Saves automatically · ${currentIsMacPlatform() ? '⌘S' : 'Ctrl+S'}`
+      saveStatus.title = `Saves automatically · ${shortcutLabel('save', currentIsMacPlatform())}`
     } else if (this.savedFlash) {
       saveStatus.classList.add('is-saved')
       saveStatus.textContent = 'Saved'
@@ -4952,8 +5160,8 @@ export class LeetcoderApp {
       const kbd = document.createElement('kbd')
       const selectedKbd = document.createElement('kbd')
       const mac = currentIsMacPlatform()
-      kbd.textContent = mac ? '⌘R' : 'Ctrl+R'
-      selectedKbd.textContent = mac ? '⇧⌘R' : 'Shift+Ctrl+R'
+      kbd.textContent = shortcutLabel('run-test', mac)
+      selectedKbd.textContent = shortcutLabel('run-test-at-cursor', mac)
       idle.append(
         document.createTextNode('Run '),
         kbd,

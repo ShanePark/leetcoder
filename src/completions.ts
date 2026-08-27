@@ -107,14 +107,14 @@ export const JAVA_TYPE_IMPORTS: Readonly<Record<string, string>> = {
   TreeSet: 'java.util.TreeSet',
 }
 
-interface ImportLine {
+export interface ImportLine {
   name: string
   static: boolean
   from: number
   to: number
 }
 
-function importLines(source: string): ImportLine[] {
+export function importLines(source: string): ImportLine[] {
   const lines: ImportLine[] = []
   const pattern = /^[\t ]*import[\t ]+(static[\t ]+)?([\w.*]+)[\t ]*;[^\S\r\n]*(?:\r?\n|$)/gm
   let match: RegExpExecArray | null
@@ -722,7 +722,7 @@ export function collectJavaSymbols(source: string, position = source.length): Ja
  * lightweight Java scanners below.  This prevents a string such as
  * `"helper() {"` from looking like a declaration or a clickable call.
  */
-function maskJavaCommentsAndLiterals(source: string): string {
+export function maskJavaCommentsAndLiterals(source: string): string {
   // `split('')` intentionally keeps UTF-16 code-unit indexing. CodeMirror
   // positions are UTF-16 offsets, while spreading a string would collapse
   // astral characters and shift every later source range.

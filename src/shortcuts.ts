@@ -1,0 +1,149 @@
+/**
+ * The single source of truth for leetcoder's keyboard shortcuts.
+ *
+ * Bindings are written in CodeMirror's notation, where `Mod` is `Cmd` on macOS
+ * and `Ctrl` elsewhere. The policy is that a shortcut is the *same physical
+ * chord* on both platforms: macOS `Cmd` sits where Linux has `Alt`, so every
+ * `Mod-` binding also gets an `Alt-` twin, and `Alt-` is the form Linux
+ * advertises. The `Mod-` twin stays registered on Linux as `Ctrl-` so muscle
+ * memory from other editors still works, but it is never the primary label.
+ *
+ * Both forms are listed here so the in-app list matches what is registered.
+ */
+
+export interface ShortcutEntry {
+  /** Stable key for the labels rendered outside the shortcut list. */
+  id: string
+  /** Equivalent bindings, most idiomatic first. */
+  bindings: readonly string[]
+  description: string
+  /** Show this entry in the compact hint strip on the empty editor. */
+  hint?: boolean
+}
+
+export interface ShortcutSection {
+  title: string
+  entries: readonly ShortcutEntry[]
+}
+
+export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
+  {
+    title: 'Editing',
+    entries: [
+      { id: 'duplicate-line', bindings: ['Mod-d', 'Alt-d'], description: 'Duplicate line', hint: true },
+      { id: 'delete-line', bindings: ['Mod-Backspace', 'Alt-Backspace'], description: 'Delete line' },
+      { id: 'cut-line', bindings: ['Mod-x', 'Alt-x'], description: 'Cut line or selection' },
+      { id: 'paste', bindings: ['Mod-v', 'Alt-v'], description: 'Paste' },
+      { id: 'insert-javadoc', bindings: ['Shift-Mod-j', 'Shift-Alt-j'], description: 'Insert JavaDoc', hint: true },
+      { id: 'complete', bindings: ['Ctrl-Space'], description: 'Complete', hint: true },
+      { id: 'toggle-comment', bindings: ['Mod-/'], description: 'Toggle line comment' },
+      { id: 'undo', bindings: ['Mod-z', 'Alt-z'], description: 'Undo' },
+      { id: 'redo', bindings: ['Shift-Mod-z', 'Shift-Alt-z'], description: 'Redo' },
+      { id: 'reformat', bindings: ['Mod-Alt-l'], description: 'Reformat code' },
+    ],
+  },
+  {
+    title: 'File',
+    entries: [
+      { id: 'save', bindings: ['Mod-s', 'Alt-s'], description: 'Save', hint: true },
+      { id: 'close-tab', bindings: ['Mod-w', 'Alt-w'], description: 'Close tab' },
+      { id: 'close-all-tabs', bindings: ['Shift-Mod-w', 'Shift-Alt-w'], description: 'Close all tabs' },
+    ],
+  },
+  {
+    title: 'Run',
+    entries: [
+      { id: 'run-test', bindings: ['Mod-r', 'Alt-r'], description: 'Run test', hint: true },
+      { id: 'run-test-at-cursor', bindings: ['Shift-Mod-r', 'Shift-Alt-r'], description: 'Run test at cursor', hint: true },
+    ],
+  },
+  {
+    title: 'Navigation',
+    entries: [
+      { id: 'goto-definition', bindings: ['Mod-Click', 'Alt-Click'], description: 'Go to definition', hint: true },
+      { id: 'show-shortcuts', bindings: ['Alt-/'], description: 'Show this shortcut list' },
+    ],
+  },
+]
+
+const MAC_SYMBOLS: Readonly<Record<string, string>> = {
+  Shift: '⇧',
+  Mod: '⌘',
+  Cmd: '⌘',
+  Alt: '⌥',
+  Ctrl: '⌃',
+}
+
+const OTHER_NAMES: Readonly<Record<string, string>> = {
+  Shift: 'Shift',
+  Mod: 'Ctrl',
+  Cmd: 'Ctrl',
+  Alt: 'Alt',
+  Ctrl: 'Ctrl',
+}
+
+/** How non-macOS platforms conventionally order modifier names. */
+const OTHER_ORDER: readonly string[] = ['Ctrl', 'Alt', 'Shift']
+
+/**
+ * Render one CodeMirror binding for display. macOS uses the stacked modifier
+ * glyphs; every other platform uses `+`-joined names.
+ */
+export function formatShortcut(binding: string, macPlatform: boolean): string {
+  const parts = binding.split('-')
+  const key = parts[parts.length - 1]
+  const modifiers = parts.slice(0, -1)
+  const label = key.length === 1 ? key.toUpperCase() : key
+  if (macPlatform) {
+    // The bindings are already authored in Apple's reading order.
+    return `${modifiers.map((modifier) => MAC_SYMBOLS[modifier] ?? modifier).join('')}${label}`
+  }
+  const names = modifiers.map((modifier) => OTHER_NAMES[modifier] ?? modifier)
+  names.sort((left, right) => OTHER_ORDER.indexOf(left) - OTHER_ORDER.indexOf(right))
+  return [...names, label].join('+')
+}
+
+/**
+ * An entry's bindings with the one this platform advertises first: the `Cmd`
+ * form on macOS, its `Alt` twin everywhere else. Shortcuts with only one
+ * binding, or with no twin to choose between, are returned unchanged.
+ */
+export function platformBindings(
+  entry: ShortcutEntry,
+  macPlatform: boolean,
+): readonly string[] {
+  const wanted = macPlatform ? 'Mod-' : 'Alt-'
+  const primary = entry.bindings.find((binding) => binding.includes(wanted))
+  if (!primary) {
+    return entry.bindings
+  }
+  return [primary, ...entry.bindings.filter((binding) => binding !== primary)]
+}
+
+/** The single binding this platform advertises for an entry. */
+export function primaryShortcut(entry: ShortcutEntry, macPlatform: boolean): string {
+  return formatShortcut(platformBindings(entry, macPlatform)[0], macPlatform)
+}
+
+const ENTRIES_BY_ID: ReadonlyMap<string, ShortcutEntry> = new Map(
+  SHORTCUT_SECTIONS.flatMap((section) => section.entries).map((entry) => [entry.id, entry]),
+)
+
+/**
+ * The label to print for a shortcut mentioned outside the shortcut list, so
+ * buttons, tooltips, and gutter hints never drift from what is bound.
+ */
+export function shortcutLabel(id: string, macPlatform: boolean): string {
+  const entry = ENTRIES_BY_ID.get(id)
+  if (!entry) {
+    throw new Error(`Unknown shortcut id: ${id}`)
+  }
+  return primaryShortcut(entry, macPlatform)
+}
+
+/** The compact `keys → label` pairs shown on the empty editor. */
+export function shortcutHints(macPlatform: boolean): Array<[string, string]> {
+  return SHORTCUT_SECTIONS.flatMap((section) => section.entries)
+    .filter((entry) => entry.hint)
+    .map((entry) => [primaryShortcut(entry, macPlatform), entry.description])
+}

@@ -27,6 +27,14 @@ export interface ProblemFileContent {
   content: string
 }
 
+/** Problem source files changed outside this application. */
+export interface RepositoryFilesChanged {
+  /** Repository-relative POSIX paths, sorted and de-duplicated. */
+  paths: string[]
+  /** True when a file was created, removed, or renamed, so the list is stale. */
+  structural: boolean
+}
+
 /** A path reported by Git as changed in the selected repository. */
 export interface GitFileChange {
   path: string
@@ -135,7 +143,20 @@ export interface BackendClient {
     onProgress?: TestRunProgressHandler,
     testMethod?: string,
   ): Promise<TestResult>
+  /** Start reporting external changes to the given repository's source tree. */
+  watchRepository(repoPath: string): Promise<void>
+  stopWatchingRepository(): Promise<void>
+  /** Subscribe to watcher events; resolves to an unsubscribe function. */
+  onRepositoryFilesChanged(
+    handler: (change: RepositoryFilesChanged) => void,
+  ): Promise<() => void>
 }
+
+/** Tauri's event bridge, narrowed to what the watcher subscription needs. */
+export type Listen = (
+  event: string,
+  handler: (message: { payload: unknown }) => void,
+) => Promise<() => void>
 
 export type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
 
@@ -148,7 +169,10 @@ interface ProgressChannelFallback {
  * Keep the Tauri bridge in one place.  The optional invoker makes this module
  * usable in unit tests without booting a desktop webview.
  */
-export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient {
+export function createBackendClient(
+  invoke: Invoke = tauriInvoke,
+  listen: Listen = defaultListen,
+): BackendClient {
   return {
     async validateProject(repoPath) {
       const response = await invoke<unknown>('validate_project', { repoPath })
@@ -264,7 +288,52 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
       const response = await invoke<unknown>('run_problem_test', args)
       return normalizeTestResult(response)
     },
+
+    async watchRepository(repoPath) {
+      await invoke<unknown>('watch_repository', { repoPath })
+    },
+
+    async stopWatchingRepository() {
+      await invoke<unknown>('unwatch_repository')
+    },
+
+    async onRepositoryFilesChanged(handler) {
+      return listen(REPOSITORY_FILES_CHANGED_EVENT, (message) => {
+        const change = normalizeRepositoryFilesChanged(message.payload)
+        if (change) {
+          handler(change)
+        }
+      })
+    },
   }
+}
+
+/** The Rust watcher's event name. Keep in sync with `src-tauri/src/watcher.rs`. */
+const REPOSITORY_FILES_CHANGED_EVENT = 'repository-files-changed'
+
+/**
+ * Tauri's event bridge is imported lazily so the Vite browser preview, which
+ * has no desktop runtime behind it, still loads. Without it the subscription
+ * is simply inert.
+ */
+const defaultListen: Listen = async (event, handler) => {
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
+    return await listen(event, handler as Parameters<typeof listen>[1])
+  } catch {
+    return () => {}
+  }
+}
+
+function normalizeRepositoryFilesChanged(payload: unknown): RepositoryFilesChanged | null {
+  if (!isRecord(payload) || !Array.isArray(payload.paths)) {
+    return null
+  }
+  const paths = payload.paths.filter((path): path is string => typeof path === 'string')
+  if (paths.length === 0) {
+    return null
+  }
+  return { paths, structural: payload.structural === true }
 }
 
 function createProgressChannel(handler: (event: unknown) => void): Channel<unknown> | ProgressChannelFallback {

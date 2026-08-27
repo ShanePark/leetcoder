@@ -1,5 +1,6 @@
 import { copyLineDown, deleteLine, history, undo } from '@codemirror/commands'
 import { java } from '@codemirror/lang-java'
+import { indentUnit } from '@codemirror/language'
 import {
   EditorSelection,
   EditorState,
@@ -15,12 +16,145 @@ import {
   findJavaTestMethodMarkers,
   formatJavaDocClipboard,
   isJavaDocAltShortcut,
+  isLineCutAltShortcut,
   isLineDeleteAltShortcut,
   isLineDuplicateAltShortcut,
+  isPasteAltShortcut,
+  isRedoAltShortcut,
+  isReformatShortcut,
+  isShortcutHelpAltShortcut,
+  isUndoAltShortcut,
   javaAutoImports,
   planJavaDocInsertion,
+  reformatJavaDocument,
+  selectedLineBlocks,
   testRunShortcutLabel,
 } from '../../src/editor'
+
+/** Drive a command that reads `view.state` again between its dispatches. */
+function runEditorCommand(
+  state: EditorState,
+  command: (view: EditorView) => boolean,
+): EditorState {
+  let current = state
+  const view = {
+    get state() {
+      return current
+    },
+    lineWrapping: false,
+    moveVertically: (range: unknown) => range,
+    dispatch: (spec: TransactionSpec) => {
+      current = current.update(spec).state
+    },
+  } as unknown as EditorView
+
+  expect(command(view)).toBe(true)
+  return current
+}
+
+describe('line block selection', () => {
+  it('covers the cursor line including its line break', () => {
+    const state = javaState('one\ntwo\nthree\n')
+    expect(selectedLineBlocks(state.update({ selection: { anchor: 5 } }).state))
+      .toEqual([{ from: 4, to: 8 }])
+  })
+
+  it('excludes a line the selection only touches at its start', () => {
+    const state = javaState('one\ntwo\nthree\n')
+    const selected = state.update({ selection: EditorSelection.single(0, 4) }).state
+    expect(selectedLineBlocks(selected)).toEqual([{ from: 0, to: 4 }])
+  })
+
+  it('merges overlapping blocks from multiple cursors', () => {
+    const state = EditorState.create({
+      doc: 'one\ntwo\nthree\n',
+      extensions: EditorState.allowMultipleSelections.of(true),
+      selection: EditorSelection.create([
+        EditorSelection.cursor(1),
+        EditorSelection.cursor(2),
+        EditorSelection.cursor(10),
+      ]),
+    })
+    expect(selectedLineBlocks(state)).toEqual([{ from: 0, to: 4 }, { from: 8, to: 14 }])
+  })
+})
+
+describe('reformat command', () => {
+  const indentedJavaState = (source: string): EditorState => EditorState.create({
+    doc: source,
+    extensions: [java(), indentUnit.of('    '), EditorState.tabSize.of(4)],
+  })
+
+  it('prunes unused imports, tidies whitespace, and re-indents the body', () => {
+    const source = [
+      'package shane.leetcode.problems.easy;',
+      '',
+      'import java.util.List;',
+      'import java.util.ArrayList;',
+      '',
+      '',
+      '',
+      'class Q1 {',
+      'int size() {   ',
+      'return new ArrayList<Integer>().size();',
+      '}',
+      '}',
+      '',
+    ].join('\n')
+
+    const formatted = runEditorCommand(indentedJavaState(source), reformatJavaDocument).doc.toString()
+
+    expect(formatted).toBe([
+      'package shane.leetcode.problems.easy;',
+      '',
+      'import java.util.ArrayList;',
+      '',
+      'class Q1 {',
+      '    int size() {',
+      '        return new ArrayList<Integer>().size();',
+      '    }',
+      '}',
+      '',
+    ].join('\n'))
+  })
+
+  it('leaves an already formatted document unchanged', () => {
+    const source = 'package shane.leetcode.problems.easy;\n\nclass Q1 {\n}\n'
+    expect(runEditorCommand(indentedJavaState(source), reformatJavaDocument).doc.toString()).toBe(source)
+  })
+})
+
+describe('Option shortcut matchers', () => {
+  const base = { shiftKey: false, altKey: true, metaKey: false, ctrlKey: false }
+
+  it('matches the cut, paste, and shortcut-list forms on their physical keys', () => {
+    expect(isLineCutAltShortcut({ ...base, code: 'KeyX' })).toBe(true)
+    expect(isPasteAltShortcut({ ...base, code: 'KeyV' })).toBe(true)
+    expect(isShortcutHelpAltShortcut({ ...base, code: 'Slash' })).toBe(true)
+    expect(isLineCutAltShortcut({ ...base, code: 'KeyV' })).toBe(false)
+  })
+
+  it('ignores the same keys with extra modifiers', () => {
+    expect(isLineCutAltShortcut({ ...base, code: 'KeyX', metaKey: true })).toBe(false)
+    expect(isPasteAltShortcut({ ...base, code: 'KeyV', shiftKey: true })).toBe(false)
+    expect(isShortcutHelpAltShortcut({ ...base, code: 'Slash', ctrlKey: true })).toBe(false)
+  })
+
+  it('separates undo from redo by the Shift modifier', () => {
+    expect(isUndoAltShortcut({ ...base, code: 'KeyZ' })).toBe(true)
+    expect(isUndoAltShortcut({ ...base, code: 'KeyZ', shiftKey: true })).toBe(false)
+    expect(isRedoAltShortcut({ ...base, code: 'KeyZ', shiftKey: true })).toBe(true)
+    expect(isRedoAltShortcut({ ...base, code: 'KeyZ' })).toBe(false)
+    expect(isRedoAltShortcut({ ...base, code: 'KeyZ', shiftKey: true, metaKey: true })).toBe(false)
+  })
+
+  it('matches reformat on either primary modifier but not on Alt alone', () => {
+    expect(isReformatShortcut({ ...base, code: 'KeyL', metaKey: true })).toBe(true)
+    expect(isReformatShortcut({ ...base, code: 'KeyL', ctrlKey: true })).toBe(true)
+    expect(isReformatShortcut({ ...base, code: 'KeyL' })).toBe(false)
+    expect(isReformatShortcut({ ...base, code: 'KeyL', metaKey: true, shiftKey: true })).toBe(false)
+  })
+})
 
 function javaState(source: string): EditorState {
   return EditorState.create({
@@ -275,7 +409,7 @@ describe('Java test method lookup', () => {
   })
 
   it('uses the platform-specific selected-test shortcut label', () => {
-    expect(testRunShortcutLabel('other')).toBe('Shift+Ctrl+R')
+    expect(testRunShortcutLabel('other')).toBe('Alt+Shift+R')
     expect(testRunShortcutLabel('mac')).toBe('⇧⌘R')
   })
 })
