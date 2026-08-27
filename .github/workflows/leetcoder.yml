@@ -1,8 +1,13 @@
 name: leetcoder
 
 on:
+  # Only the main branch is gated: pull requests that target it, and the
+  # pushes that land when one merges. Work in progress on a topic branch
+  # does not need a full two-platform bundle on every commit.
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
