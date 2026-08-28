@@ -2014,7 +2014,9 @@ expected: <5>
             home: PathBuf::from("/jdk-17"),
             major_version: 17,
         };
-        let cache = create_compile_cache(root.path(), &java, "sample.Q1").expect("compile cache");
+        let canonical_root = fs::canonicalize(root.path()).expect("canonical cache root");
+        let cache =
+            create_compile_cache(&canonical_root, &java, "sample.Q1").expect("compile cache");
         let first = create_init_script(&cache).expect("first init script");
         let second = create_init_script(&cache).expect("second init script");
         assert_ne!(first.path, second.path);
