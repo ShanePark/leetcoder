@@ -47,7 +47,10 @@ impl RepositoryWatcher {
     fn replace(&self, watcher: Option<RecommendedWatcher>) {
         // A panic in another thread must not permanently disable watching;
         // the guarded value is replaced outright rather than read back.
-        let mut active = self.active.lock().unwrap_or_else(|error| error.into_inner());
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         *active = watcher;
     }
 }
