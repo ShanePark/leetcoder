@@ -399,7 +399,7 @@ describe('Java test method lookup', () => {
       from: inserted.doc.line(3).from,
       line: 3,
     }])
-    const gutterMarkers = buildTestRunMarkers(markers, 'Shift+Ctrl+R')
+    const gutterMarkers = buildTestRunMarkers(markers, 'Ctrl+R')
     const cursor = gutterMarkers.iter()
     expect(gutterMarkers.size).toBe(1)
     expect(cursor.from).toBe(markers[0].from)
@@ -409,8 +409,8 @@ describe('Java test method lookup', () => {
   })
 
   it('uses the platform-specific selected-test shortcut label', () => {
-    expect(testRunShortcutLabel('other')).toBe('Alt+Shift+R')
-    expect(testRunShortcutLabel('mac')).toBe('⇧⌘R')
+    expect(testRunShortcutLabel('other')).toBe('Ctrl+R')
+    expect(testRunShortcutLabel('mac')).toBe('⌃R')
   })
 })
 

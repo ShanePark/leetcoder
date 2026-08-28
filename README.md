@@ -161,8 +161,9 @@ cargo check
 4. The created file opens immediately in the editor. CodeMirror provides Java
    syntax highlighting, bracket/indent behavior, and a small built-in
    completion list. Save with **Save** or `Cmd/Ctrl+S`.
-5. Run the current class with **Run test** or `Cmd/Ctrl+R`. Unsaved changes are
-   saved first; stdout and stderr appear in the Output panel.
+5. Run the test at the cursor with `Ctrl+R`, or run all tests in the current
+   class with `Ctrl+Shift+R`. Unsaved changes are saved first; stdout and
+   stderr appear in the Output panel.
 
 ### Generated scaffold
 

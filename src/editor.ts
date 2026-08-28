@@ -9,6 +9,7 @@ import {
 import { java } from '@codemirror/lang-java'
 import {
   HighlightStyle,
+  bracketMatching,
   codeFolding,
   foldEffect,
   foldGutter,
@@ -62,7 +63,7 @@ import {
 } from './completions'
 import type { ClipboardBridge } from './clipboard'
 import { createClipboardBridge } from './clipboard'
-import { shortcutLabel } from './shortcuts'
+import { shortcutBindings, shortcutLabel } from './shortcuts'
 import {
   formatJavaSource,
   importBlockRange,
@@ -132,7 +133,16 @@ const leetcoderTheme = EditorView.theme({
     color: editorPalette.textDim,
   },
   '.cm-test-gutter': {
-    minWidth: '22px',
+    flex: '0 0 0',
+    width: '0',
+    minWidth: '0',
+    overflow: 'visible',
+    zIndex: '1',
+  },
+  '.cm-test-gutter .cm-gutterElement': {
+    position: 'relative',
+    width: '0',
+    overflow: 'visible',
   },
   '.cm-foldGutter': {
     minWidth: '14px',
@@ -162,6 +172,10 @@ const leetcoderTheme = EditorView.theme({
   },
   '.cm-test-run-button': {
     display: 'inline-flex',
+    position: 'absolute',
+    top: '50%',
+    left: '2px',
+    transform: 'translateY(-50%)',
     alignItems: 'center',
     justifyContent: 'center',
     width: '18px',
@@ -1061,9 +1075,11 @@ export class JavaEditor {
     const runTestAtCursor = (view: EditorView): boolean => {
       const methodName = findJavaTestMethodAt(view.state)
       // Returning true even when no callback is installed keeps the browser's
-      // Ctrl/Cmd+Shift+R refresh shortcut from escaping the editor.
+      // Ctrl+R refresh shortcut from escaping the editor.
       return callbacks.onRunTestAtCursor?.(methodName) !== false
     }
+    const runTestAtCursorShortcut = shortcutBindings('run-test-at-cursor')[0]
+    const runAllTestsShortcut = shortcutBindings('run-test')[0]
     const shortcutLabel = testRunShortcutLabel(isMacPlatform() ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const showShortcuts = (): boolean => {
@@ -1241,6 +1257,7 @@ export class JavaEditor {
         highlightActiveLine(),
         highlightSpecialChars(),
         closeBrackets(),
+        bracketMatching(),
         indentUnit.of('    '),
         EditorState.tabSize.of(4),
         indentOnInput(),
@@ -1252,14 +1269,11 @@ export class JavaEditor {
           indentWithTab,
         ]),
         Prec.high(keymap.of([
-          // Every shortcut is bound in both its Mod and Alt form: macOS uses
-          // Cmd, and Linux, which has no Cmd key, uses Alt for the same keys.
+          // Run chords intentionally use Ctrl on both macOS and Linux.
           { key: 'Mod-s', run: save },
           { key: 'Alt-s', run: save },
-          { key: 'Mod-r', run },
-          { key: 'Alt-r', run },
-          { key: 'Shift-Mod-r', run: runTestAtCursor, preventDefault: true },
-          { key: 'Shift-Alt-r', run: runTestAtCursor, preventDefault: true },
+          { key: runTestAtCursorShortcut, run: runTestAtCursor, preventDefault: true },
+          { key: runAllTestsShortcut, run, preventDefault: true },
           { key: 'Shift-Mod-j', run: insertJavaDoc },
           { key: 'Shift-Alt-j', run: insertJavaDoc },
           // IntelliJ-style line editing shortcuts. CodeMirror's built-in

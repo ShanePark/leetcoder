@@ -18,7 +18,12 @@ import {
   type RepositoryFilesChanged,
 } from './backend'
 import { classNameFromProblem } from './domain'
-import { JavaEditor, isShortcutHelpAltShortcut, type EditorIssue } from './editor'
+import {
+  findJavaTestMethodAt,
+  JavaEditor,
+  isShortcutHelpAltShortcut,
+  type EditorIssue,
+} from './editor'
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
 import { sanitizeProblemHtml } from './sanitize'
@@ -26,6 +31,7 @@ import {
   SHORTCUT_SECTIONS,
   formatShortcut,
   platformBindings,
+  runShortcutAction,
   shortcutHints,
   shortcutLabel,
 } from './shortcuts'
@@ -1473,20 +1479,28 @@ export class LeetcoderApp {
       }
       return
     }
-    if (!(event.metaKey || event.ctrlKey) || event.altKey) {
-      return
-    }
     // CodeMirror owns shortcuts while the editor has focus. Handling them
     // again on window would run/save the same document twice.
-    if (event.target instanceof Node && this.element('#editor').contains(event.target)) {
+    const editorTarget = event.target instanceof Node && this.element('#editor').contains(event.target)
+    const runAction = runShortcutAction(event)
+    if (runAction) {
+      if (editorTarget) {
+        return
+      }
+      event.preventDefault()
+      if (runAction === 'run-test') {
+        void this.runCurrentTest()
+      } else {
+        void this.runCurrentTest(findJavaTestMethodAt(this.editor.view.state))
+      }
+      return
+    }
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || editorTarget) {
       return
     }
     if (event.key.toLowerCase() === 's') {
       event.preventDefault()
       void this.saveCurrentFile()
-    } else if (event.key.toLowerCase() === 'r') {
-      event.preventDefault()
-      void this.runCurrentTest()
     }
   }
 
@@ -1968,8 +1982,8 @@ export class LeetcoderApp {
               <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git</button>
             </div>
             <div class="bottom-panel-actions" role="group" aria-label="Test actions">
-              <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">Alt+Shift+R</kbd></span>
-              <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">Alt+R</kbd></button>
+              <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">${shortcutLabel('run-test-at-cursor', currentIsMacPlatform())}</kbd></span>
+              <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">${shortcutLabel('run-test', currentIsMacPlatform())}</kbd></button>
             </div>
           </div>
           <section id="tests-panel" class="tests-panel" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">
@@ -2053,7 +2067,7 @@ export class LeetcoderApp {
           <div class="shortcuts-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
             <h2 id="shortcuts-title" class="shortcuts-title">Keyboard shortcuts</h2>
             <div id="shortcuts-body" class="shortcuts-body"></div>
-            <p class="shortcuts-note">macOS and Linux use the same physical keys. Where macOS has Cmd, Linux has Alt, so Alt is the primary modifier here; the Ctrl forms stay bound as well.</p>
+            <p class="shortcuts-note">macOS and Linux use the same physical keys. Most shortcuts pair macOS Cmd with Linux Alt; the run shortcuts use Ctrl on both platforms.</p>
             <div class="shortcuts-actions">
               <button id="close-shortcuts" class="text-button" type="button">Close</button>
             </div>

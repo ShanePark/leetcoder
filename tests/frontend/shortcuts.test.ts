@@ -5,8 +5,11 @@ import {
   formatShortcut,
   platformBindings,
   primaryShortcut,
+  runShortcutAction,
+  shortcutBindings,
   shortcutHints,
   shortcutLabel,
+  type ShortcutKeyEvent,
 } from '../../src/shortcuts'
 
 describe('shortcut formatting', () => {
@@ -55,6 +58,10 @@ describe('platform primary binding', () => {
     expect(primaryShortcut(entryFor('Reformat code'), false)).toBe('Ctrl+Alt+L')
     expect(primaryShortcut(entryFor('Complete'), false)).toBe('Ctrl+Space')
     expect(primaryShortcut(entryFor('Toggle line comment'), false)).toBe('Ctrl+/')
+    expect(primaryShortcut(entryFor('Run test at cursor'), false)).toBe('Ctrl+R')
+    expect(primaryShortcut(entryFor('Run test at cursor'), true)).toBe('⌃R')
+    expect(primaryShortcut(entryFor('Run all tests'), false)).toBe('Ctrl+Shift+R')
+    expect(primaryShortcut(entryFor('Run all tests'), true)).toBe('⌃⇧R')
   })
 })
 
@@ -77,7 +84,8 @@ describe('shortcut table', () => {
     const ids = SHORTCUT_SECTIONS.flatMap((section) => section.entries).map((entry) => entry.id)
     expect(new Set(ids).size).toBe(ids.length)
     expect(shortcutLabel('save', false)).toBe('Alt+S')
-    expect(shortcutLabel('run-test-at-cursor', true)).toBe('⇧⌘R')
+    expect(shortcutLabel('run-test-at-cursor', true)).toBe('⌃R')
+    expect(shortcutLabel('run-test', false)).toBe('Ctrl+Shift+R')
     expect(() => shortcutLabel('not-a-shortcut', false)).toThrow(/Unknown shortcut id/)
   })
 
@@ -92,11 +100,39 @@ describe('shortcut table', () => {
   })
 })
 
+describe('run shortcut matching', () => {
+  const ctrlR: ShortcutKeyEvent = {
+    key: 'r',
+    shiftKey: false,
+    altKey: false,
+    metaKey: false,
+    ctrlKey: true,
+  }
+
+  it('uses the declared bindings for the selected test and full run', () => {
+    expect(shortcutBindings('run-test-at-cursor')).toEqual(['Ctrl-r'])
+    expect(shortcutBindings('run-test')).toEqual(['Ctrl-Shift-r'])
+    expect(runShortcutAction(ctrlR)).toBe('run-test-at-cursor')
+    expect(runShortcutAction({ ...ctrlR, shiftKey: true })).toBe('run-test')
+  })
+
+  it('rejects Alt, Meta, missing Ctrl, and unexpected modifiers', () => {
+    expect(runShortcutAction({ ...ctrlR, altKey: true })).toBeNull()
+    expect(runShortcutAction({ ...ctrlR, metaKey: true })).toBeNull()
+    expect(runShortcutAction({ ...ctrlR, ctrlKey: false })).toBeNull()
+    expect(runShortcutAction({ ...ctrlR, shiftKey: true, altKey: true })).toBeNull()
+    expect(runShortcutAction({ ...ctrlR, shiftKey: true, metaKey: true })).toBeNull()
+    expect(runShortcutAction({ ...ctrlR, key: 's' })).toBeNull()
+  })
+})
+
 describe('empty editor hints', () => {
   it('renders the flagged entries with their primary binding', () => {
     const hints = shortcutHints(false)
     expect(hints.length).toBeGreaterThan(0)
-    expect(hints).toContainEqual(['Alt+R', 'Run test'])
-    expect(shortcutHints(true)).toContainEqual(['⌘R', 'Run test'])
+    expect(hints).toContainEqual(['Ctrl+R', 'Run test at cursor'])
+    expect(hints).toContainEqual(['Ctrl+Shift+R', 'Run all tests'])
+    expect(shortcutHints(true)).toContainEqual(['⌃R', 'Run test at cursor'])
+    expect(shortcutHints(true)).toContainEqual(['⌃⇧R', 'Run all tests'])
   })
 })

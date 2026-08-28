@@ -26,6 +26,17 @@ export interface ShortcutSection {
   entries: readonly ShortcutEntry[]
 }
 
+/** Keyboard fields used when matching a shortcut outside CodeMirror. */
+export interface ShortcutKeyEvent {
+  key: string
+  shiftKey: boolean
+  altKey: boolean
+  metaKey: boolean
+  ctrlKey: boolean
+}
+
+export type RunShortcutId = 'run-test-at-cursor' | 'run-test'
+
 export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
   {
     title: 'Editing',
@@ -53,8 +64,10 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
   {
     title: 'Run',
     entries: [
-      { id: 'run-test', bindings: ['Mod-r', 'Alt-r'], description: 'Run test', hint: true },
-      { id: 'run-test-at-cursor', bindings: ['Shift-Mod-r', 'Shift-Alt-r'], description: 'Run test at cursor', hint: true },
+      // Ctrl is intentional here: these IntelliJ-style run chords are the
+      // same on macOS and Linux, so they have no Mod/Alt platform twin.
+      { id: 'run-test-at-cursor', bindings: ['Ctrl-r'], description: 'Run test at cursor', hint: true },
+      { id: 'run-test', bindings: ['Ctrl-Shift-r'], description: 'Run all tests', hint: true },
     ],
   },
   {
@@ -128,6 +141,36 @@ export function primaryShortcut(entry: ShortcutEntry, macPlatform: boolean): str
 const ENTRIES_BY_ID: ReadonlyMap<string, ShortcutEntry> = new Map(
   SHORTCUT_SECTIONS.flatMap((section) => section.entries).map((entry) => [entry.id, entry]),
 )
+
+/** Return the bindings registered for a shortcut, for keymaps and matchers. */
+export function shortcutBindings(id: string): readonly string[] {
+  const entry = ENTRIES_BY_ID.get(id)
+  if (!entry) {
+    throw new Error(`Unknown shortcut id: ${id}`)
+  }
+  return entry.bindings
+}
+
+function matchesShortcutBinding(event: ShortcutKeyEvent, binding: string): boolean {
+  const parts = binding.split('-')
+  const key = parts.pop()
+  if (!key || event.key.toLowerCase() !== key.toLowerCase()) {
+    return false
+  }
+  const modifiers = new Set(parts)
+  return event.shiftKey === modifiers.has('Shift')
+    && event.altKey === modifiers.has('Alt')
+    && event.metaKey === (modifiers.has('Mod') || modifiers.has('Cmd'))
+    && event.ctrlKey === modifiers.has('Ctrl')
+}
+
+/** Identify one of the fixed Ctrl run chords from a keyboard event. */
+export function runShortcutAction(event: ShortcutKeyEvent): RunShortcutId | null {
+  const runShortcuts: readonly RunShortcutId[] = ['run-test-at-cursor', 'run-test']
+  return runShortcuts.find((id) => (
+    shortcutBindings(id).some((binding) => matchesShortcutBinding(event, binding))
+  )) ?? null
+}
 
 /**
  * The label to print for a shortcut mentioned outside the shortcut list, so
