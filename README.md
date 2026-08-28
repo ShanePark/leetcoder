@@ -115,6 +115,18 @@ Bundles are written under
 release or upload anything. Signing and release automation are deliberately
 outside the MVP.
 
+To rebuild the native bundle, install it over the local desktop application,
+and relaunch it, run:
+
+```bash
+npm run rebuild
+```
+
+On macOS this atomically replaces `/Applications/leetcoder.app`. On Linux it
+installs the AppImage and desktop entry under the current user's `~/.local`
+directories. The command writes its build and launch log to the system temp
+directory as `leetcoder-rebuild.log`.
+
 Rust checks can be run independently:
 
 ```bash
@@ -149,8 +161,9 @@ cargo check
 4. The created file opens immediately in the editor. CodeMirror provides Java
    syntax highlighting, bracket/indent behavior, and a small built-in
    completion list. Save with **Save** or `Cmd/Ctrl+S`.
-5. Run the current class with **Run test** or `Cmd/Ctrl+R`. Unsaved changes are
-   saved first; stdout and stderr appear in the Output panel.
+5. Run the test at the cursor with `Ctrl+R`, or run all tests in the current
+   class with `Ctrl+Shift+R`. Unsaved changes are saved first; stdout and
+   stderr appear in the Output panel.
 
 ### Generated scaffold
 

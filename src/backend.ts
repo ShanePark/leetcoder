@@ -21,6 +21,20 @@ export interface ProblemFileEntry {
   packageSegment: 'easy' | 'medium' | 'xhard' | 'other'
 }
 
+/** The path and source returned after a file mutation. */
+export interface ProblemFileContent {
+  relativePath: string
+  content: string
+}
+
+/** Problem source files changed outside this application. */
+export interface RepositoryFilesChanged {
+  /** Repository-relative POSIX paths, sorted and de-duplicated. */
+  paths: string[]
+  /** True when a file was created, removed, or renamed, so the list is stale. */
+  structural: boolean
+}
+
 /** A path reported by Git as changed in the selected repository. */
 export interface GitFileChange {
   path: string
@@ -115,7 +129,11 @@ export interface BackendClient {
   createProblemFile(repoPath: string, plan: ProblemFilePlan): Promise<void>
   saveProblemFile(repoPath: string, path: string, content: string): Promise<void>
   deleteProblemFile(repoPath: string, path: string): Promise<void>
+  duplicateProblemFile(repoPath: string, path: string): Promise<ProblemFileContent>
+  renameProblemFile(repoPath: string, path: string, newPath: string): Promise<ProblemFileContent>
   listGitChanges(repoPath: string): Promise<GitFileChange[]>
+  discardGitChanges(repoPath: string, path: string): Promise<void>
+  showInFileManager(repoPath: string, path: string): Promise<void>
   getGitDiff(repoPath: string, paths: string[]): Promise<string>
   commitGit(repoPath: string, paths: string[], message: string): Promise<GitCommitResult>
   pushGit(repoPath: string): Promise<GitPushResult>
@@ -123,8 +141,22 @@ export interface BackendClient {
     repoPath: string,
     fullyQualifiedClassName: string,
     onProgress?: TestRunProgressHandler,
+    testMethod?: string,
   ): Promise<TestResult>
+  /** Start reporting external changes to the given repository's source tree. */
+  watchRepository(repoPath: string): Promise<void>
+  stopWatchingRepository(): Promise<void>
+  /** Subscribe to watcher events; resolves to an unsubscribe function. */
+  onRepositoryFilesChanged(
+    handler: (change: RepositoryFilesChanged) => void,
+  ): Promise<() => void>
 }
+
+/** Tauri's event bridge, narrowed to what the watcher subscription needs. */
+export type Listen = (
+  event: string,
+  handler: (message: { payload: unknown }) => void,
+) => Promise<() => void>
 
 export type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
 
@@ -137,7 +169,10 @@ interface ProgressChannelFallback {
  * Keep the Tauri bridge in one place.  The optional invoker makes this module
  * usable in unit tests without booting a desktop webview.
  */
-export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient {
+export function createBackendClient(
+  invoke: Invoke = tauriInvoke,
+  listen: Listen = defaultListen,
+): BackendClient {
   return {
     async validateProject(repoPath) {
       const response = await invoke<unknown>('validate_project', { repoPath })
@@ -190,9 +225,31 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
       await invoke<unknown>('delete_problem_file', { repoPath, path })
     },
 
+    async duplicateProblemFile(repoPath, path) {
+      const response = await invoke<unknown>('duplicate_problem_file', { repoPath, path })
+      return normalizeProblemFileContent(response, 'duplicate')
+    },
+
+    async renameProblemFile(repoPath, path, newPath) {
+      const response = await invoke<unknown>('rename_problem_file', {
+        repoPath,
+        path,
+        newPath,
+      })
+      return normalizeProblemFileContent(response, 'rename')
+    },
+
     async listGitChanges(repoPath) {
       const response = await invoke<unknown>('list_git_changes', { repoPath })
       return normalizeGitChanges(response)
+    },
+
+    async discardGitChanges(repoPath, path) {
+      await invoke<unknown>('discard_git_changes', { repoPath, path })
+    },
+
+    async showInFileManager(repoPath, path) {
+      await invoke<unknown>('show_in_file_manager', { repoPath, path })
     },
 
     async getGitDiff(repoPath, paths) {
@@ -210,7 +267,7 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
       return normalizeGitPushResult(response)
     },
 
-    async runProblemTest(repoPath, fullyQualifiedClassName, onProgress) {
+    async runProblemTest(repoPath, fullyQualifiedClassName, onProgress, testMethod) {
       // The channel is intentionally passed even when the caller does not
       // subscribe. Rust commands use it to report lifecycle events, and a
       // no-op listener keeps the invoke contract identical for every caller.
@@ -220,14 +277,63 @@ export function createBackendClient(invoke: Invoke = tauriInvoke): BackendClient
           onProgress?.(progress)
         }
       })
-      const response = await invoke<unknown>('run_problem_test', {
+      const args: Record<string, unknown> = {
         repoPath,
         fullyQualifiedClassName,
         onEvent,
-      })
+      }
+      if (testMethod !== undefined) {
+        args.testMethod = testMethod
+      }
+      const response = await invoke<unknown>('run_problem_test', args)
       return normalizeTestResult(response)
     },
+
+    async watchRepository(repoPath) {
+      await invoke<unknown>('watch_repository', { repoPath })
+    },
+
+    async stopWatchingRepository() {
+      await invoke<unknown>('unwatch_repository')
+    },
+
+    async onRepositoryFilesChanged(handler) {
+      return listen(REPOSITORY_FILES_CHANGED_EVENT, (message) => {
+        const change = normalizeRepositoryFilesChanged(message.payload)
+        if (change) {
+          handler(change)
+        }
+      })
+    },
   }
+}
+
+/** The Rust watcher's event name. Keep in sync with `src-tauri/src/watcher.rs`. */
+const REPOSITORY_FILES_CHANGED_EVENT = 'repository-files-changed'
+
+/**
+ * Tauri's event bridge is imported lazily so the Vite browser preview, which
+ * has no desktop runtime behind it, still loads. Without it the subscription
+ * is simply inert.
+ */
+const defaultListen: Listen = async (event, handler) => {
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
+    return await listen(event, handler as Parameters<typeof listen>[1])
+  } catch {
+    return () => {}
+  }
+}
+
+function normalizeRepositoryFilesChanged(payload: unknown): RepositoryFilesChanged | null {
+  if (!isRecord(payload) || !Array.isArray(payload.paths)) {
+    return null
+  }
+  const paths = payload.paths.filter((path): path is string => typeof path === 'string')
+  if (paths.length === 0) {
+    return null
+  }
+  return { paths, structural: payload.structural === true }
 }
 
 function createProgressChannel(handler: (event: unknown) => void): Channel<unknown> | ProgressChannelFallback {
@@ -353,6 +459,20 @@ function normalizeProblemFiles(value: unknown): ProblemFileEntry[] {
     // this list to Java files at render time.
     .filter((file) => /\.(?:java|kt)$/i.test(file.path))
     .sort((left, right) => left.path.localeCompare(right.path))
+}
+
+function normalizeProblemFileContent(value: unknown, operation: 'duplicate' | 'rename'): ProblemFileContent {
+  if (!isRecord(value)) {
+    throw new Error(`The file ${operation} response was invalid.`)
+  }
+  const relativePath = stringValue(value.relativePath)
+    ?? stringValue(value.relative_path)
+    ?? stringValue(value.path)
+  const content = stringValue(value.content) ?? stringValue(value.source)
+  if (!relativePath || content === undefined) {
+    throw new Error(`The file ${operation} response was missing path or source content.`)
+  }
+  return { relativePath, content }
 }
 
 export function normalizeGitChanges(value: unknown): GitFileChange[] {

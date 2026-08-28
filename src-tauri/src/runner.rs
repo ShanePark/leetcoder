@@ -24,13 +24,14 @@ use crate::models::{
     RunProblemTestArgs,
 };
 use crate::repository;
-use crate::security::canonical_project_root;
+use crate::security::{canonical_project_root, is_within};
 
 const INIT_SCRIPT_PREFIX: &str = "leetcoder-init";
 const TEST_EVENT_MARKER: &str = "LEETCODER_TEST_EVENT_V1:";
 const MAX_JUNIT_XML_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_SUPPORTED_JAVA_MAJOR: u32 = 11;
 const TARGET_JAVA_MAJOR: u32 = 17;
+const COMPILE_CACHE_SCHEMA: &str = "v1";
 
 #[allow(dead_code)]
 pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestResult, String> {
@@ -52,6 +53,7 @@ pub(crate) fn run_problem_test_with_sink(
     );
     let root = canonical_project_root(&args.project_root)?;
     validate_fully_qualified_class_name(&args.fully_qualified_class_name)?;
+    validate_test_method(args.test_method.as_deref())?;
 
     let wrapper = gradle_wrapper(&root);
     validate_gradle_wrapper(&wrapper)?;
@@ -72,7 +74,13 @@ pub(crate) fn run_problem_test_with_sink(
         Err(error) => return Ok(runner_failure_result(error, elapsed_millis(started))),
     };
 
-    let run_temp = create_init_script()?;
+    let compile_cache = create_compile_cache(&root, &java, &args.fully_qualified_class_name)?;
+    let run_temp = create_init_script(&compile_cache)?;
+    let test_filter = args
+        .test_method
+        .as_deref()
+        .map(|method| format!("{}.{}", args.fully_qualified_class_name, method))
+        .unwrap_or_else(|| args.fully_qualified_class_name.clone());
     emit_event(
         &sink,
         ProblemTestEvent::Phase {
@@ -95,13 +103,16 @@ pub(crate) fn run_problem_test_with_sink(
             run_temp.classes_dir.display()
         ))
         .arg(format!(
+            "-DleetcoderSharedClassesDir={}",
+            run_temp.shared_classes_dir.display()
+        ))
+        .arg(format!(
             "-DleetcoderProblemClass={}",
             args.fully_qualified_class_name
         ))
-        .arg("--no-daemon")
         .arg("leetcoderProblemTest")
         .arg("--tests")
-        .arg(&args.fully_qualified_class_name)
+        .arg(test_filter)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -668,6 +679,129 @@ struct InitScript {
     path: PathBuf,
     result_dir: PathBuf,
     classes_dir: PathBuf,
+    shared_classes_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompileCache {
+    classes_dir: PathBuf,
+    shared_classes_dir: PathBuf,
+}
+
+fn create_compile_cache(
+    root: &Path,
+    java: &JavaInstallation,
+    fully_qualified_class_name: &str,
+) -> Result<CompileCache, String> {
+    let gradle_version = gradle_wrapper_version(root);
+    let java_key = stable_cache_key(&java.home.to_string_lossy());
+    let problem_key = stable_cache_key(fully_qualified_class_name);
+    let cache_root = root
+        .join("build")
+        .join("leetcoder")
+        .join(COMPILE_CACHE_SCHEMA)
+        .join(format!(
+            "gradle-{}",
+            sanitize_cache_component(&gradle_version)
+        ))
+        .join(format!("java-{}-{}", java.major_version, java_key));
+    let shared_classes_dir = cache_root.join("shared");
+    let classes_dir = cache_root.join("problems").join(problem_key);
+
+    secure_cache_directory(root, &shared_classes_dir, "shared Java classes")?;
+    secure_cache_directory(root, &classes_dir, "problem Java classes")?;
+    Ok(CompileCache {
+        classes_dir,
+        shared_classes_dir,
+    })
+}
+
+fn secure_cache_directory(root: &Path, path: &Path, description: &str) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| {
+        format!(
+            "Unable to create {description} cache directory '{}': {error}",
+            path.display()
+        )
+    })?;
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        format!(
+            "Unable to resolve {description} cache directory '{}': {error}",
+            path.display()
+        )
+    })?;
+    if !is_within(root, &canonical) {
+        return Err(format!(
+            "The {description} cache directory must stay inside the selected repository: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&canonical, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!(
+                "Unable to secure {description} cache directory '{}': {error}",
+                canonical.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn gradle_wrapper_version(root: &Path) -> String {
+    let properties = root.join("gradle/wrapper/gradle-wrapper.properties");
+    let Ok(contents) = fs::read_to_string(properties) else {
+        return "unknown".to_string();
+    };
+    let Some(distribution_url) = contents
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("distributionUrl="))
+    else {
+        return "unknown".to_string();
+    };
+    let filename = distribution_url
+        .rsplit('/')
+        .next()
+        .unwrap_or(distribution_url);
+    let filename = filename.replace("\\:", ":");
+    let Some(version) = filename.strip_prefix("gradle-") else {
+        return "unknown".to_string();
+    };
+    version
+        .split_once("-bin")
+        .or_else(|| version.split_once("-all"))
+        .map(|(version, _)| version.to_string())
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn sanitize_cache_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn stable_cache_key(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3_u64);
+    }
+    format!("{hash:016x}")
 }
 
 pub(crate) fn build_gradle_init_script() -> &'static str {
@@ -693,30 +827,40 @@ allprojects {
         if (selectedSourceFiles.isEmpty()) {
             throw new GradleException("Selected problem source was not found: ${selectedSourcePath}")
         }
-        def isolatedSources = files(problemSourceFiles, selectedSourceFiles)
         def classesDirProperty = System.getProperty('leetcoderClassesDir')
         if (classesDirProperty == null || classesDirProperty.trim().isEmpty()) {
             throw new GradleException('leetcoderClassesDir was not provided')
         }
         def classesDir = project.file(classesDirProperty)
+        def sharedClassesDirProperty = System.getProperty('leetcoderSharedClassesDir')
+        if (sharedClassesDirProperty == null || sharedClassesDirProperty.trim().isEmpty()) {
+            throw new GradleException('leetcoderSharedClassesDir was not provided')
+        }
+        def sharedClassesDir = project.file(sharedClassesDirProperty)
         def jarClasspath = configurations.testRuntimeClasspath.filter { file ->
             file.isFile() && file.name.toLowerCase().endsWith('.jar')
         }
-        def compileTask = tasks.register('leetcoderProblemCompile', JavaCompile) {
-            description = 'Compiles shared sources and the selected leetcoder problem only.'
-            source isolatedSources
-            destinationDirectory.set(classesDir)
+        def sharedCompileTask = tasks.register('leetcoderSharedCompile', JavaCompile) {
+            description = 'Compiles shared leetcoder sources only.'
+            source problemSourceFiles
+            destinationDirectory.set(sharedClassesDir)
             classpath = jarClasspath
-            options.sourcepath = files(sourceSets.main.java.srcDirs)
             options.encoding = 'UTF-8'
-            outputs.upToDateWhen { false }
+        }
+        def compileTask = tasks.register('leetcoderProblemCompile', JavaCompile) {
+            description = 'Compiles the selected leetcoder problem only.'
+            dependsOn sharedCompileTask
+            source selectedSourceFiles
+            destinationDirectory.set(classesDir)
+            classpath = files(sharedClassesDir) + jarClasspath
+            options.encoding = 'UTF-8'
         }
         tasks.register('leetcoderProblemTest', Test) {
             description = 'Runs one leetcoder problem class from the main source set.'
             group = 'verification'
             dependsOn compileTask
             testClassesDirs = files(classesDir)
-            classpath = files(classesDir, sourceSets.main.resources.srcDirs) + jarClasspath
+            classpath = files(classesDir, sharedClassesDir, sourceSets.main.resources.srcDirs) + jarClasspath
             useJUnitPlatform()
             testLogging.showStandardStreams = true
             def resultDir = System.getProperty('leetcoderResultDir')
@@ -775,7 +919,7 @@ allprojects {
 "#
 }
 
-fn create_init_script() -> Result<InitScript, String> {
+fn create_init_script(compile_cache: &CompileCache) -> Result<InitScript, String> {
     let directory = Builder::new()
         .prefix(INIT_SCRIPT_PREFIX)
         .tempdir_in(std::env::temp_dir())
@@ -797,17 +941,10 @@ fn create_init_script() -> Result<InitScript, String> {
 
     let path = directory.path().join("init.gradle");
     let result_dir = directory.path().join("junit-results");
-    let classes_dir = directory.path().join("classes");
     fs::create_dir(&result_dir).map_err(|error| {
         format!(
             "Unable to create temporary JUnit result directory '{}': {error}",
             result_dir.display()
-        )
-    })?;
-    fs::create_dir(&classes_dir).map_err(|error| {
-        format!(
-            "Unable to create temporary Java classes directory '{}': {error}",
-            classes_dir.display()
         )
     })?;
     #[cfg(unix)]
@@ -817,12 +954,6 @@ fn create_init_script() -> Result<InitScript, String> {
             format!(
                 "Unable to secure temporary JUnit result directory '{}': {error}",
                 result_dir.display()
-            )
-        })?;
-        fs::set_permissions(&classes_dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            format!(
-                "Unable to secure temporary Java classes directory '{}': {error}",
-                classes_dir.display()
             )
         })?;
     }
@@ -855,7 +986,8 @@ fn create_init_script() -> Result<InitScript, String> {
         _directory: directory,
         path,
         result_dir,
-        classes_dir,
+        classes_dir: compile_cache.classes_dir.clone(),
+        shared_classes_dir: compile_cache.shared_classes_dir.clone(),
     })
 }
 
@@ -879,6 +1011,32 @@ fn validate_fully_qualified_class_name(class_name: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_test_method(test_method: Option<&str>) -> Result<(), String> {
+    let Some(method) = test_method else {
+        return Ok(());
+    };
+    if method.is_empty() {
+        return Err("testMethod must not be empty".to_string());
+    }
+    if method.trim() != method || !is_java_identifier(method) {
+        return Err(format!(
+            "Invalid test method name: {method}. Use a Java identifier without dots, spaces, or wildcards."
+        ));
+    }
+    Ok(())
+}
+
+fn is_java_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && characters.all(|character| {
+            character == '_' || character == '$' || character.is_ascii_alphanumeric()
+        })
 }
 
 #[derive(Debug, Default)]
@@ -1671,8 +1829,11 @@ expected: <5>
         assert!(script.contains("exclude 'shane/leetcode/problems/medium/**'"));
         assert!(script.contains("exclude 'shane/leetcode/problems/xhard/**'"));
         assert!(script.contains("selectedSourcePath"));
-        assert!(script.contains("options.sourcepath"));
         assert!(script.contains("leetcoderClassesDir"));
+        assert!(script.contains("leetcoderSharedClassesDir"));
+        assert!(script.contains("leetcoderSharedCompile"));
+        assert!(script.contains("dependsOn sharedCompileTask"));
+        assert!(!script.contains("options.sourcepath"));
         assert!(script.contains("sourceSets.main.resources.srcDirs"));
         assert!(script.contains("file.isFile() && file.name.toLowerCase().endsWith('.jar')"));
         assert!(script.contains("useJUnitPlatform()"));
@@ -1680,6 +1841,15 @@ expected: <5>
         assert!(script.contains("junitXml.outputLocation"));
         assert!(script.contains("junitXml.outputPerTestCase = true"));
         assert!(script.contains("outputs.upToDateWhen { false }"));
+        let compile_section = script
+            .split("def compileTask")
+            .nth(1)
+            .expect("problem compile task");
+        assert!(!compile_section
+            .split("tasks.register('leetcoderProblemTest'")
+            .next()
+            .expect("compile task body")
+            .contains("outputs.upToDateWhen { false }"));
         assert!(script.contains("leetcoderResultDir"));
         assert!(script.contains(TEST_EVENT_MARKER));
         assert!(script.contains("beforeTest"));
@@ -1826,17 +1996,41 @@ expected: <5>
     }
 
     #[test]
+    fn test_method_validation_rejects_command_like_input() {
+        assert!(validate_test_method(None).is_ok());
+        assert!(validate_test_method(Some("test2")).is_ok());
+        assert!(validate_test_method(Some("test2()")).is_err());
+        assert!(validate_test_method(Some("test two")).is_err());
+        assert!(validate_test_method(Some("test.*")).is_err());
+        assert!(validate_test_method(Some("test.two")).is_err());
+        assert!(validate_test_method(Some(" test2")).is_err());
+        assert!(validate_test_method(Some("")).is_err());
+    }
+
+    #[test]
     fn temporary_script_and_results_are_private_unique_and_removed_on_drop() {
-        let first = create_init_script().expect("first init script");
-        let second = create_init_script().expect("second init script");
+        let root = tempfile::tempdir().expect("cache root");
+        let java = JavaInstallation {
+            home: PathBuf::from("/jdk-17"),
+            major_version: 17,
+        };
+        let canonical_root = fs::canonicalize(root.path()).expect("canonical cache root");
+        let cache =
+            create_compile_cache(&canonical_root, &java, "sample.Q1").expect("compile cache");
+        let first = create_init_script(&cache).expect("first init script");
+        let second = create_init_script(&cache).expect("second init script");
         assert_ne!(first.path, second.path);
         assert_ne!(first.result_dir, second.result_dir);
+        assert_eq!(first.classes_dir, second.classes_dir);
+        assert_eq!(first.shared_classes_dir, second.shared_classes_dir);
         assert!(first.path.is_file());
         assert!(first.result_dir.is_dir());
         assert!(first.classes_dir.is_dir());
+        assert!(first.shared_classes_dir.is_dir());
         assert!(second.path.is_file());
         assert!(second.result_dir.is_dir());
         assert!(second.classes_dir.is_dir());
+        assert!(second.shared_classes_dir.is_dir());
 
         #[cfg(unix)]
         {
@@ -1877,7 +2071,7 @@ expected: <5>
         drop(first);
         assert!(!first_path.exists());
         assert!(!first_results.exists());
-        assert!(!first_classes.exists());
+        assert!(first_classes.exists());
         assert!(second.path.exists());
         drop(second);
     }
@@ -2096,6 +2290,7 @@ at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method
         let result = run_problem_test(RunProblemTestArgs {
             project_root: directory.path().to_string_lossy().into_owned(),
             fully_qualified_class_name: "shane.leetcode.problems.easy.Q1".to_string(),
+            test_method: None,
         });
         assert!(result.unwrap_err().contains("valid ps repository"));
     }

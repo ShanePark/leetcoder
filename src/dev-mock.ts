@@ -200,6 +200,7 @@ export function createDevMockBackend(): BackendClient & {
   getGitStatus(repoPath: string): Promise<unknown>
 } {
   const files = seedFiles()
+  const originalFiles = new Map(files)
   const gitAddedPath = 'src/main/java/shane/leetcode/problems/easy/Q3618SplitArrayByPrimeIndices.java'
   let gitChanges: Array<GitFileChange & { additions: number | null; deletions: number | null }> = [
     {
@@ -263,6 +264,62 @@ export function createDevMockBackend(): BackendClient & {
       files.delete(path)
     },
 
+    async duplicateProblemFile(_repoPath: string, path: string) {
+      const source = files.get(path)
+      if (source === undefined) {
+        throw new Error(`No such file: ${path}`)
+      }
+      const slash = path.lastIndexOf('/')
+      const directory = slash >= 0 ? path.slice(0, slash) : ''
+      const name = path.slice(slash + 1)
+      const extensionIndex = name.lastIndexOf('.')
+      const stem = extensionIndex >= 0 ? name.slice(0, extensionIndex) : name
+      const extension = extensionIndex >= 0 ? name.slice(extensionIndex) : ''
+      const names = new Set(
+        [...files.keys()]
+          .filter((candidate) => candidate.startsWith(`${directory}/`))
+          .map((candidate) => candidate.slice(candidate.lastIndexOf('/') + 1).replace(/\.[^.]+$/, '')),
+      )
+      let suffix = 2
+      let candidateStem = `${stem}${suffix}`
+      while (names.has(candidateStem)) {
+        suffix += 1
+        candidateStem = `${stem}${suffix}`
+      }
+      const candidatePath = `${directory}/${candidateStem}${extension}`
+      const copied = source.replace(new RegExp(`\\b${escapeRegExp(stem)}\\b`, 'g'), candidateStem)
+      files.set(candidatePath, copied)
+      return { relativePath: candidatePath, content: copied }
+    },
+
+    async renameProblemFile(_repoPath: string, path: string, newPath: string) {
+      const source = files.get(path)
+      if (source === undefined) {
+        throw new Error(`No such file: ${path}`)
+      }
+      const slash = path.lastIndexOf('/')
+      const directory = slash >= 0 ? path.slice(0, slash) : ''
+      const name = path.slice(slash + 1)
+      const extensionIndex = name.lastIndexOf('.')
+      const extension = extensionIndex >= 0 ? name.slice(extensionIndex) : ''
+      const targetName = newPath.includes('/') ? newPath.slice(newPath.lastIndexOf('/') + 1) : newPath
+      const target = newPath.includes('/') ? newPath : `${directory}/${newPath}`
+      const targetPath = /\.[^.]+$/.test(targetName) ? target : `${target}${extension}`
+      if (files.has(targetPath)) {
+        throw new Error(`File already exists: ${targetPath}`)
+      }
+      const oldStem = extensionIndex >= 0 ? name.slice(0, extensionIndex) : name
+      const destinationName = targetPath.slice(targetPath.lastIndexOf('/') + 1)
+      const destinationExtensionIndex = destinationName.lastIndexOf('.')
+      const destinationStem = destinationExtensionIndex >= 0
+        ? destinationName.slice(0, destinationExtensionIndex)
+        : destinationName
+      const renamed = source.replace(new RegExp(`\\b${escapeRegExp(oldStem)}\\b`, 'g'), destinationStem)
+      files.delete(path)
+      files.set(targetPath, renamed)
+      return { relativePath: targetPath, content: renamed }
+    },
+
     async getGitStatus(): Promise<unknown> {
       await delay(150)
       return { branch: 'main', files: gitChanges }
@@ -270,6 +327,27 @@ export function createDevMockBackend(): BackendClient & {
 
     async listGitChanges(): Promise<GitFileChange[]> {
       return gitChanges
+    },
+
+    async discardGitChanges(_repoPath: string, path: string): Promise<void> {
+      const change = gitChanges.find((entry) => entry.path === path)
+      if (!change) {
+        throw new Error(`The selected path is not currently changed: ${path}`)
+      }
+      const isNew = change.status === 'added' || change.status === 'untracked'
+      if (isNew) {
+        files.delete(path)
+      } else {
+        const original = originalFiles.get(path)
+        if (original !== undefined) {
+          files.set(path, original)
+        }
+      }
+      gitChanges = gitChanges.filter((entry) => entry.path !== path)
+    },
+
+    async showInFileManager(): Promise<void> {
+      // The browser preview has no native file manager to open.
     },
 
     async getGitDiff(_repoPath: string, paths: string[]): Promise<string> {
@@ -300,6 +378,7 @@ export function createDevMockBackend(): BackendClient & {
       _repoPath: string,
       fullyQualifiedClassName: string,
       onProgress?: TestRunProgressHandler,
+      testMethod?: string,
     ): Promise<TestResult> {
       const scenario = activeScenario()
       const sourceFile = `src/main/java/${fullyQualifiedClassName.replace(/\./g, '/')}.java`
@@ -388,31 +467,63 @@ export function createDevMockBackend(): BackendClient & {
         { name: 'testLargeInput()', className: fullyQualifiedClassName, displayName: 'testLargeInput()', status: 'passed', durationMs: 122 },
         { name: 'testEdgeCases()', className: fullyQualifiedClassName, displayName: 'testEdgeCases()', status: 'passed', durationMs: 7 },
       ]
-      for (const test of cases) {
+      const methodName = testMethod?.replace(/\(.*$/, '')
+      const selectedCases = cases.filter((test) => {
+        if (!methodName) {
+          return true
+        }
+        return test.name.replace(/\(.*$/, '') === methodName
+      })
+      if (methodName && selectedCases.length === 0) {
+        return {
+          success: false,
+          phase: 'noTests',
+          summary: { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, durationMs: 600 },
+          tests: [],
+          diagnostics: [],
+          stdout: `No tests found for ${fullyQualifiedClassName}.${methodName}\n`,
+          stderr: '',
+          exitCode: 0,
+        }
+      }
+      for (const test of selectedCases) {
         emit({ kind: 'testStarted', test: { ...test, status: 'running' } })
         await delay(140)
         emit({ kind: 'testFinished', test })
       }
       emit({ kind: 'log', stream: 'stdout', text: '> Task :test\nBUILD ' + (failing ? 'FAILED' : 'SUCCESSFUL') + ' in 1s\n' })
       await delay(120)
-      const failed = cases.filter((test) => test.status === 'failed').length
+      const failed = selectedCases.filter((test) => test.status === 'failed').length
       return {
         success: failed === 0,
         phase: 'test',
         summary: {
-          total: cases.length,
-          passed: cases.length - failed,
+          total: selectedCases.length,
+          passed: selectedCases.length - failed,
           failed,
           skipped: 0,
           errors: 0,
           durationMs: 1460,
         },
-        tests: cases,
+        tests: selectedCases,
         diagnostics: [],
         stdout: `> Task :test\nBUILD ${failing ? 'FAILED' : 'SUCCESSFUL'} in 1s\n`,
         stderr: failing ? '5 tests completed, 1 failed\n' : '',
         exitCode: failed === 0 ? 0 : 1,
       }
     },
+
+    // The browser preview has no filesystem watcher behind it.
+    async watchRepository(): Promise<void> {},
+
+    async stopWatchingRepository(): Promise<void> {},
+
+    async onRepositoryFilesChanged(): Promise<() => void> {
+      return () => {}
+    },
   }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }

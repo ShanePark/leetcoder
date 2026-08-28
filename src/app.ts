@@ -1,4 +1,4 @@
-import { open } from '@tauri-apps/plugin-dialog'
+import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 
 import {
   createBackendClient,
@@ -15,17 +15,33 @@ import {
   type TestDiagnostic,
   type TestPhase,
   type TestRunProgress,
+  type RepositoryFilesChanged,
 } from './backend'
 import { classNameFromProblem } from './domain'
-import { JavaEditor, type EditorIssue } from './editor'
+import {
+  findJavaTestMethodAt,
+  JavaEditor,
+  isShortcutHelpAltShortcut,
+  type EditorIssue,
+} from './editor'
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
 import { sanitizeProblemHtml } from './sanitize'
+import {
+  SHORTCUT_SECTIONS,
+  formatShortcut,
+  platformBindings,
+  runShortcutAction,
+  shortcutHints,
+  shortcutLabel,
+} from './shortcuts'
 
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
 const BOTTOM_PANEL_HEIGHT_KEY = 'leetcoder.bottom-panel-height'
 const GIT_FILE_LIST_WIDTH_KEY = 'leetcoder.git-file-list-width'
+const SIDEBAR_WIDTH_KEY = 'leetcoder.sidebar-width'
 const DAILY_DESCRIPTION_KEY = 'leetcoder.daily-description'
+const DAILY_DESCRIPTION_HEIGHT_KEY = 'leetcoder.daily-description-height'
 const DEFAULT_BOTTOM_PANEL_HEIGHT = 280
 const MIN_BOTTOM_PANEL_HEIGHT = 180
 const MAX_BOTTOM_PANEL_HEIGHT = 640
@@ -34,11 +50,25 @@ const MIN_GIT_FILE_LIST_WIDTH = 180
 const MIN_GIT_DIFF_WIDTH = 260
 const GIT_SPLITTER_WIDTH = 7
 const GIT_WORKSPACE_GAP = 16
+const DEFAULT_SIDEBAR_WIDTH = 248
+const MIN_SIDEBAR_WIDTH = 180
+const MAX_SIDEBAR_WIDTH = 520
+const MIN_EDITOR_WIDTH = 360
+const SIDEBAR_SPLITTER_WIDTH = 7
+const DEFAULT_DAILY_DESCRIPTION_HEIGHT = 220
+const MIN_DAILY_DESCRIPTION_HEIGHT = 120
+const MAX_DAILY_DESCRIPTION_HEIGHT = 560
+const MIN_CODE_CARD_HEIGHT = 180
+const DAILY_DESCRIPTION_LAYOUT_OVERHEAD = 86
+const DAILY_DESCRIPTION_SPLITTER_HEIGHT = 7
+const TEST_RUN_ROOT_KEY = '__leetcoder_test_run__'
 const GIT_REFRESH_DEBOUNCE_MS = 250
 const GIT_POLL_INTERVAL_MS = 4000
 const DAILY_RETRY_INTERVAL_MS = 60_000
-const FILE_CONTEXT_MENU_WIDTH = 96
-const FILE_CONTEXT_MENU_HEIGHT = 38
+const FILE_CONTEXT_MENU_WIDTH = 156
+const FILE_CONTEXT_MENU_HEIGHT = 108
+const GIT_CONTEXT_MENU_WIDTH = 190
+const GIT_CONTEXT_MENU_HEIGHT = 76
 const VIEWPORT_MARGIN = 8
 const SAVED_FLASH_MS = 1500
 const TOAST_DISMISS_MS = 3000
@@ -54,7 +84,104 @@ const OTHER_GROUP: { key: ProblemFileEntry['packageSegment']; label: string } = 
   label: 'Other',
 }
 
+/**
+ * Return the only group allowed to stay open in the file explorer accordion.
+ * Keeping this transition pure makes the one-open-group rule easy to reuse
+ * when the UI is rendered after a file open or refresh.
+ */
+export function accordionGroupKeys(
+  group: ProblemFileEntry['packageSegment'],
+  expanded: boolean,
+): ProblemFileEntry['packageSegment'][] {
+  return expanded ? [group] : []
+}
+
+/**
+ * Pick the tab that should replace a closed tab. The index is from the tab
+ * list before removal; after removal that index points at the tab on the
+ * right, or the final remaining tab on the left when the closed tab was last.
+ */
+export function replacementTabIndex(remainingCount: number, closedIndex: number): number | null {
+  if (remainingCount <= 0 || closedIndex < 0 || closedIndex > remainingCount) {
+    return null
+  }
+  return closedIndex < remainingCount ? closedIndex : remainingCount - 1
+}
+
+/** The keyboard fields needed to recognize the platform-specific tab-close shortcut. */
+export interface TabCloseShortcutEvent {
+  key: string
+  shiftKey: boolean
+  altKey: boolean
+  metaKey: boolean
+  ctrlKey: boolean
+}
+
+/**
+ * Match only Cmd+W on Apple platforms and Alt+W everywhere else. Keeping the
+ * platform and event data as arguments makes the shortcut behavior testable
+ * without depending on the host browser's navigator or KeyboardEvent.
+ */
+export function isCloseTabShortcut(
+  event: TabCloseShortcutEvent,
+  macPlatform: boolean,
+): boolean {
+  if (event.key.toLowerCase() !== 'w' || event.shiftKey) {
+    return false
+  }
+  return macPlatform
+    ? event.metaKey && !event.altKey && !event.ctrlKey
+    : event.altKey && !event.metaKey && !event.ctrlKey
+}
+
+/** Match the platform-specific close-all-tabs shortcut without reading browser globals. */
+export function isCloseAllTabsShortcut(
+  event: TabCloseShortcutEvent,
+  macPlatform: boolean,
+): boolean {
+  if (event.key.toLowerCase() !== 'w' || !event.shiftKey) {
+    return false
+  }
+  return macPlatform
+    ? event.metaKey && !event.altKey && !event.ctrlKey
+    : event.altKey && !event.metaKey && !event.ctrlKey
+}
+
+/** Whether a wheel event should move the open-file tab strip horizontally. */
+export function isFileTabsShiftWheel(
+  event: Pick<WheelEvent, 'deltaY' | 'shiftKey'>,
+): boolean {
+  return event.shiftKey && event.deltaY !== 0
+}
+
 export type DirectoryPicker = () => Promise<string | null>
+
+/**
+ * Allows only one native repository picker at a time. Native pickers can be
+ * hidden by another window on some Linux desktops, so repeated clicks must
+ * not create an unbounded stack of dialogs while the first request is open.
+ */
+export class RepositoryPickerCoordinator {
+  private pending = false
+
+  get isOpen(): boolean {
+    return this.pending
+  }
+
+  open(picker: DirectoryPicker): Promise<string | null> | null {
+    if (this.pending) {
+      return null
+    }
+    this.pending = true
+    return (async (): Promise<string | null> => {
+      try {
+        return await picker()
+      } finally {
+        this.pending = false
+      }
+    })()
+  }
+}
 
 export interface AppOptions {
   backend?: BackendClient
@@ -95,6 +222,7 @@ export interface TestRunSnapshot {
   stderr: string
   activeTest: TestCaseResult | null
   error: string | null
+  testMethod: string | null
 }
 
 export interface TestRunSourceSnapshot {
@@ -116,6 +244,7 @@ export interface GitChangedFile {
   staged: boolean
   additions: number | null
   deletions: number | null
+  originalPath?: string | null
 }
 
 export interface GitStatusSnapshot {
@@ -133,13 +262,26 @@ interface GitBackendClient {
   getGitStatus?: (projectRoot: string) => Promise<unknown>
   listGitChanges?: (projectRoot: string) => Promise<unknown>
   getGitDiff?: (projectRoot: string, paths: string[]) => Promise<unknown>
+  discardGitChanges?: (projectRoot: string, path: string) => Promise<void>
+  showInFileManager?: (projectRoot: string, path: string) => Promise<void>
   commitGitChanges?: (projectRoot: string, paths: string[], message: string) => Promise<unknown>
   commitGit?: (projectRoot: string, paths: string[], message: string) => Promise<unknown>
   pushGit?: (projectRoot: string) => Promise<unknown>
 }
 
+interface TestRunnerBackend {
+  runProblemTest: (
+    projectRoot: string,
+    fullyQualifiedClassName: string,
+    onProgress?: (progress: TestRunProgress) => void,
+    testMethod?: string,
+  ) => Promise<TestResult>
+}
+
 interface FileManagementBackend {
   deleteProblemFile?: (projectRoot: string, path: string) => Promise<unknown>
+  duplicateProblemFile?: (projectRoot: string, path: string) => Promise<unknown>
+  renameProblemFile?: (projectRoot: string, path: string, newName: string) => Promise<unknown>
 }
 
 interface GitState {
@@ -165,6 +307,20 @@ interface FileContextMenuState {
   y: number
 }
 
+interface GitContextMenuState {
+  file: GitChangedFile
+  x: number
+  y: number
+}
+
+/** Metadata for a file that is open in the editor tab strip. */
+interface OpenFileTab {
+  id: number
+  path: string
+  name: string
+  packageSegment: ProblemFileEntry['packageSegment']
+}
+
 /**
  * A backend result is only valid for the exact document that started the run.
  * Comparing the source as well as the path prevents an older run from painting
@@ -181,7 +337,8 @@ export function isTestRunSourceCurrent(
 
 /**
  * Turns a structured run result into the short, actionable copy used above
- * the detailed test rows. The full process output remains available below.
+ * the selectable test tree. The full process output remains available from
+ * the Test run item in that tree.
  */
 export function presentTestResult(result: TestResult): TestResultPresentation {
   const phaseLabel = testPhaseLabel(result.phase)
@@ -238,6 +395,23 @@ function testPhaseLabel(phase: TestPhase): string {
       return 'Tests'
     default:
       return phase.trim() || 'Test run'
+  }
+}
+
+function testStatusLabel(status: string): string {
+  switch (status) {
+    case 'passed':
+      return 'passed'
+    case 'failed':
+      return 'failed'
+    case 'error':
+      return 'error'
+    case 'skipped':
+      return 'skipped'
+    case 'running':
+      return 'running'
+    default:
+      return status || 'unknown'
   }
 }
 
@@ -301,9 +475,43 @@ export function testFailureMessage(result: TestResult): string {
   return 'The test run stopped before reporting a result.'
 }
 
-/** Whether a testcase has output worth showing in its expanded result row. */
+export type TestOutputStream = 'stdout' | 'stderr'
+
+export interface TestOutputSegment {
+  stream: TestOutputStream
+  text: string
+}
+
+/**
+ * Return the non-empty output streams in the order used by the test console.
+ * ANSI-only and whitespace-only values are omitted, while meaningful output
+ * stays byte-for-byte intact except for a needed separator at the stream
+ * boundary.
+ */
+export function testOutputSegments(
+  stdout: string | null | undefined,
+  stderr: string | null | undefined,
+): TestOutputSegment[] {
+  const segments: TestOutputSegment[] = []
+  for (const [stream, value] of [
+    ['stdout', stdout],
+    ['stderr', stderr],
+  ] as const) {
+    const text = stripAnsi(value ?? '')
+    if (text.trim().length === 0) {
+      continue
+    }
+    segments.push({ stream, text })
+  }
+  if (segments.length > 1 && !/[\r\n]$/.test(segments[0].text)) {
+    segments[0] = { ...segments[0], text: `${segments[0].text}\n` }
+  }
+  return segments
+}
+
+/** Whether a testcase has output worth showing in its detail console. */
 export function testCaseHasOutput(test: TestCaseResult): boolean {
-  return (test.stdout?.length ?? 0) > 0 || (test.stderr?.length ?? 0) > 0
+  return testOutputSegments(test.stdout, test.stderr).length > 0
 }
 
 /** Hide noisy JDK annotation-enum warnings while retaining actionable diagnostics. */
@@ -452,6 +660,10 @@ function normalizeSourcePath(path: string): string {
     .replace(/\/+/g, '/')
     .replace(/^\/+/, '')
     .toLocaleLowerCase()
+}
+
+function sameFilePath(left: string, right: string): boolean {
+  return normalizeSourcePath(left) === normalizeSourcePath(right)
 }
 
 export function gitFileName(path: string): string {
@@ -623,12 +835,13 @@ function parseGitStatusLine(line: string): GitChangedFile | null {
     staged: isGitIndexStaged(index),
     additions: null,
     deletions: null,
+    originalPath: null,
   }
 }
 
 function normalizeGitFile(value: unknown): GitChangedFile | null {
   if (typeof value === 'string') {
-    return { path: value, status: 'modified', staged: false, additions: null, deletions: null }
+    return { path: value, status: 'modified', staged: false, additions: null, deletions: null, originalPath: null }
   }
   if (!isRecordValue(value)) {
     return null
@@ -645,6 +858,8 @@ function normalizeGitFile(value: unknown): GitChangedFile | null {
   const rawStatus = stringValueForGit(value.status) ?? stringValueForGit(value.state) ?? stringValueForGit(value.statusCode) ?? stringValueForGit(value.status_code)
   const additions = numberValueForGit(value.additions ?? value.insertions ?? value.added)
   const deletions = numberValueForGit(value.deletions ?? value.removals ?? value.deleted)
+  const originalPath = stringValueForGit(value.originalPath)
+    ?? stringValueForGit(value.original_path)
   const staged = typeof value.staged === 'boolean'
     ? value.staged
     : isGitIndexStaged(index)
@@ -654,6 +869,7 @@ function normalizeGitFile(value: unknown): GitChangedFile | null {
     staged,
     additions,
     deletions,
+    originalPath: originalPath ? unquoteGitPath(originalPath) : null,
   }
 }
 
@@ -677,6 +893,7 @@ function dedupeGitFiles(files: GitChangedFile[]): GitChangedFile[] {
       ...file,
       additions: file.additions ?? previous.additions,
       deletions: file.deletions ?? previous.deletions,
+      originalPath: file.originalPath ?? previous.originalPath,
     } : file)
   }
   return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path))
@@ -896,6 +1113,18 @@ function sameTest(left: TestCaseResult | null, right: TestCaseResult): boolean {
 }
 
 /**
+ * Test names are stable across the progress events and the final JUnit
+ * report, so use the class/name pair as the selection identity. Keeping this
+ * outside the DOM also means a live result refresh does not lose the user's
+ * selected test while its output is still arriving.
+ */
+function testResultKey(test: TestCaseResult): string {
+  // Encode both fields so the identity is safe to carry in a data attribute;
+  // class/name values can otherwise contain separators or control characters.
+  return `${encodeURIComponent(test.className ?? '')}:${encodeURIComponent(test.name)}`
+}
+
+/**
  * Coalesces editor changes into one debounced write and follows an in-flight
  * write with the newest snapshot when the document changes while saving.
  */
@@ -926,6 +1155,18 @@ export class AutosaveCoordinator {
 
   get hasPendingChanges(): boolean {
     return this.pending !== null || this.running !== null
+  }
+
+  /**
+   * Drop work that has not started yet. Callers should flush first when the
+   * pending source must be written before an external filesystem operation.
+   */
+  cancelPending(): void {
+    this.clearTimer()
+    this.pending = null
+    if (!this.running) {
+      this.setStatus('idle')
+    }
   }
 
   schedule(snapshot: AutosaveSnapshot): void {
@@ -1086,6 +1327,8 @@ interface AppState {
   repoPath: string | null
   projectValid: boolean
   files: ProblemFileEntry[]
+  openTabs: OpenFileTab[]
+  activeTabId: number | null
   selectedPath: string | null
   selectedSource: string
   savedSource: string
@@ -1098,12 +1341,15 @@ interface AppState {
   dailyLoading: boolean
   testResult: TestResult | null
   testRun: TestRunSnapshot | null
+  /** Stable key of the testcase whose details are shown in the run panel. */
+  selectedTestKey: string | null
   busy: boolean
   fileSearch: string
   saveError: string | null
   bottomPanelTab: 'tests' | 'git'
   git: GitState
   contextMenu: FileContextMenuState | null
+  gitContextMenu: GitContextMenuState | null
 }
 
 /** The desktop application's single-window state and DOM orchestration. */
@@ -1111,11 +1357,14 @@ export class LeetcoderApp {
   private readonly root: HTMLElement
   private readonly backend: BackendClient
   private readonly directoryPicker: DirectoryPicker
+  private readonly repositoryPicker = new RepositoryPickerCoordinator()
   private readonly storage: Storage | undefined
   private readonly state: AppState = {
     repoPath: null,
     projectValid: false,
     files: [],
+    openTabs: [],
+    activeTabId: null,
     selectedPath: null,
     selectedSource: '',
     savedSource: '',
@@ -1128,11 +1377,13 @@ export class LeetcoderApp {
     dailyLoading: false,
     testResult: null,
     testRun: null,
+    selectedTestKey: null,
     busy: false,
     fileSearch: '',
     saveError: null,
     bottomPanelTab: 'tests',
     contextMenu: null,
+    gitContextMenu: null,
     git: {
       branch: null,
       files: [],
@@ -1155,7 +1406,12 @@ export class LeetcoderApp {
   private suppressEditorChange = false
   private repositoryGeneration = 0
   private refreshRequestId = 0
+  private externalReloadInFlight = false
+  private stopWatchingFiles: (() => void) | null = null
+  private shortcutsDialogOpen = false
+  private shortcutsDialogFocusTarget: HTMLElement | null = null
   private testRunGeneration = 0
+  private nextOpenTabId = 1
   private closePreparation: Promise<void> | null = null
   private destroyed = false
   private renderedTestResult: TestResult | null = null
@@ -1167,9 +1423,17 @@ export class LeetcoderApp {
   private gitFileListWidth: number
   private gitSplitterStartX: number | null = null
   private gitSplitterStartWidth: number | null = null
+  private sidebarWidth: number
+  private sidebarSplitterStartX: number | null = null
+  private sidebarSplitterStartWidth: number | null = null
+  private dailyDescriptionHeight: number
+  private dailyDescriptionResizeStartY: number | null = null
+  private dailyDescriptionResizeStartHeight: number | null = null
   private gitStatusRequestId = 0
   private gitDiffRequestId = 0
   private gitOperationId = 0
+  private fileOperationId = 0
+  private fileOpenInProgress = false
   private gitRefreshTimer: ReturnType<typeof setTimeout> | null = null
   private dailyRefreshTimer: ReturnType<typeof setTimeout> | null = null
   private dailyRequestId = 0
@@ -1177,29 +1441,66 @@ export class LeetcoderApp {
   private saveWriteInFlight = false
   private savedFlash = false
   private savedFlashTimer: ReturnType<typeof setTimeout> | null = null
-  private shortcutsOpen = false
   private dailyDescriptionOpen = false
+  private gitDiscardInProgress = false
+  private gitDiscardDialogFile: GitChangedFile | null = null
+  private gitDiscardDialogFocusTarget: HTMLElement | null = null
+  private renderedFileTabsActiveId: number | null = null
+  private renameTargetFile: ProblemFileEntry | null = null
   private errorToastElement: HTMLElement | null = null
   private sanitizedDescriptionSource: string | null = null
   private sanitizedDescriptionElement: HTMLElement | null = null
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
-    FILE_GROUPS.map((group) => group.key),
+    accordionGroupKeys('easy', true),
   )
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
-    if (!(event.metaKey || event.ctrlKey) || event.altKey) {
+    if (isShortcutHelpAltShortcut(event)) {
+      // The shortcut list has to be reachable from anywhere, including the
+      // file explorer and the run panel.
+      event.preventDefault()
+      this.toggleShortcutsDialog()
+      return
+    }
+    if (isCloseAllTabsShortcut(event, currentIsMacPlatform())) {
+      // Handle this before the editor guard so the entire tab strip can close
+      // while CodeMirror has focus, without allowing the native window to
+      // consume the shortcut first.
+      event.preventDefault()
+      void this.closeAllOpenTabs()
+      return
+    }
+    if (isCloseTabShortcut(event, currentIsMacPlatform())) {
+      // Handle this before the editor guard so the active tab can be closed
+      // even while CodeMirror has focus. An empty or busy tab strip is a safe
+      // no-op inside closeOpenTab, but the native window must not close.
+      event.preventDefault()
+      if (this.state.activeTabId !== null) {
+        void this.closeOpenTab(this.state.activeTabId)
+      }
       return
     }
     // CodeMirror owns shortcuts while the editor has focus. Handling them
     // again on window would run/save the same document twice.
-    if (event.target instanceof Node && this.element('#editor').contains(event.target)) {
+    const editorTarget = event.target instanceof Node && this.element('#editor').contains(event.target)
+    const runAction = runShortcutAction(event)
+    if (runAction) {
+      if (editorTarget) {
+        return
+      }
+      event.preventDefault()
+      if (runAction === 'run-test') {
+        void this.runCurrentTest()
+      } else {
+        void this.runCurrentTest(findJavaTestMethodAt(this.editor.view.state))
+      }
+      return
+    }
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || editorTarget) {
       return
     }
     if (event.key.toLowerCase() === 's') {
       event.preventDefault()
       void this.saveCurrentFile()
-    } else if (event.key.toLowerCase() === 'r') {
-      event.preventDefault()
-      void this.runCurrentTest()
     }
   }
 
@@ -1215,6 +1516,7 @@ export class LeetcoderApp {
     }
     this.bottomPanelHeight = nextHeight
     this.applyBottomPanelHeight()
+    this.applyDailyDescriptionHeight()
   }
 
   private readonly handlePanelPointerUp = (): void => {
@@ -1230,10 +1532,25 @@ export class LeetcoderApp {
   private readonly handlePanelWindowBlur = (): void => {
     this.handlePanelPointerUp()
     this.handleGitSplitterPointerUp()
+    this.handleSidebarSplitterPointerUp()
+    this.handleDailyDescriptionResizePointerUp()
   }
 
   private readonly handleWindowFocus = (): void => {
     this.handleAppVisibilityReturn()
+  }
+
+  private readonly handleEditorFocus = (): void => {
+    this.revealSelectedFileInExplorer()
+  }
+
+  private readonly handleFileTabsWheel = (event: WheelEvent): void => {
+    const list = this.root.querySelector<HTMLElement>('#file-tabs')
+    if (!list || !isFileTabsShiftWheel(event) || list.scrollWidth <= list.clientWidth) {
+      return
+    }
+    event.preventDefault()
+    list.scrollLeft += event.deltaY
   }
 
   private readonly handleVisibilityChange = (): void => {
@@ -1258,6 +1575,21 @@ export class LeetcoderApp {
       this.storage?.setItem(GIT_FILE_LIST_WIDTH_KEY, String(this.gitFileListWidth))
     }
     this.applyGitFileListWidth()
+    const nextSidebarWidth = clampSidebarWidth(this.sidebarWidth, this.sidebarWorkspaceWidth())
+    if (nextSidebarWidth !== this.sidebarWidth) {
+      this.sidebarWidth = nextSidebarWidth
+      this.storage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth))
+    }
+    this.applySidebarWidth()
+    const nextDescriptionHeight = clampDailyDescriptionHeight(
+      this.dailyDescriptionHeight,
+      this.dailyDescriptionWorkspaceHeight(),
+    )
+    if (nextDescriptionHeight !== this.dailyDescriptionHeight) {
+      this.dailyDescriptionHeight = nextDescriptionHeight
+      this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
+    }
+    this.applyDailyDescriptionHeight()
   }
 
   private readonly handleGitSplitterPointerMove = (event: PointerEvent): void => {
@@ -1300,18 +1632,98 @@ export class LeetcoderApp {
     this.storage?.setItem(GIT_FILE_LIST_WIDTH_KEY, String(this.gitFileListWidth))
   }
 
-  private readonly handleContextMenuOutside = (event: PointerEvent): void => {
-    const menu = this.root.querySelector<HTMLElement>('#file-context-menu')
-    if (menu && !menu.hidden && !(event.target instanceof Node && menu.contains(event.target))) {
-      this.closeFileContextMenu()
+  private readonly handleSidebarSplitterPointerMove = (event: PointerEvent): void => {
+    if (this.sidebarSplitterStartX === null || this.sidebarSplitterStartWidth === null) {
+      return
     }
-    if (this.shortcutsOpen) {
-      const popover = this.root.querySelector<HTMLElement>('#shortcuts-popover')
-      const trigger = this.root.querySelector<HTMLElement>('#shortcuts-button')
-      const target = event.target instanceof Node ? event.target : null
-      if (!(target && (popover?.contains(target) || trigger?.contains(target)))) {
-        this.setShortcutsOpen(false)
-      }
+    const nextWidth = clampSidebarWidth(
+      this.sidebarSplitterStartWidth + event.clientX - this.sidebarSplitterStartX,
+      this.sidebarWorkspaceWidth(),
+    )
+    if (nextWidth === this.sidebarWidth) {
+      return
+    }
+    this.sidebarWidth = nextWidth
+    this.applySidebarWidth()
+  }
+
+  private readonly handleSidebarSplitterPointerUp = (): void => {
+    if (this.sidebarSplitterStartX === null) {
+      return
+    }
+    this.sidebarSplitterStartX = null
+    this.sidebarSplitterStartWidth = null
+    this.root.classList.remove('is-resizing-sidebar')
+    this.storage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth))
+  }
+
+  private readonly handleSidebarSplitterKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') {
+      return
+    }
+    event.preventDefault()
+    const nextWidth = event.key === 'Home'
+      ? MIN_SIDEBAR_WIDTH
+      : event.key === 'End'
+        ? maxSidebarWidth(this.sidebarWorkspaceWidth())
+        : this.sidebarWidth + (event.key === 'ArrowRight' ? 16 : -16)
+    this.sidebarWidth = clampSidebarWidth(nextWidth, this.sidebarWorkspaceWidth())
+    this.applySidebarWidth()
+    this.storage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth))
+  }
+
+  private readonly handleDailyDescriptionResizePointerMove = (event: PointerEvent): void => {
+    if (this.dailyDescriptionResizeStartY === null || this.dailyDescriptionResizeStartHeight === null) {
+      return
+    }
+    const nextHeight = clampDailyDescriptionHeight(
+      this.dailyDescriptionResizeStartHeight + event.clientY - this.dailyDescriptionResizeStartY,
+      this.dailyDescriptionWorkspaceHeight(),
+    )
+    if (nextHeight === this.dailyDescriptionHeight) {
+      return
+    }
+    this.dailyDescriptionHeight = nextHeight
+    this.applyDailyDescriptionHeight()
+  }
+
+  private readonly handleDailyDescriptionResizePointerUp = (): void => {
+    if (this.dailyDescriptionResizeStartY === null) {
+      return
+    }
+    this.dailyDescriptionResizeStartY = null
+    this.dailyDescriptionResizeStartHeight = null
+    this.root.classList.remove('is-resizing-description')
+    this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
+  }
+
+  private readonly handleDailyDescriptionResizeKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown' && event.key !== 'Home' && event.key !== 'End') {
+      return
+    }
+    event.preventDefault()
+    const nextHeight = event.key === 'Home'
+      ? MIN_DAILY_DESCRIPTION_HEIGHT
+      : event.key === 'End'
+        ? maxDailyDescriptionHeight(this.dailyDescriptionWorkspaceHeight())
+        : this.dailyDescriptionHeight + (event.key === 'ArrowDown' ? 16 : -16)
+    this.dailyDescriptionHeight = clampDailyDescriptionHeight(
+      nextHeight,
+      this.dailyDescriptionWorkspaceHeight(),
+    )
+    this.applyDailyDescriptionHeight()
+    this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
+  }
+
+  private readonly handleContextMenuOutside = (event: PointerEvent): void => {
+    const fileMenu = this.root.querySelector<HTMLElement>('#file-context-menu')
+    const gitMenu = this.root.querySelector<HTMLElement>('#git-context-menu')
+    const target = event.target instanceof Node ? event.target : null
+    const insideFileMenu = Boolean(fileMenu && !fileMenu.hidden && target && fileMenu.contains(target))
+    const insideGitMenu = Boolean(gitMenu && !gitMenu.hidden && target && gitMenu.contains(target))
+    if (!insideFileMenu && !insideGitMenu) {
+      this.closeFileContextMenu()
+      this.closeGitContextMenu()
     }
   }
 
@@ -1319,12 +1731,21 @@ export class LeetcoderApp {
     if (event.key !== 'Escape') {
       return
     }
-    if (this.state.contextMenu) {
+    if (this.shortcutsDialogOpen) {
+      event.preventDefault()
+      this.closeShortcutsDialog()
+    } else if (this.gitDiscardDialogFile) {
+      event.preventDefault()
+      this.closeDiscardGitDialog()
+    } else if (this.renameTargetFile) {
+      event.preventDefault()
+      this.closeRenameDialog()
+    } else if (this.state.gitContextMenu) {
+      event.preventDefault()
+      this.closeGitContextMenu()
+    } else if (this.state.contextMenu) {
       event.preventDefault()
       this.closeFileContextMenu()
-    } else if (this.shortcutsOpen) {
-      event.preventDefault()
-      this.setShortcutsOpen(false)
     }
   }
 
@@ -1342,6 +1763,7 @@ export class LeetcoderApp {
         : this.bottomPanelHeight + (event.key === 'ArrowUp' ? step : -step)
     this.bottomPanelHeight = clampBottomPanelHeight(nextHeight)
     this.applyBottomPanelHeight()
+    this.applyDailyDescriptionHeight()
     this.storage?.setItem(BOTTOM_PANEL_HEIGHT_KEY, String(this.bottomPanelHeight))
   }
 
@@ -1352,6 +1774,8 @@ export class LeetcoderApp {
     this.storage = options.storage ?? safeStorage()
     this.bottomPanelHeight = readBottomPanelHeight(this.storage)
     this.gitFileListWidth = readGitFileListWidth(this.storage)
+    this.sidebarWidth = readSidebarWidth(this.storage)
+    this.dailyDescriptionHeight = readDailyDescriptionHeight(this.storage)
     this.dailyDescriptionOpen = this.storage?.getItem(DAILY_DESCRIPTION_KEY) === 'open'
     this.renderShell()
     this.autosave = new AutosaveCoordinator(
@@ -1375,12 +1799,30 @@ export class LeetcoderApp {
         void this.runCurrentTest()
         return true
       },
+      onShowShortcuts: () => {
+        this.openShortcutsDialog()
+      },
+      onRunTestAtCursor: (methodName) => {
+        if (!methodName) {
+          this.setMessage('Place the cursor inside an @Test method to run only that test.', 'info')
+          return true
+        }
+        void this.runCurrentTest(methodName)
+        return true
+      },
     })
     this.bindEvents()
     this.renderAll()
   }
 
   async start(): Promise<void> {
+    try {
+      this.stopWatchingFiles = await this.backend.onRepositoryFilesChanged(
+        this.handleRepositoryFilesChanged,
+      )
+    } catch {
+      // Without the watcher the editor still syncs on window focus.
+    }
     await this.loadDailyProblem()
     const rememberedPath = this.storage?.getItem(LAST_REPOSITORY_KEY) ?? null
     if (rememberedPath) {
@@ -1421,6 +1863,8 @@ export class LeetcoderApp {
     this.clearScheduledGitRefresh()
     this.editor.destroy()
     this.autosave.dispose()
+    this.element<HTMLElement>('#editor-host').removeEventListener('focusin', this.handleEditorFocus)
+    this.element<HTMLElement>('#file-tabs').removeEventListener('wheel', this.handleFileTabsWheel)
     window.removeEventListener('keydown', this.handleGlobalKeydown)
     window.removeEventListener('focus', this.handleWindowFocus)
     document.removeEventListener('visibilitychange', this.handleVisibilityChange)
@@ -1430,12 +1874,21 @@ export class LeetcoderApp {
     window.removeEventListener('pointermove', this.handleGitSplitterPointerMove)
     window.removeEventListener('pointerup', this.handleGitSplitterPointerUp)
     window.removeEventListener('pointercancel', this.handleGitSplitterPointerUp)
+    window.removeEventListener('pointermove', this.handleSidebarSplitterPointerMove)
+    window.removeEventListener('pointerup', this.handleSidebarSplitterPointerUp)
+    window.removeEventListener('pointercancel', this.handleSidebarSplitterPointerUp)
+    window.removeEventListener('pointermove', this.handleDailyDescriptionResizePointerMove)
+    window.removeEventListener('pointerup', this.handleDailyDescriptionResizePointerUp)
+    window.removeEventListener('pointercancel', this.handleDailyDescriptionResizePointerUp)
     window.removeEventListener('blur', this.handlePanelWindowBlur)
     window.removeEventListener('resize', this.handleWindowResize)
     window.removeEventListener('pointerdown', this.handleContextMenuOutside)
     window.removeEventListener('keydown', this.handleContextMenuKeydown)
     this.clearScheduledDailyRefresh()
     this.clearSavedFlash()
+    this.stopWatchingFiles?.()
+    this.stopWatchingFiles = null
+    void this.backend.stopWatchingRepository().catch(() => {})
     this.destroyed = true
   }
 
@@ -1466,28 +1919,48 @@ export class LeetcoderApp {
             <div id="file-list" class="file-list"></div>
           </aside>
 
+          <div
+            id="sidebar-splitter"
+            class="sidebar-splitter"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize problem files pane"
+            aria-valuemin="${MIN_SIDEBAR_WIDTH}"
+            aria-valuemax="${MAX_SIDEBAR_WIDTH}"
+            tabindex="0"
+          ><span aria-hidden="true"></span></div>
+
           <section class="editor-column" aria-label="Code editor">
             <section class="daily-card" aria-label="Today's problem">
               <div id="daily-header" class="daily-header"></div>
               <div id="daily-description" class="daily-description" hidden></div>
+              <div
+                id="daily-description-resize-handle"
+                class="daily-description-resize-handle"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize problem description"
+                aria-valuemin="${MIN_DAILY_DESCRIPTION_HEIGHT}"
+                aria-valuemax="${MAX_DAILY_DESCRIPTION_HEIGHT}"
+                tabindex="0"
+                hidden
+              ><span aria-hidden="true"></span></div>
             </section>
 
             <section class="code-card">
+              <div class="file-tabs-shell">
+                <nav id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files"></nav>
+              </div>
               <div class="code-toolbar">
                 <div class="file-heading">
                   <span id="selected-file" class="selected-file"></span>
                   <span id="save-status" class="save-status" aria-live="polite"></span>
-                </div>
-                <div class="code-actions">
-                  <button id="shortcuts-button" class="icon-button" type="button" aria-label="Keyboard shortcuts" title="Shortcuts" aria-haspopup="dialog" aria-expanded="false"></button>
-                  <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">Ctrl+R</kbd></button>
                 </div>
               </div>
               <div class="editor-host" id="editor-host" aria-label="Java source editor">
                 <div id="editor" class="editor"></div>
                 <div id="editor-empty" class="editor-empty"></div>
               </div>
-              <div id="shortcuts-popover" class="shortcuts-popover" role="dialog" aria-label="Keyboard shortcuts" hidden></div>
             </section>
           </section>
         </main>
@@ -1503,9 +1976,15 @@ export class LeetcoderApp {
             aria-valuemax="${MAX_BOTTOM_PANEL_HEIGHT}"
             tabindex="0"
           ><span aria-hidden="true"></span></div>
-          <div class="bottom-panel-tabs" role="tablist" aria-label="Bottom panel">
-            <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests</button>
-            <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git</button>
+          <div class="bottom-panel-tabs">
+            <div class="bottom-panel-tab-list" role="tablist" aria-label="Bottom panel">
+              <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests</button>
+              <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git</button>
+            </div>
+            <div class="bottom-panel-actions" role="group" aria-label="Test actions">
+              <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">${shortcutLabel('run-test-at-cursor', currentIsMacPlatform())}</kbd></span>
+              <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">${shortcutLabel('run-test', currentIsMacPlatform())}</kbd></button>
+            </div>
           </div>
           <section id="tests-panel" class="tests-panel" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">
             <div id="test-status-row" class="test-status-row"></div>
@@ -1555,38 +2034,69 @@ export class LeetcoderApp {
         </section>
         <div id="toast-stack" class="toast-stack" role="status" aria-live="polite"></div>
         <div id="file-context-menu" class="file-context-menu" role="menu" aria-label="File actions" hidden>
+          <button id="duplicate-file-action" class="file-context-menu-item file-context-menu-item-neutral" type="button" role="menuitem">
+            <span id="duplicate-file-label">Duplicate</span>
+          </button>
+          <button id="rename-file-action" class="file-context-menu-item file-context-menu-item-neutral" type="button" role="menuitem">
+            <span id="rename-file-label">Rename</span>
+          </button>
           <button id="delete-file-action" class="file-context-menu-item" type="button" role="menuitem">
             <span id="delete-file-label">Delete</span>
           </button>
+        </div>
+        <div id="git-context-menu" class="file-context-menu git-context-menu" role="menu" aria-label="Git file actions" hidden>
+          <button id="git-discard-action" class="file-context-menu-item" type="button" role="menuitem">
+            Discard Changes
+          </button>
+          <button id="git-show-file-action" class="file-context-menu-item file-context-menu-item-neutral" type="button" role="menuitem">
+            Show in File Manager
+          </button>
+        </div>
+        <div id="rename-file-dialog" class="dialog-backdrop" hidden>
+          <form id="rename-file-form" class="rename-file-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-file-title">
+            <h2 id="rename-file-title" class="rename-file-title">Rename file</h2>
+            <label class="rename-file-label" for="rename-file-input">New filename</label>
+            <input id="rename-file-input" class="rename-file-input" type="text" autocomplete="off" spellcheck="false">
+            <div class="rename-file-actions">
+              <button id="cancel-rename-file" class="text-button" type="button">Cancel</button>
+              <button id="confirm-rename-file" class="primary-button" type="submit">Rename</button>
+            </div>
+          </form>
+        </div>
+        <div id="shortcuts-dialog" class="dialog-backdrop" hidden>
+          <div class="shortcuts-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+            <h2 id="shortcuts-title" class="shortcuts-title">Keyboard shortcuts</h2>
+            <div id="shortcuts-body" class="shortcuts-body"></div>
+            <p class="shortcuts-note">macOS and Linux use the same physical keys. Most shortcuts pair macOS Cmd with Linux Alt; the run shortcuts use Ctrl on both platforms.</p>
+            <div class="shortcuts-actions">
+              <button id="close-shortcuts" class="text-button" type="button">Close</button>
+            </div>
+          </div>
+        </div>
+        <div id="discard-git-dialog" class="dialog-backdrop" hidden>
+          <form id="discard-git-form" class="discard-git-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-git-title" aria-describedby="discard-git-message">
+            <h2 id="discard-git-title" class="discard-git-title">Discard changes?</h2>
+            <code id="discard-git-path" class="discard-git-path"></code>
+            <p id="discard-git-message" class="discard-git-message"></p>
+            <div class="discard-git-actions">
+              <button id="cancel-discard-git" class="text-button" type="button">Cancel</button>
+              <button id="confirm-discard-git" class="primary-button discard-git-confirm" type="submit">Discard Changes</button>
+            </div>
+          </form>
         </div>
       </div>
     `
     this.installStaticIcons()
     this.renderEditorEmptyState()
-    this.renderShortcutsPopoverContent()
   }
 
   private installStaticIcons(): void {
     this.element<HTMLButtonElement>('#choose-repository').prepend(iconFor('folderOpen', 'button-icon'))
     this.element<HTMLButtonElement>('#refresh-files').append(iconFor('refresh', 'button-icon'))
     this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
-    this.element<HTMLButtonElement>('#shortcuts-button').append(iconFor('keyboard', 'button-icon'))
     this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
     this.element<HTMLElement>('#git-branch-icon').append(iconFor('gitBranch', 'button-icon'))
-  }
-
-  /** The keyboard rows shown in the empty state and the shortcuts popover. */
-  private shortcutRows(): Array<{ label: string; keys: string[] }> {
-    const mac = isMacPlatform()
-    return [
-      { label: 'Save', keys: mac ? ['⌘S'] : ['Ctrl+S'] },
-      { label: 'Run test', keys: mac ? ['⌘R'] : ['Ctrl+R'] },
-      { label: 'Duplicate line', keys: mac ? ['⌘D'] : ['Ctrl+D'] },
-      { label: 'Delete line', keys: mac ? ['⌘⌫'] : ['Ctrl+⌫'] },
-      { label: 'JavaDoc comment', keys: mac ? ['⇧⌘J'] : ['Shift+Ctrl+J'] },
-      { label: 'Autocomplete', keys: mac ? ['⌃Space'] : ['Ctrl+Space'] },
-      { label: 'Go to definition', keys: mac ? ['⌘Click'] : ['Ctrl+Click'] },
-    ]
+    this.element<HTMLElement>('#file-tabs').addEventListener('wheel', this.handleFileTabsWheel, { passive: false })
   }
 
   private renderEditorEmptyState(): void {
@@ -1599,11 +2109,7 @@ export class LeetcoderApp {
     empty.append(copy)
     const hints = document.createElement('div')
     hints.className = 'editor-empty-hints'
-    const mac = isMacPlatform()
-    const pairs: Array<[string, string]> = mac
-      ? [['⌘R', 'Run test'], ['⌘S', 'Save'], ['⌘D', 'Duplicate line'], ['⇧⌘J', 'JavaDoc'], ['⌃Space', 'Complete'], ['⌘Click', 'Definition']]
-      : [['Ctrl+R', 'Run test'], ['Ctrl+S', 'Save'], ['Ctrl+D', 'Duplicate line'], ['Shift+Ctrl+J', 'JavaDoc'], ['Ctrl+Space', 'Complete'], ['Ctrl+Click', 'Definition']]
-    for (const [keys, label] of pairs) {
+    for (const [keys, label] of shortcutHints(currentIsMacPlatform())) {
       const hint = document.createElement('span')
       hint.className = 'editor-empty-hint'
       const kbd = document.createElement('kbd')
@@ -1614,50 +2120,17 @@ export class LeetcoderApp {
     empty.append(hints)
   }
 
-  private renderShortcutsPopoverContent(): void {
-    const popover = this.element<HTMLElement>('#shortcuts-popover')
-    popover.innerHTML = ''
-    for (const row of this.shortcutRows()) {
-      const item = document.createElement('div')
-      item.className = 'shortcut-row'
-      const label = document.createElement('span')
-      label.className = 'shortcut-label'
-      label.textContent = row.label
-      const keys = document.createElement('span')
-      keys.className = 'shortcut-keys'
-      for (const key of row.keys) {
-        const kbd = document.createElement('kbd')
-        kbd.textContent = key
-        keys.append(kbd)
-      }
-      item.append(label, keys)
-      popover.append(item)
-    }
-  }
-
-  private setShortcutsOpen(open: boolean): void {
-    this.shortcutsOpen = open
-    const popover = this.element<HTMLElement>('#shortcuts-popover')
-    const button = this.element<HTMLButtonElement>('#shortcuts-button')
-    if (open) {
-      const anchor = button.getBoundingClientRect()
-      popover.style.top = `${Math.round(anchor.bottom + 6)}px`
-      popover.style.right = `${Math.round(Math.max(8, window.innerWidth - anchor.right))}px`
-    }
-    popover.hidden = !open
-    button.setAttribute('aria-expanded', String(open))
-  }
 
   private bindEvents(): void {
     this.element<HTMLButtonElement>('#choose-repository').addEventListener('click', () => {
       void this.chooseRepository()
     })
     this.element<HTMLButtonElement>('#refresh-files').addEventListener('click', () => {
-      void this.refreshFiles()
+      if (!this.state.busy) {
+        void this.refreshFiles()
+      }
     })
-    this.element<HTMLButtonElement>('#shortcuts-button').addEventListener('click', () => {
-      this.setShortcutsOpen(!this.shortcutsOpen)
-    })
+    this.element<HTMLElement>('#editor-host').addEventListener('focusin', this.handleEditorFocus)
     this.element<HTMLInputElement>('#file-search').addEventListener('input', (event) => {
       this.closeFileContextMenu()
       this.state.fileSearch = (event.target as HTMLInputElement).value
@@ -1722,6 +2195,76 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#delete-file-action').addEventListener('click', () => {
       void this.deleteContextMenuFile()
     })
+    this.element<HTMLButtonElement>('#git-discard-action').addEventListener('click', () => {
+      this.openDiscardGitDialog()
+    })
+    this.element<HTMLButtonElement>('#git-show-file-action').addEventListener('click', () => {
+      void this.showGitFileInManager()
+    })
+    this.element<HTMLButtonElement>('#duplicate-file-action').addEventListener('click', () => {
+      void this.duplicateContextMenuFile()
+    })
+    this.element<HTMLButtonElement>('#rename-file-action').addEventListener('click', () => {
+      this.openRenameDialog()
+    })
+    this.element<HTMLFormElement>('#rename-file-form').addEventListener('submit', (event) => {
+      event.preventDefault()
+      void this.renameDialogFile()
+    })
+    this.element<HTMLButtonElement>('#cancel-rename-file').addEventListener('click', () => {
+      this.closeRenameDialog()
+    })
+    this.element<HTMLElement>('#rename-file-dialog').addEventListener('pointerdown', (event) => {
+      if (event.target === event.currentTarget) {
+        this.closeRenameDialog()
+      }
+    })
+    this.element<HTMLFormElement>('#discard-git-form').addEventListener('submit', (event) => {
+      event.preventDefault()
+      this.confirmDiscardGitDialog()
+    })
+    this.element<HTMLButtonElement>('#cancel-discard-git').addEventListener('click', () => {
+      this.closeDiscardGitDialog()
+    })
+    this.element<HTMLButtonElement>('#close-shortcuts').addEventListener('click', () => {
+      this.closeShortcutsDialog()
+    })
+    this.element<HTMLElement>('#shortcuts-dialog').addEventListener('pointerdown', (event) => {
+      if (event.target === event.currentTarget) {
+        this.closeShortcutsDialog()
+      }
+    })
+    this.element<HTMLElement>('#discard-git-dialog').addEventListener('pointerdown', (event) => {
+      if (event.target === event.currentTarget) {
+        this.closeDiscardGitDialog()
+      }
+    })
+    const sidebarSplitter = this.element<HTMLElement>('#sidebar-splitter')
+    sidebarSplitter.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) {
+        return
+      }
+      event.preventDefault()
+      this.sidebarSplitterStartX = event.clientX
+      this.sidebarSplitterStartWidth = this.sidebarWidth
+      this.root.classList.add('is-resizing-sidebar')
+      sidebarSplitter.setPointerCapture?.(event.pointerId)
+    })
+    sidebarSplitter.addEventListener('keydown', this.handleSidebarSplitterKeydown)
+    sidebarSplitter.addEventListener('lostpointercapture', this.handleSidebarSplitterPointerUp)
+    const descriptionResizeHandle = this.element<HTMLElement>('#daily-description-resize-handle')
+    descriptionResizeHandle.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || descriptionResizeHandle.hidden) {
+        return
+      }
+      event.preventDefault()
+      this.dailyDescriptionResizeStartY = event.clientY
+      this.dailyDescriptionResizeStartHeight = this.dailyDescriptionHeight
+      this.root.classList.add('is-resizing-description')
+      descriptionResizeHandle.setPointerCapture?.(event.pointerId)
+    })
+    descriptionResizeHandle.addEventListener('keydown', this.handleDailyDescriptionResizeKeydown)
+    descriptionResizeHandle.addEventListener('lostpointercapture', this.handleDailyDescriptionResizePointerUp)
     const gitSplitter = this.element<HTMLElement>('#git-splitter')
     gitSplitter.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) {
@@ -1754,6 +2297,12 @@ export class LeetcoderApp {
     window.addEventListener('pointermove', this.handleGitSplitterPointerMove)
     window.addEventListener('pointerup', this.handleGitSplitterPointerUp)
     window.addEventListener('pointercancel', this.handleGitSplitterPointerUp)
+    window.addEventListener('pointermove', this.handleSidebarSplitterPointerMove)
+    window.addEventListener('pointerup', this.handleSidebarSplitterPointerUp)
+    window.addEventListener('pointercancel', this.handleSidebarSplitterPointerUp)
+    window.addEventListener('pointermove', this.handleDailyDescriptionResizePointerMove)
+    window.addEventListener('pointerup', this.handleDailyDescriptionResizePointerUp)
+    window.addEventListener('pointercancel', this.handleDailyDescriptionResizePointerUp)
     window.addEventListener('blur', this.handlePanelWindowBlur)
     window.addEventListener('resize', this.handleWindowResize)
     window.addEventListener('pointerdown', this.handleContextMenuOutside)
@@ -1767,13 +2316,20 @@ export class LeetcoderApp {
     if (this.state.busy) {
       return
     }
+    const selection = this.repositoryPicker.open(this.directoryPicker)
+    if (!selection) {
+      return
+    }
+    this.renderAll()
     try {
-      const selectedPath = await this.directoryPicker()
+      const selectedPath = await selection
       if (selectedPath) {
         await this.selectRepository(selectedPath, true)
       }
     } catch (error) {
       this.setMessage(errorMessage(error), 'error')
+    } finally {
+      this.renderAll()
     }
   }
 
@@ -1798,9 +2354,11 @@ export class LeetcoderApp {
       // Clear the old document before loading the new repository. Relative
       // paths can be identical across repositories and must never reuse the
       // previous source, FQCN, or test output.
+      void this.backend.stopWatchingRepository().catch(() => {})
       this.state.repoPath = null
       this.state.projectValid = false
       this.state.files = []
+      this.state.openTabs = []
       this.state.fileSearch = ''
       this.resetGitState()
       this.resetCurrentFile()
@@ -1818,6 +2376,11 @@ export class LeetcoderApp {
         this.storage?.setItem(LAST_REPOSITORY_KEY, path)
       }
       await this.refreshFiles()
+      try {
+        await this.backend.watchRepository(path)
+      } catch {
+        // Losing the watcher only costs live updates, not the repository.
+      }
     } catch (error) {
       this.state.projectValid = false
       this.setMessage(errorMessage(error), 'error')
@@ -1884,10 +2447,8 @@ export class LeetcoderApp {
       if (!this.isCurrentRefresh(repoPath, repositoryGeneration, requestId)) {
         return false
       }
-      const selectedFileRemoved = Boolean(
-        this.state.selectedPath && !files.some((file) => file.path === this.state.selectedPath),
-      )
-      if (selectedFileRemoved && !(await this.flushPendingSave())) {
+      const missingTabs = this.state.openTabs.filter((tab) => !files.some((file) => sameFilePath(file.path, tab.path)))
+      if (missingTabs.length > 0 && !(await this.flushPendingSave())) {
         return false
       }
       if (!this.isCurrentRefresh(repoPath, repositoryGeneration, requestId)) {
@@ -1895,7 +2456,22 @@ export class LeetcoderApp {
       }
       this.state.files = files
       this.markGitStale()
-      if (selectedFileRemoved) {
+      for (const tab of this.state.openTabs) {
+        const refreshed = files.find((file) => sameFilePath(file.path, tab.path))
+        if (refreshed) {
+          tab.path = refreshed.path
+          tab.name = refreshed.name
+          tab.packageSegment = refreshed.packageSegment
+        }
+      }
+      if (missingTabs.length > 0) {
+        const missingTabIds = new Set(missingTabs.map((tab) => tab.id))
+        this.state.openTabs = this.state.openTabs.filter((tab) => !missingTabIds.has(tab.id))
+        if (!this.activeOpenTab()) {
+          this.resetCurrentFile()
+        }
+      }
+      if (!this.activeOpenTab() && this.state.selectedPath) {
         this.resetCurrentFile()
       }
       return true
@@ -1922,27 +2498,74 @@ export class LeetcoderApp {
     )
   }
 
+  private activeOpenTab(): OpenFileTab | null {
+    if (this.state.activeTabId === null) {
+      return null
+    }
+    return this.state.openTabs.find((tab) => tab.id === this.state.activeTabId) ?? null
+  }
+
+  private openTabForPath(path: string): OpenFileTab | null {
+    return this.state.openTabs.find((tab) => sameFilePath(tab.path, path)) ?? null
+  }
+
+  private createOpenTab(file: ProblemFileEntry): OpenFileTab {
+    return {
+      id: this.nextOpenTabId++,
+      path: file.path,
+      name: file.name,
+      packageSegment: file.packageSegment,
+    }
+  }
+
+  private resetTestState(): void {
+    this.state.testResult = null
+    this.state.testRun = null
+    this.state.selectedTestKey = null
+    this.testRunGeneration += 1
+    this.editor.setIssues([])
+  }
+
   private async openFile(file: ProblemFileEntry): Promise<void> {
-    if (!this.state.repoPath) {
+    if (!this.state.repoPath || this.fileOpenInProgress) {
       return
     }
-    if (file.path === this.state.selectedPath) {
-      this.expandedGroups.add(file.packageSegment)
-      this.renderFiles()
+    const existing = this.openTabForPath(file.path)
+    if (existing && existing.id === this.state.activeTabId && sameFilePath(file.path, this.state.selectedPath ?? '')) {
+      this.revealSelectedFileInExplorer()
       this.editor.focus()
       return
     }
-    this.state.busy = true
-    this.state.testResult = null
-    this.state.testRun = null
-    this.testRunGeneration += 1
-    this.editor.setIssues([])
-    this.renderAll()
+
+    const ownsBusy = !this.state.busy
+    const repoPath = this.state.repoPath
+    const repositoryGeneration = this.repositoryGeneration
+    if (ownsBusy) {
+      this.fileOpenInProgress = true
+      this.state.busy = true
+    }
     try {
       if (!(await this.flushPendingSave())) {
         return
       }
-      const source = await this.backend.readProblemFile(this.state.repoPath, file.path)
+      const source = await this.backend.readProblemFile(repoPath, file.path)
+      if (this.state.repoPath !== repoPath || this.repositoryGeneration !== repositoryGeneration) {
+        return
+      }
+      const tabMetadataChanged = Boolean(existing && (
+        existing.path !== file.path
+        || existing.name !== file.name
+        || existing.packageSegment !== file.packageSegment
+      ))
+      const tab = existing ?? this.createOpenTab(file)
+      tab.path = file.path
+      tab.name = file.name
+      tab.packageSegment = file.packageSegment
+      if (!existing) {
+        this.state.openTabs.push(tab)
+      }
+      this.state.activeTabId = tab.id
+      this.resetTestState()
       this.state.selectedPath = file.path
       this.state.selectedSource = source
       this.state.savedSource = source
@@ -1956,14 +2579,71 @@ export class LeetcoderApp {
       } finally {
         this.suppressEditorChange = false
       }
-      // Opening a file reveals its group once; the user can still collapse it.
-      this.expandedGroups.add(file.packageSegment)
+      // Opening a file reveals only its group; the accordion closes the other
+      // groups so the selected row has the full available viewport.
+      this.setExpandedGroup(file.packageSegment, true)
+      this.renderFileHeading()
+      this.renderResult()
+      this.updateFileExplorerState()
+      if (!existing || tabMetadataChanged) {
+        this.renderFileTabs()
+      } else {
+        this.updateFileTabState()
+      }
+      this.updateEditorVisibility()
       this.editor.focus()
     } catch (error) {
       this.setMessage(`Could not open ${file.name}: ${errorMessage(error)}`, 'error')
     } finally {
+      if (ownsBusy) {
+        this.state.busy = false
+        this.fileOpenInProgress = false
+        this.updateBusyControls()
+      }
+    }
+  }
+
+  private removeOpenTab(tabId: number): OpenFileTab | null {
+    const index = this.state.openTabs.findIndex((tab) => tab.id === tabId)
+    if (index < 0) {
+      return null
+    }
+    const wasActive = this.state.activeTabId === tabId
+    this.state.openTabs.splice(index, 1)
+    if (!wasActive) {
+      return null
+    }
+    const replacementIndex = replacementTabIndex(this.state.openTabs.length, index)
+    const replacement = replacementIndex === null ? null : this.state.openTabs[replacementIndex]
+    this.resetCurrentFile()
+    return replacement ?? null
+  }
+
+  private async closeAllOpenTabs(): Promise<void> {
+    if (this.state.busy || this.state.openTabs.length === 0) {
+      return
+    }
+    this.state.busy = true
+    this.updateBusyControls()
+    try {
+      if (!(await this.flushPendingSave())) {
+        return
+      }
+      this.state.openTabs = []
+      this.resetCurrentFile()
+    } finally {
       this.state.busy = false
       this.renderAll()
+    }
+  }
+
+  private setExpandedGroup(
+    group: ProblemFileEntry['packageSegment'],
+    expanded: boolean,
+  ): void {
+    this.expandedGroups.clear()
+    for (const key of accordionGroupKeys(group, expanded)) {
+      this.expandedGroups.add(key)
     }
   }
 
@@ -2021,25 +2701,26 @@ export class LeetcoderApp {
       this.discardStaleTestRun(activeRunId)
       this.renderResult()
     }
-    this.autosave.schedule({
-      repoPath: this.state.repoPath,
-      filePath: this.state.selectedPath,
-      source,
-    })
+    if (!this.gitDiscardInProgress) {
+      this.autosave.schedule({
+        repoPath: this.state.repoPath,
+        filePath: this.state.selectedPath,
+        source,
+      })
+    }
     this.renderFileHeading()
+    this.updateFileTabState()
   }
 
   private resetCurrentFile(): void {
+    this.state.activeTabId = null
     this.state.selectedPath = null
     this.state.selectedSource = ''
     this.state.savedSource = ''
     this.state.selectedFqcn = null
     this.state.dirty = false
     this.state.saveError = null
-    this.state.testResult = null
-    this.state.testRun = null
-    this.testRunGeneration += 1
-    this.editor.setIssues([])
+    this.resetTestState()
     this.suppressEditorChange = true
     try {
       this.editor.setValue('')
@@ -2085,6 +2766,7 @@ export class LeetcoderApp {
       this.flashSavedIndicator()
     }
     this.renderFileHeading()
+    this.updateFileTabState()
   }
 
   /** Briefly surface "Saved" after a successful write, then clear it. */
@@ -2115,8 +2797,12 @@ export class LeetcoderApp {
     this.renderAll()
   }
 
-  private async runCurrentTest(): Promise<void> {
+  private async runCurrentTest(testMethod?: string | null): Promise<void> {
     if (this.state.busy) {
+      return
+    }
+    if (testMethod === null) {
+      this.setMessage('Place the cursor inside an @Test method to run only that test.', 'info')
       return
     }
     if (!this.state.repoPath || !this.state.selectedPath || !this.state.selectedFqcn) {
@@ -2143,9 +2829,11 @@ export class LeetcoderApp {
       stderr: '',
       activeTest: null,
       error: null,
+      testMethod: testMethod ?? null,
     }
     this.state.testRun = run
     this.state.testResult = null
+    this.state.selectedTestKey = null
     this.editor.setIssues([])
     // A starting run always brings the Tests tab forward so progress is visible.
     this.selectBottomPanelTab('tests')
@@ -2167,11 +2855,11 @@ export class LeetcoderApp {
         }
         return
       }
-      const result = await this.backend.runProblemTest(
-        runRepoPath,
-        runFqcn,
-        (progress) => this.applyTestRunProgress(runId, progress),
-      )
+      const runner = (this.backend as unknown as TestRunnerBackend).runProblemTest
+      const onProgress = (progress: TestRunProgress): void => this.applyTestRunProgress(runId, progress)
+      const result = testMethod === undefined
+        ? await runner(runRepoPath, runFqcn, onProgress)
+        : await runner(runRepoPath, runFqcn, onProgress, testMethod)
       if (!this.isCurrentTestRun(runId)) {
         return
       }
@@ -2230,6 +2918,7 @@ export class LeetcoderApp {
     }
     this.state.testRun = null
     this.state.testResult = null
+    this.state.selectedTestKey = null
     this.renderedTestResult = null
     this.editor.setIssues([])
     this.setMessage('Run cancelled — file changed', 'info')
@@ -2316,6 +3005,9 @@ export class LeetcoderApp {
 
   private resetGitState(): void {
     this.clearScheduledGitRefresh()
+    this.state.gitContextMenu = null
+    this.gitDiscardDialogFile = null
+    this.gitDiscardDialogFocusTarget = null
     this.gitStatusRequestId += 1
     this.gitDiffRequestId += 1
     this.gitOperationId += 1
@@ -2349,6 +3041,53 @@ export class LeetcoderApp {
   private gitWorkspaceWidth(): number {
     const workspace = this.root.querySelector<HTMLElement>('.git-workspace')
     return workspace && workspace.clientWidth > 0 ? workspace.clientWidth : 900
+  }
+
+  private sidebarWorkspaceWidth(): number {
+    const workspace = this.root.querySelector<HTMLElement>('.workspace')
+    if (workspace && workspace.clientWidth > 0) {
+      return workspace.clientWidth
+    }
+    if (typeof window !== 'undefined' && window.innerWidth > 0) {
+      return window.innerWidth
+    }
+    return 1000
+  }
+
+  private applySidebarWidth(): void {
+    const workspace = this.element<HTMLElement>('.workspace')
+    const width = clampSidebarWidth(this.sidebarWidth, this.sidebarWorkspaceWidth())
+    this.sidebarWidth = width
+    workspace.style.setProperty('--sidebar-width', `${width}px`)
+    const splitter = this.element<HTMLElement>('#sidebar-splitter')
+    splitter.setAttribute('aria-valuenow', String(width))
+    splitter.setAttribute('aria-valuemax', String(maxSidebarWidth(this.sidebarWorkspaceWidth())))
+  }
+
+  private dailyDescriptionWorkspaceHeight(): number {
+    const column = this.root.querySelector<HTMLElement>('.editor-column')
+    if (column && column.clientHeight > 0) {
+      return column.clientHeight
+    }
+    // jsdom and the initial hidden webview do not expose layout metrics. The
+    // workspace is the viewport minus the app header and bottom panel.
+    return Math.max(
+      MIN_DAILY_DESCRIPTION_HEIGHT + MIN_CODE_CARD_HEIGHT + DAILY_DESCRIPTION_LAYOUT_OVERHEAD,
+      windowHeight() - 44 - this.bottomPanelHeight,
+    )
+  }
+
+  private applyDailyDescriptionHeight(): void {
+    const description = this.element<HTMLElement>('#daily-description')
+    const height = clampDailyDescriptionHeight(
+      this.dailyDescriptionHeight,
+      this.dailyDescriptionWorkspaceHeight(),
+    )
+    this.dailyDescriptionHeight = height
+    description.style.setProperty('--daily-description-height', `${height}px`)
+    const handle = this.element<HTMLElement>('#daily-description-resize-handle')
+    handle.setAttribute('aria-valuenow', String(height))
+    handle.setAttribute('aria-valuemax', String(maxDailyDescriptionHeight(this.dailyDescriptionWorkspaceHeight())))
   }
 
   private applyGitFileListWidth(): void {
@@ -2394,6 +3133,7 @@ export class LeetcoderApp {
     gitTab.tabIndex = testsSelected ? -1 : 0
     this.element<HTMLElement>('#tests-panel').hidden = !testsSelected
     this.element<HTMLElement>('#git-panel').hidden = testsSelected
+    this.element<HTMLButtonElement>('#run-test').hidden = !testsSelected
   }
 
   private isCurrentGitStatusRequest(
@@ -2426,6 +3166,17 @@ export class LeetcoderApp {
       && this.state.repoPath === repoPath
       && this.repositoryGeneration === repositoryGeneration
       && this.gitOperationId === operationId
+  }
+
+  private isCurrentFileOperation(
+    repoPath: string,
+    repositoryGeneration: number,
+    operationId: number,
+  ): boolean {
+    return this.state.projectValid
+      && this.state.repoPath === repoPath
+      && this.repositoryGeneration === repositoryGeneration
+      && this.fileOperationId === operationId
   }
 
   private markGitStale(): void {
@@ -2515,11 +3266,87 @@ export class LeetcoderApp {
     this.scheduleDailyProblemRefresh()
   }
 
+  private readonly handleRepositoryFilesChanged = (change: RepositoryFilesChanged): void => {
+    if (this.destroyed || !this.state.repoPath || !this.state.projectValid) {
+      return
+    }
+    if (change.structural) {
+      void this.refreshFiles()
+    }
+    const path = this.state.selectedPath
+    if (path && change.paths.some((changed) => sameFilePath(changed, path))) {
+      void this.reloadOpenFileFromDisk(path)
+    }
+  }
+
+  /**
+   * Adopt an external edit to the file currently open in the editor.
+   *
+   * A write this application started is already in the buffer, so it reloads
+   * to the same text and changes nothing. When the buffer holds edits that
+   * have not reached disk the local version wins: silently replacing unsaved
+   * work cannot be undone by the user, while a stale buffer can be refreshed.
+   */
+  private async reloadOpenFileFromDisk(path: string): Promise<void> {
+    const repoPath = this.state.repoPath
+    if (!repoPath
+      || this.destroyed
+      || this.externalReloadInFlight
+      || this.saveWriteInFlight
+      || this.fileOpenInProgress) {
+      return
+    }
+    this.externalReloadInFlight = true
+    const repositoryGeneration = this.repositoryGeneration
+    try {
+      const source = await this.backend.readProblemFile(repoPath, path)
+      if (this.destroyed
+        || this.repositoryGeneration !== repositoryGeneration
+        || this.state.repoPath !== repoPath
+        || this.state.selectedPath !== path
+        || source === this.state.savedSource) {
+        return
+      }
+      if (this.state.dirty || this.autosave.hasPendingChanges) {
+        this.setMessage(
+          `${gitFileName(path)} changed on disk. Your unsaved edits were kept.`,
+          'info',
+        )
+        return
+      }
+      this.state.savedSource = source
+      this.state.selectedSource = source
+      this.state.dirty = false
+      this.state.saveError = null
+      this.element<HTMLElement>('#editor-host').dataset.savedSource = source
+      this.suppressEditorChange = true
+      try {
+        this.editor.reloadExternalValue(source)
+      } finally {
+        this.suppressEditorChange = false
+      }
+      this.editor.setIssues([])
+      this.markGitStale()
+      this.renderFileHeading()
+      this.updateFileTabState()
+    } catch {
+      // A file that was deleted or moved is reconciled by the file-list
+      // refresh that the same watcher event triggers.
+    } finally {
+      this.externalReloadInFlight = false
+    }
+  }
+
   private handleAppVisibilityReturn(): void {
     if (!this.isWindowVisible() || this.destroyed) {
       return
     }
     this.refreshDailyProblemIfStale()
+    // Filesystem events can be missed while the window is hidden, so returning
+    // to it re-checks the open file the way an IDE syncs on frame activation.
+    if (this.state.selectedPath && this.state.projectValid) {
+      void this.reloadOpenFileFromDisk(this.state.selectedPath)
+    }
     if (this.state.bottomPanelTab !== 'git'
       || !this.state.projectValid
       || !this.state.repoPath
@@ -2881,6 +3708,10 @@ export class LeetcoderApp {
         }
         fileButton.append(stats)
         row.append(checkbox, fileButton)
+        row.addEventListener('contextmenu', (event) => {
+          event.preventDefault()
+          this.openGitContextMenu(file, event.clientX, event.clientY)
+        })
         list.append(row)
       }
     }
@@ -2926,6 +3757,7 @@ export class LeetcoderApp {
     }
     this.updateGitCommitControls()
     this.applyGitFileListWidth()
+    this.renderGitContextMenu()
   }
 
   /**
@@ -2946,35 +3778,158 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#git-select-none').disabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
   }
 
+  /** Update controls whose disabled state changes while a file operation runs. */
+  private updateBusyControls(): void {
+    const busy = this.state.busy
+    this.element<HTMLButtonElement>('#choose-repository').disabled = busy || this.repositoryPicker.isOpen
+    this.element<HTMLButtonElement>('#refresh-files').disabled = busy || !this.state.projectValid
+    this.root.querySelectorAll<HTMLButtonElement>('.file-item').forEach((button) => {
+      button.disabled = busy
+    })
+    this.root.querySelectorAll<HTMLButtonElement>('.file-tab-close').forEach((button) => {
+      button.disabled = busy
+    })
+    const dailyPrimary = this.root.querySelector<HTMLButtonElement>('.daily-primary')
+    if (dailyPrimary) {
+      dailyPrimary.disabled = busy || !this.state.projectValid
+    }
+    this.root.querySelectorAll<HTMLInputElement>('.git-file-checkbox').forEach((checkbox) => {
+      checkbox.disabled = busy || this.state.git.busy || this.state.git.loading
+    })
+    this.root.querySelectorAll<HTMLButtonElement>('.git-file-button').forEach((button) => {
+      button.disabled = busy || this.state.git.busy
+    })
+    this.element<HTMLButtonElement>('#duplicate-file-action').disabled = busy
+    this.element<HTMLButtonElement>('#rename-file-action').disabled = busy
+    this.element<HTMLButtonElement>('#delete-file-action').disabled = busy
+    this.element<HTMLButtonElement>('#git-discard-action').disabled = busy || this.state.git.busy || this.state.git.loading
+    this.element<HTMLButtonElement>('#git-show-file-action').disabled = busy || this.state.git.busy || this.state.git.loading
+    this.updateRunButtonState()
+    this.updateGitCommitControls()
+  }
+
+  private updateRunButtonState(): void {
+    const runButton = this.element<HTMLButtonElement>('#run-test')
+    runButton.disabled = this.state.busy || !this.state.selectedFqcn
+    const mac = currentIsMacPlatform()
+    const runShortcut = shortcutLabel('run-test', mac)
+    runButton.setAttribute('aria-label', `Run all tests (${runShortcut})`)
+    runButton.title = this.state.selectedFqcn
+      ? `Run all tests (${runShortcut})`
+      : 'Select a Java problem file to run'
+  }
+
+  private updateEditorVisibility(): void {
+    this.element<HTMLElement>('#editor-empty').hidden = Boolean(this.state.selectedPath)
+    this.element<HTMLElement>('#editor-host').classList.toggle('is-empty', !this.state.selectedPath)
+  }
+
+  /** Update active/open explorer state without rebuilding the file list. */
+  private updateFileExplorerState(): void {
+    for (const { key } of [...FILE_GROUPS, OTHER_GROUP]) {
+      const groupList = this.root.querySelector<HTMLElement>(`#file-group-${key}`)
+      const section = groupList?.closest<HTMLElement>('.file-group')
+      if (!groupList || !section) {
+        continue
+      }
+      const expanded = this.expandedGroups.has(key)
+      const expansionChanged = section.dataset.expanded !== String(expanded)
+      section.dataset.expanded = String(expanded)
+      groupList.hidden = !expanded
+      const toggle = section.querySelector<HTMLButtonElement>('.file-group-toggle')
+      if (!toggle) {
+        continue
+      }
+      toggle.setAttribute('aria-expanded', String(expanded))
+      const icon = toggle.querySelector<SVGElement>('.group-toggle-icon')
+      if (icon && expansionChanged) {
+        icon.replaceWith(iconFor(expanded ? 'chevronDown' : 'chevronRight', 'group-toggle-icon'))
+      }
+    }
+    const selectedPath = this.state.selectedPath ?? ''
+    this.root.querySelectorAll<HTMLButtonElement>('.file-item').forEach((button) => {
+      const path = button.dataset.path ?? ''
+      const active = sameFilePath(path, selectedPath)
+      button.classList.toggle('is-active', active)
+      button.classList.toggle('is-open', this.openTabForPath(path) !== null)
+      if (active) {
+        button.setAttribute('aria-current', 'page')
+      } else {
+        button.removeAttribute('aria-current')
+      }
+    })
+    this.scrollActiveFileIntoView()
+  }
+
+  /** Update tab selection and the active tab's dirty marker without rebuilding tabs. */
+  private updateFileTabState(): void {
+    const list = this.element<HTMLElement>('#file-tabs')
+    const items = Array.from(list.querySelectorAll<HTMLElement>('.file-tab'))
+    if (items.length !== this.state.openTabs.length) {
+      this.renderFileTabs()
+      return
+    }
+    const activeChanged = this.renderedFileTabsActiveId !== this.state.activeTabId
+    const itemsById = new Map(items.map((item) => [item.dataset.tabId ?? '', item]))
+    for (const tab of this.state.openTabs) {
+      const item = itemsById.get(String(tab.id))
+      const tabButton = item?.querySelector<HTMLButtonElement>('[role="tab"]')
+      if (!item || !tabButton) {
+        this.renderFileTabs()
+        return
+      }
+      const active = tab.id === this.state.activeTabId
+      item.classList.toggle('is-active', active)
+      tabButton.setAttribute('aria-selected', String(active))
+      tabButton.tabIndex = active ? 0 : -1
+      const dirty = active && (this.state.dirty || this.autosave.hasPendingChanges)
+      const dirtyMarker = item.querySelector<HTMLElement>('.file-tab-dirty')
+      if (dirty && !dirtyMarker) {
+        const marker = document.createElement('span')
+        marker.className = 'file-tab-dirty'
+        marker.setAttribute('aria-label', 'Unsaved changes')
+        tabButton.append(marker)
+      } else if (!dirty && dirtyMarker) {
+        dirtyMarker.remove()
+      }
+      item.classList.toggle('is-dirty', dirty)
+    }
+    this.renderedFileTabsActiveId = this.state.activeTabId
+    if (activeChanged && this.state.activeTabId !== null) {
+      this.scheduleActiveFileTabReveal(this.state.activeTabId)
+    }
+  }
+
   private renderAll(): void {
     this.cancelScheduledLiveRender()
     this.applyBottomPanelHeight()
+    this.applySidebarWidth()
     this.renderHeader()
     this.renderShortcutLabels()
     this.renderDailyProblem()
     this.renderFiles()
+    this.renderFileTabs()
     this.renderFileHeading()
     this.renderResult()
     this.renderBottomPanelTabs()
     this.renderGitPanel()
     this.renderContextMenu()
-    this.element<HTMLButtonElement>('#choose-repository').disabled = this.state.busy
-    this.element<HTMLButtonElement>('#refresh-files').disabled = this.state.busy || !this.state.projectValid
-    const runButton = this.element<HTMLButtonElement>('#run-test')
-    runButton.disabled = this.state.busy || !this.state.selectedFqcn
-    if (!this.state.selectedFqcn) {
-      runButton.title = 'Select a Java problem file to run'
-    } else {
-      runButton.removeAttribute('title')
-    }
-    this.element<HTMLElement>('#editor-empty').hidden = Boolean(this.state.selectedPath)
-    this.element<HTMLElement>('#editor-host').classList.toggle('is-empty', !this.state.selectedPath)
+    this.renderDiscardGitDialog()
+    this.updateBusyControls()
+    this.updateEditorVisibility()
     this.scheduleGitRefreshIfNeeded()
   }
 
   private renderHeader(): void {
     const chip = this.element<HTMLButtonElement>('#choose-repository')
     const label = this.element<HTMLElement>('#repo-path')
+    chip.setAttribute('aria-busy', String(this.repositoryPicker.isOpen))
+    if (this.repositoryPicker.isOpen) {
+      label.textContent = 'Choosing repository…'
+      chip.title = 'The repository picker is already open'
+      chip.classList.remove('is-empty')
+      return
+    }
     if (this.state.repoPath) {
       label.textContent = gitFileName(this.state.repoPath)
       chip.title = this.state.repoPath
@@ -2987,18 +3942,23 @@ export class LeetcoderApp {
   }
 
   private renderShortcutLabels(): void {
-    const modifier = isMacPlatform() ? '⌘' : 'Ctrl+'
-    this.element<HTMLElement>('#run-shortcut').textContent = `${modifier}R`
+    const mac = currentIsMacPlatform()
+    this.element<HTMLElement>('#run-shortcut').textContent = shortcutLabel('run-test', mac)
+    this.element<HTMLElement>('#run-selected-shortcut').textContent =
+      shortcutLabel('run-test-at-cursor', mac)
   }
 
   private renderDailyProblem(): void {
     const header = this.element<HTMLElement>('#daily-header')
     const description = this.element<HTMLElement>('#daily-description')
+    const resizeHandle = this.element<HTMLElement>('#daily-description-resize-handle')
     header.innerHTML = ''
     const problem = this.state.dailyProblem
 
     if (!problem) {
       description.hidden = true
+      resizeHandle.hidden = true
+      this.applyDailyDescriptionHeight()
       if (this.state.dailyLoading) {
         header.append(this.renderDailySkeleton())
       } else if (this.state.dailyError) {
@@ -3096,8 +4056,12 @@ export class LeetcoderApp {
     if (hasContent && this.dailyDescriptionOpen) {
       description.hidden = false
       this.renderDailyDescription(description, problem.content ?? '')
+      resizeHandle.hidden = false
+      this.applyDailyDescriptionHeight()
     } else {
       description.hidden = true
+      resizeHandle.hidden = true
+      this.applyDailyDescriptionHeight()
     }
   }
 
@@ -3150,6 +4114,168 @@ export class LeetcoderApp {
     if (this.sanitizedDescriptionElement.parentElement !== container) {
       container.innerHTML = ''
       container.append(this.sanitizedDescriptionElement)
+    }
+  }
+
+  private renderFileTabs(): void {
+    const list = this.element<HTMLElement>('#file-tabs')
+    const activeChanged = this.renderedFileTabsActiveId !== this.state.activeTabId
+    this.renderedFileTabsActiveId = this.state.activeTabId
+    list.innerHTML = ''
+    for (const tab of this.state.openTabs) {
+      const item = document.createElement('div')
+      item.className = 'file-tab'
+      item.setAttribute('role', 'presentation')
+      item.dataset.tabId = String(tab.id)
+
+      const tabButton = document.createElement('button')
+      tabButton.type = 'button'
+      tabButton.className = 'file-tab-button'
+      tabButton.setAttribute('role', 'tab')
+      const active = tab.id === this.state.activeTabId
+      item.classList.toggle('is-active', active)
+      tabButton.setAttribute('aria-selected', String(active))
+      tabButton.setAttribute('aria-controls', 'editor-host')
+      tabButton.tabIndex = active ? 0 : -1
+      tabButton.title = tab.path
+
+      const label = document.createElement('span')
+      label.className = 'file-tab-label'
+      label.textContent = tab.name.replace(/\.java$/i, '')
+      tabButton.append(label)
+      tabButton.setAttribute('aria-label', tab.name)
+
+      if (active && (this.state.dirty || this.autosave.hasPendingChanges)) {
+        const dirty = document.createElement('span')
+        dirty.className = 'file-tab-dirty'
+        dirty.setAttribute('aria-label', 'Unsaved changes')
+        tabButton.append(dirty)
+        item.classList.add('is-dirty')
+      }
+
+      const close = document.createElement('button')
+      close.type = 'button'
+      close.className = 'file-tab-close'
+      close.setAttribute('aria-label', `Close ${tab.name}`)
+      close.title = `Close ${tab.name}`
+      close.textContent = '×'
+      close.disabled = this.state.busy
+      close.addEventListener('click', (event) => {
+        event.stopPropagation()
+        void this.closeOpenTab(tab.id)
+      })
+      close.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+          return
+        }
+        event.preventDefault()
+        event.stopPropagation()
+        void this.closeOpenTab(tab.id)
+      })
+
+      tabButton.addEventListener('click', () => {
+        void this.openTab(tab.id)
+      })
+      tabButton.addEventListener('keydown', (event) => {
+        const tabs = Array.from(list.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+        const currentIndex = tabs.indexOf(tabButton)
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          void this.openTab(tab.id)
+          return
+        }
+        if (currentIndex < 0 || tabs.length === 0) {
+          return
+        }
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+          return
+        }
+        event.preventDefault()
+        const nextIndex = event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? tabs.length - 1
+            : Math.max(0, Math.min(
+              tabs.length - 1,
+              currentIndex + (event.key === 'ArrowLeft' ? -1 : 1),
+            ))
+        tabs[nextIndex].focus()
+      })
+      item.append(tabButton, close)
+      list.append(item)
+    }
+    if (activeChanged && this.state.activeTabId !== null) {
+      this.scheduleActiveFileTabReveal(this.state.activeTabId)
+    }
+  }
+
+  private scheduleActiveFileTabReveal(tabId: number): void {
+    const reveal = (): void => {
+      if (this.state.activeTabId !== tabId) {
+        return
+      }
+      const list = this.element<HTMLElement>('#file-tabs')
+      const item = Array.from(list.querySelectorAll<HTMLElement>('.file-tab'))
+        .find((entry) => entry.dataset.tabId === String(tabId))
+      item?.querySelector<HTMLElement>('[role="tab"]')?.scrollIntoView?.({
+        block: 'nearest',
+        inline: 'nearest',
+      })
+    }
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(reveal)
+    } else {
+      queueMicrotask(reveal)
+    }
+  }
+
+  private async openTab(tabId: number): Promise<void> {
+    if (this.state.busy) {
+      return
+    }
+    const tab = this.state.openTabs.find((entry) => entry.id === tabId)
+    if (!tab) {
+      return
+    }
+    const file = this.state.files.find((entry) => sameFilePath(entry.path, tab.path))
+    if (!file) {
+      this.state.openTabs = this.state.openTabs.filter((entry) => entry.id !== tabId)
+      if (this.state.activeTabId === tabId) {
+        this.resetCurrentFile()
+      }
+      this.renderAll()
+      return
+    }
+    await this.openFile(file)
+  }
+
+  private async closeOpenTab(tabId: number): Promise<void> {
+    if (this.state.busy) {
+      return
+    }
+    const target = this.state.openTabs.find((tab) => tab.id === tabId)
+    if (!target) {
+      return
+    }
+    const wasActive = target.id === this.state.activeTabId
+    this.state.busy = true
+    this.renderAll()
+    try {
+      if (!(await this.flushPendingSave())) {
+        return
+      }
+      const replacement = this.removeOpenTab(tabId)
+      if (wasActive && replacement) {
+        const file = this.state.files.find((entry) => sameFilePath(entry.path, replacement.path)) ?? {
+          path: replacement.path,
+          name: replacement.name,
+          packageSegment: replacement.packageSegment,
+        }
+        await this.openFile(file)
+      }
+    } finally {
+      this.state.busy = false
+      this.renderAll()
     }
   }
 
@@ -3219,16 +4345,11 @@ export class LeetcoderApp {
       headingButton.append(groupLabel, count)
       headingButton.addEventListener('click', () => {
         const nextExpanded = !this.expandedGroups.has(group.key)
-        if (nextExpanded) {
-          this.expandedGroups.add(group.key)
-        } else {
-          this.expandedGroups.delete(group.key)
-        }
-        section.dataset.expanded = String(nextExpanded)
-        headingButton.setAttribute('aria-expanded', String(nextExpanded))
-        groupList.hidden = !nextExpanded
-        const previous = groupLabel.querySelector('.group-toggle-icon')
-        previous?.replaceWith(iconFor(nextExpanded ? 'chevronDown' : 'chevronRight', 'group-toggle-icon'))
+        this.setExpandedGroup(group.key, nextExpanded)
+        // Re-render all groups so a newly opened group closes the previously
+        // expanded group in both state and DOM. This also keeps the active row
+        // scroll target in the newly visible viewport.
+        this.renderFiles()
       })
       section.append(headingButton)
       const groupList = document.createElement('div')
@@ -3239,7 +4360,12 @@ export class LeetcoderApp {
         const button = document.createElement('button')
         button.type = 'button'
         button.className = 'file-item'
-        button.classList.toggle('is-active', file.path === this.state.selectedPath)
+        const active = sameFilePath(file.path, this.state.selectedPath ?? '')
+        button.classList.toggle('is-active', active)
+        button.classList.toggle('is-open', this.openTabForPath(file.path) !== null)
+        if (active) {
+          button.setAttribute('aria-current', 'page')
+        }
         button.disabled = this.state.busy
         button.setAttribute('aria-haspopup', 'menu')
         button.dataset.path = file.path
@@ -3278,13 +4404,14 @@ export class LeetcoderApp {
     if (this.state.busy || !this.state.repoPath || !this.state.projectValid) {
       return
     }
+    this.closeGitContextMenu()
     this.state.contextMenu = {
       file,
       x,
       y,
     }
     this.renderContextMenu()
-    this.element<HTMLButtonElement>('#delete-file-action').focus()
+    this.element<HTMLButtonElement>('#duplicate-file-action').focus()
   }
 
   private closeFileContextMenu(): void {
@@ -3293,6 +4420,174 @@ export class LeetcoderApp {
     }
     this.state.contextMenu = null
     this.renderContextMenu()
+  }
+
+  private openGitContextMenu(file: GitChangedFile, x: number, y: number): void {
+    if (this.state.busy || this.state.git.busy || !this.state.repoPath || !this.state.projectValid) {
+      return
+    }
+    this.closeFileContextMenu()
+    this.state.gitContextMenu = {
+      file,
+      x,
+      y,
+    }
+    this.renderGitContextMenu()
+    this.element<HTMLButtonElement>('#git-discard-action').focus()
+  }
+
+  private closeGitContextMenu(): void {
+    if (!this.state.gitContextMenu) {
+      return
+    }
+    this.state.gitContextMenu = null
+    this.renderGitContextMenu()
+  }
+
+  private findGitFileFocusTarget(path: string): HTMLElement | null {
+    const row = Array.from(this.root.querySelectorAll<HTMLElement>('#git-file-list .git-file-row'))
+      .find((entry) => entry.title === path)
+    return row?.querySelector<HTMLElement>('.git-file-button')
+      ?? this.element<HTMLButtonElement>('#git-tab')
+  }
+
+  private restoreGitDiscardFocus(target: HTMLElement | null): void {
+    if (target && target.isConnected && !target.closest('[hidden]')
+      && (!(target instanceof HTMLButtonElement) || !target.disabled)) {
+      target.focus()
+      return
+    }
+    this.element<HTMLButtonElement>('#git-tab').focus()
+  }
+
+  private toggleShortcutsDialog(): void {
+    if (this.shortcutsDialogOpen) {
+      this.closeShortcutsDialog()
+    } else {
+      this.openShortcutsDialog()
+    }
+  }
+
+  private openShortcutsDialog(): void {
+    if (this.shortcutsDialogOpen) {
+      return
+    }
+    const active = document.activeElement
+    this.shortcutsDialogFocusTarget = active instanceof HTMLElement ? active : null
+    this.shortcutsDialogOpen = true
+    this.renderShortcutsDialog()
+    queueMicrotask(() => {
+      if (this.shortcutsDialogOpen) {
+        this.element<HTMLButtonElement>('#close-shortcuts').focus()
+      }
+    })
+  }
+
+  private closeShortcutsDialog(): void {
+    if (!this.shortcutsDialogOpen) {
+      return
+    }
+    this.shortcutsDialogOpen = false
+    const target = this.shortcutsDialogFocusTarget
+    this.shortcutsDialogFocusTarget = null
+    this.renderShortcutsDialog()
+    if (target && target.isConnected && !target.closest('[hidden]')) {
+      target.focus()
+    } else {
+      this.editor.focus()
+    }
+  }
+
+  private renderShortcutsDialog(): void {
+    const dialog = this.element<HTMLElement>('#shortcuts-dialog')
+    dialog.hidden = !this.shortcutsDialogOpen
+    const body = this.element<HTMLElement>('#shortcuts-body')
+    body.innerHTML = ''
+    if (!this.shortcutsDialogOpen) {
+      return
+    }
+    const mac = currentIsMacPlatform()
+    for (const section of SHORTCUT_SECTIONS) {
+      const group = document.createElement('section')
+      group.className = 'shortcuts-group'
+      const heading = document.createElement('h3')
+      heading.className = 'shortcuts-group-title'
+      heading.textContent = section.title
+      group.append(heading)
+      const list = document.createElement('dl')
+      list.className = 'shortcuts-list'
+      for (const entry of section.entries) {
+        const keys = document.createElement('dt')
+        keys.className = 'shortcuts-keys'
+        for (const [index, binding] of platformBindings(entry, mac).entries()) {
+          if (index > 0) {
+            keys.append(document.createTextNode(' / '))
+          }
+          const key = document.createElement('kbd')
+          key.textContent = formatShortcut(binding, mac)
+          keys.append(key)
+        }
+        const description = document.createElement('dd')
+        description.className = 'shortcuts-description'
+        description.textContent = entry.description
+        list.append(keys, description)
+      }
+      group.append(list)
+      body.append(group)
+    }
+  }
+
+  private openDiscardGitDialog(): void {
+    const context = this.state.gitContextMenu
+    if (!context || !this.state.repoPath || !this.state.projectValid || this.state.busy || this.state.git.busy) {
+      return
+    }
+    this.gitDiscardDialogFocusTarget = this.findGitFileFocusTarget(context.file.path)
+    this.closeGitContextMenu()
+    this.gitDiscardDialogFile = context.file
+    this.renderDiscardGitDialog()
+    queueMicrotask(() => {
+      if (this.gitDiscardDialogFile === context.file) {
+        this.element<HTMLButtonElement>('#cancel-discard-git').focus()
+      }
+    })
+  }
+
+  private closeDiscardGitDialog(): void {
+    if (!this.gitDiscardDialogFile) {
+      return
+    }
+    const focusTarget = this.gitDiscardDialogFocusTarget
+    this.gitDiscardDialogFile = null
+    this.gitDiscardDialogFocusTarget = null
+    this.renderDiscardGitDialog()
+    this.restoreGitDiscardFocus(focusTarget)
+  }
+
+  private confirmDiscardGitDialog(): void {
+    const file = this.gitDiscardDialogFile
+    if (!file || this.state.busy || this.state.git.busy) {
+      return
+    }
+    const focusTarget = this.gitDiscardDialogFocusTarget
+    this.gitDiscardDialogFile = null
+    this.gitDiscardDialogFocusTarget = null
+    this.renderDiscardGitDialog()
+    void this.discardGitChangesAfterConfirmation(file, focusTarget)
+  }
+
+  private renderDiscardGitDialog(): void {
+    const dialog = this.element<HTMLElement>('#discard-git-dialog')
+    const file = this.gitDiscardDialogFile
+    dialog.hidden = !file
+    if (!file) {
+      this.element<HTMLElement>('#discard-git-path').textContent = ''
+      this.element<HTMLElement>('#discard-git-message').textContent = ''
+      return
+    }
+    this.element<HTMLElement>('#discard-git-path').textContent = file.path
+    this.element<HTMLElement>('#discard-git-message').textContent = discardGitChangesWarningMessage()
+    this.element<HTMLButtonElement>('#confirm-discard-git').disabled = this.state.busy || this.state.git.busy
   }
 
   private renderContextMenu(): void {
@@ -3310,11 +4605,238 @@ export class LeetcoderApp {
     menu.style.left = `${Math.max(margin, Math.min(context.x, viewportWidth - width - margin))}px`
     menu.style.top = `${Math.max(margin, Math.min(context.y, viewportHeight - height - margin))}px`
     menu.hidden = false
-    // Keep the menu action compact. The confirmation dialog below contains
-    // the target filename, while the context menu only needs to expose the
-    // action itself.
+    // Keep the menu action labels compact. The confirmation dialog below
+    // contains the target filename, while the context menu exposes the
+    // available file operations.
+    this.element<HTMLElement>('#duplicate-file-label').textContent = 'Duplicate'
+    this.element<HTMLElement>('#rename-file-label').textContent = 'Rename'
     this.element<HTMLElement>('#delete-file-label').textContent = 'Delete'
+    this.element<HTMLButtonElement>('#duplicate-file-action').disabled = this.state.busy
+    this.element<HTMLButtonElement>('#rename-file-action').disabled = this.state.busy
     this.element<HTMLButtonElement>('#delete-file-action').disabled = this.state.busy
+  }
+
+  private renderGitContextMenu(): void {
+    const menu = this.element<HTMLElement>('#git-context-menu')
+    const context = this.state.gitContextMenu
+    const fileStillChanged = context
+      && this.state.git.files.some((file) => sameFilePath(file.path, context.file.path))
+    if (!context || !fileStillChanged) {
+      menu.hidden = true
+      return
+    }
+    const position = clampContextMenuPosition(
+      context.x,
+      context.y,
+      GIT_CONTEXT_MENU_WIDTH,
+      GIT_CONTEXT_MENU_HEIGHT,
+    )
+    menu.style.left = `${position.x}px`
+    menu.style.top = `${position.y}px`
+    menu.hidden = false
+    const disabled = this.state.busy || this.state.git.busy || this.state.git.loading
+    this.element<HTMLButtonElement>('#git-discard-action').disabled = disabled
+    this.element<HTMLButtonElement>('#git-show-file-action').disabled = disabled
+  }
+
+  private async showGitFileInManager(): Promise<void> {
+    const context = this.state.gitContextMenu
+    const repoPath = this.state.repoPath
+    if (!context || !repoPath || !this.state.projectValid || this.state.busy || this.state.git.busy) {
+      return
+    }
+    const method = (this.backend as unknown as GitBackendClient).showInFileManager
+    if (!method) {
+      this.closeGitContextMenu()
+      this.setMessage('Not available in this build', 'error')
+      return
+    }
+    const filePath = context.file.path
+    const repositoryGeneration = this.repositoryGeneration
+    const operationId = ++this.gitOperationId
+    this.closeGitContextMenu()
+    this.state.git.busy = true
+    this.renderAll()
+    try {
+      await method(repoPath, filePath)
+      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      this.setMessage(`Opened ${gitFileName(filePath)} in File Manager.`, 'success')
+    } catch (error) {
+      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        this.setMessage(`Could not show ${gitFileName(filePath)} in File Manager: ${errorMessage(error)}`, 'error')
+      }
+    } finally {
+      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        this.state.git.busy = false
+        this.renderAll()
+      }
+    }
+  }
+
+  private async discardGitChangesAfterConfirmation(
+    file: GitChangedFile,
+    focusTarget: HTMLElement | null,
+  ): Promise<void> {
+    const repoPath = this.state.repoPath
+    if (!repoPath || !this.state.projectValid || this.state.busy || this.state.git.busy) {
+      this.restoreGitDiscardFocus(focusTarget)
+      return
+    }
+    if (!this.state.git.files.some((entry) => sameFilePath(entry.path, file.path))) {
+      this.setMessage(`The Git change for ${gitFileName(file.path)} is no longer available.`, 'info')
+      this.restoreGitDiscardFocus(focusTarget)
+      return
+    }
+    const method = (this.backend as unknown as GitBackendClient).discardGitChanges
+    if (!method) {
+      this.setMessage('Not available in this build', 'error')
+      this.restoreGitDiscardFocus(focusTarget)
+      return
+    }
+    const filePath = file.path
+    const targetTab = this.openTabForPath(filePath)
+    const targetTabIndex = targetTab ? this.state.openTabs.indexOf(targetTab) : -1
+    const wasActive = targetTab?.id === this.state.activeTabId
+    const wasSelected = sameFilePath(this.state.selectedPath ?? '', filePath)
+    const removesFile = isGitNewFile(file.status)
+    const restoredPath = file.originalPath && !sameFilePath(file.originalPath, filePath)
+      ? file.originalPath
+      : null
+    const repositoryGeneration = this.repositoryGeneration
+    const operationId = ++this.gitOperationId
+    this.closeGitContextMenu()
+    this.state.busy = true
+    this.state.git.busy = true
+    this.gitDiscardInProgress = true
+    this.renderAll()
+    try {
+      // Flush the current editor before the destructive backend operation so
+      // the discard command always starts from a stable on-disk snapshot.
+      if (!(await this.flushPendingSave())
+        || !this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      // The flush above drains the current timer/run. Do not let a queued
+      // autosave write the pre-discard source back after Git restores it.
+      this.autosave.cancelPending()
+      await method(repoPath, filePath)
+      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+
+      let replacement: OpenFileTab | null = null
+      if (removesFile && targetTab) {
+        if (wasActive) {
+          replacement = this.removeOpenTab(targetTab.id)
+        } else {
+          this.state.openTabs = this.state.openTabs.filter((tab) => tab.id !== targetTab.id)
+        }
+      } else if (removesFile && wasSelected) {
+        this.resetCurrentFile()
+      }
+
+      if (!removesFile && wasSelected && !restoredPath) {
+        // A tracked file is restored in place. Reload it from disk so the
+        // editor cannot continue showing the discarded working-tree source.
+        const source = await this.backend.readProblemFile(repoPath, filePath)
+        if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+          return
+        }
+        this.state.selectedSource = source
+        this.state.savedSource = source
+        this.state.dirty = false
+        this.state.saveError = null
+        this.clearSavedFlash()
+        this.resetTestState()
+        this.suppressEditorChange = true
+        try {
+          this.editor.setValue(source)
+        } finally {
+          this.suppressEditorChange = false
+        }
+        this.element<HTMLElement>('#editor-host').dataset.savedSource = source
+      }
+
+      this.markGitStale()
+      await this.refreshFiles()
+      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      let restoredRename: ProblemFileEntry | null = null
+      if (restoredPath && !this.state.files.some((entry) => sameFilePath(entry.path, filePath))) {
+        restoredRename = findRestoredFileAfterGitRename(this.state.files, file)
+        if (restoredRename && targetTab) {
+          targetTab.path = restoredRename.path
+          targetTab.name = restoredRename.name
+          targetTab.packageSegment = restoredRename.packageSegment
+          if (!this.state.openTabs.includes(targetTab)) {
+            const insertionIndex = targetTabIndex < 0
+              ? this.state.openTabs.length
+              : Math.min(targetTabIndex, this.state.openTabs.length)
+            this.state.openTabs.splice(insertionIndex, 0, targetTab)
+          }
+          if (wasActive) {
+            this.state.activeTabId = targetTab.id
+          }
+        }
+      }
+      if (restoredRename && wasSelected) {
+        // The destination of a staged rename disappears after discard. Keep
+        // its existing tab identity, point it at the restored source path,
+        // and load the restored content into the active editor.
+        this.state.selectedPath = restoredRename.path
+        this.state.selectedFqcn = fqcnFromJavaPath(restoredRename.path)
+        const source = await this.backend.readProblemFile(repoPath, restoredRename.path)
+        if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+          return
+        }
+        this.state.selectedSource = source
+        this.state.savedSource = source
+        this.state.dirty = false
+        this.state.saveError = null
+        this.clearSavedFlash()
+        this.resetTestState()
+        this.suppressEditorChange = true
+        try {
+          this.editor.setValue(source)
+        } finally {
+          this.suppressEditorChange = false
+        }
+        this.element<HTMLElement>('#editor-host').dataset.savedSource = source
+      }
+      await this.refreshGitStatus(true)
+      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      if (wasActive && replacement) {
+        const replacementFile = this.state.files.find((entry) => sameFilePath(entry.path, replacement!.path))
+        if (replacementFile) {
+          await this.openFile(replacementFile)
+        }
+      }
+      this.setMessage(`Discarded changes to ${gitFileName(filePath)}.`, 'success')
+    } catch (error) {
+      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        // Refresh both views even when the backend reports an error: a Git
+        // command can have changed the worktree before surfacing its failure.
+        await this.refreshFiles()
+        await this.refreshGitStatus(true)
+        if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+          return
+        }
+        this.setMessage(`Could not discard changes to ${gitFileName(filePath)}: ${errorMessage(error)}`, 'error')
+      }
+    } finally {
+      this.gitDiscardInProgress = false
+      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        this.state.busy = false
+        this.state.git.busy = false
+        this.renderAll()
+      }
+      this.restoreGitDiscardFocus(focusTarget)
+    }
   }
 
   private async deleteContextMenuFile(): Promise<void> {
@@ -3334,40 +4856,228 @@ export class LeetcoderApp {
     }
     const file = context.file
     const repositoryGeneration = this.repositoryGeneration
-    const operationId = ++this.gitOperationId
+    const operationId = ++this.fileOperationId
     this.closeFileContextMenu()
     this.state.busy = true
     this.renderAll()
     try {
-      if (!(await this.flushPendingSave()) || !this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      if (!(await this.flushPendingSave()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
       await method(repoPath, file.path)
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
-      if (this.state.selectedPath === file.path) {
+      const targetTab = this.openTabForPath(file.path)
+      const wasActive = targetTab?.id === this.state.activeTabId
+      const replacement = targetTab ? this.removeOpenTab(targetTab.id) : null
+      if (wasActive && !targetTab) {
         this.resetCurrentFile()
       }
       this.markGitStale()
       await this.refreshFiles()
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         return
+      }
+      if (wasActive && replacement) {
+        const replacementFile = this.state.files.find((entry) => sameFilePath(entry.path, replacement.path))
+        if (replacementFile) {
+          await this.openFile(replacementFile)
+        }
       }
       this.setMessage(`Deleted ${file.name}.`, 'success')
     } catch (error) {
-      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         // A backend can report an error after the filesystem mutation has
         // already completed. Re-list files before reporting so the explorer
         // reflects the actual repository state.
         await this.refreshFiles()
-        if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
           return
         }
         this.setMessage(`Could not delete ${file.name}: ${errorMessage(error)}`, 'error')
       }
     } finally {
-      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        this.state.busy = false
+        this.renderAll()
+      }
+    }
+  }
+
+  private async duplicateContextMenuFile(): Promise<void> {
+    const context = this.state.contextMenu
+    const repoPath = this.state.repoPath
+    if (!context || !repoPath || !this.state.projectValid || this.state.busy) {
+      return
+    }
+    const method = (this.backend as unknown as FileManagementBackend).duplicateProblemFile
+    if (!method) {
+      this.closeFileContextMenu()
+      this.setMessage('Not available in this build', 'error')
+      return
+    }
+    const file = context.file
+    const existingPaths = new Set(this.state.files.map((entry) => entry.path))
+    const repositoryGeneration = this.repositoryGeneration
+    const operationId = ++this.fileOperationId
+    this.closeFileContextMenu()
+    this.state.busy = true
+    this.renderAll()
+    try {
+      if (!(await this.flushPendingSave()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      const result = await method(repoPath, file.path)
+      if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      this.markGitStale()
+      if (!(await this.refreshFiles()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      const duplicate = findFileAfterDuplicate(
+        this.state.files,
+        existingPaths,
+        file,
+        result,
+      )
+      if (duplicate) {
+        // Open the actual newly-created entry so the editor, selected path,
+        // and test FQCN all follow the duplicate immediately.
+        await this.openFile(duplicate)
+        if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+          return
+        }
+      }
+      this.setMessage(
+        duplicate ? `Duplicated ${file.name} as ${duplicate.name}.` : `Duplicated ${file.name}.`,
+        'success',
+      )
+    } catch (error) {
+      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        // Re-list after a failed mutation because a backend can report an
+        // error after the filesystem operation has already completed.
+        await this.refreshFiles()
+        if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+          return
+        }
+        this.setMessage(`Could not duplicate ${file.name}: ${errorMessage(error)}`, 'error')
+      }
+    } finally {
+      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        this.state.busy = false
+        this.renderAll()
+      }
+    }
+  }
+
+  private openRenameDialog(): void {
+    const context = this.state.contextMenu
+    if (!context || this.state.busy) {
+      return
+    }
+    this.renameTargetFile = context.file
+    this.closeFileContextMenu()
+    const dialog = this.element<HTMLElement>('#rename-file-dialog')
+    const input = this.element<HTMLInputElement>('#rename-file-input')
+    input.value = context.file.name.replace(/\.java$/i, '')
+    dialog.hidden = false
+    queueMicrotask(() => {
+      input.focus()
+      input.select()
+    })
+  }
+
+  private closeRenameDialog(): void {
+    if (!this.renameTargetFile) {
+      return
+    }
+    this.renameTargetFile = null
+    this.element<HTMLElement>('#rename-file-dialog').hidden = true
+  }
+
+  private async renameDialogFile(): Promise<void> {
+    const file = this.renameTargetFile
+    const repoPath = this.state.repoPath
+    if (!file || !repoPath || !this.state.projectValid || this.state.busy) {
+      return
+    }
+    const method = (this.backend as unknown as FileManagementBackend).renameProblemFile
+    if (!method) {
+      this.closeRenameDialog()
+      this.setMessage('Not available in this build', 'error')
+      return
+    }
+    const targetTab = this.openTabForPath(file.path)
+    const wasSelected = targetTab?.id === this.state.activeTabId
+    const promptedName = this.element<HTMLInputElement>('#rename-file-input').value
+    const newName = normalizeJavaFileName(promptedName)
+    if (!newName) {
+      this.setMessage('Enter a valid Java filename.', 'error')
+      this.element<HTMLInputElement>('#rename-file-input').focus()
+      return
+    }
+    if (newName === file.name) {
+      this.closeRenameDialog()
+      return
+    }
+    const existingPaths = new Set(this.state.files.map((entry) => entry.path))
+    const requestedPath = joinFilePath(gitDirectoryPath(file.path), newName)
+    if (existingPaths.has(requestedPath)) {
+      this.setMessage(`A file named ${newName} already exists.`, 'error')
+      this.element<HTMLInputElement>('#rename-file-input').focus()
+      return
+    }
+    const repositoryGeneration = this.repositoryGeneration
+    const operationId = ++this.fileOperationId
+    this.closeRenameDialog()
+    this.state.busy = true
+    this.renderAll()
+    try {
+      if (!(await this.flushPendingSave()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      const result = await method(repoPath, file.path, newName)
+      if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        return
+      }
+      const requestedRenamedPath = fileMutationResultPath(result, file.path) ?? requestedPath
+      if (targetTab) {
+        targetTab.path = requestedRenamedPath
+        targetTab.name = newName
+        targetTab.packageSegment = file.packageSegment
+      }
+      this.markGitStale()
+      const refreshed = await this.refreshFiles()
+      if (!refreshed || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        if (targetTab && !refreshed) {
+          targetTab.path = file.path
+          targetTab.name = file.name
+          targetTab.packageSegment = file.packageSegment
+        }
+        return
+      }
+      const renamed = findFileAfterRename(this.state.files, file, newName, result)
+      if (targetTab && renamed) {
+        targetTab.path = renamed.path
+        targetTab.name = renamed.name
+        targetTab.packageSegment = renamed.packageSegment
+      }
+      if (wasSelected && renamed) {
+        await this.openFile(renamed)
+      }
+      this.setMessage(`Renamed ${file.name} to ${renamed?.name ?? newName}.`, 'success')
+    } catch (error) {
+      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+        await this.refreshFiles()
+        if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
+          return
+        }
+        this.setMessage(`Could not rename ${file.name}: ${errorMessage(error)}`, 'error')
+      }
+    } finally {
+      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         this.state.busy = false
         this.renderAll()
       }
@@ -3385,7 +5095,10 @@ export class LeetcoderApp {
       return
     }
     const scroll = (): void => {
-      active.scrollIntoView?.({ block: 'nearest' })
+      // Only the expanded group's list scrolls. Centering keeps a file opened
+      // from Today or another action in context while the browser naturally
+      // clamps the first and last rows to the list bounds.
+      active.scrollIntoView?.({ block: 'center' })
     }
     if (typeof window.requestAnimationFrame === 'function') {
       window.requestAnimationFrame(scroll)
@@ -3394,9 +5107,24 @@ export class LeetcoderApp {
     }
   }
 
+  private revealSelectedFileInExplorer(): void {
+    const selected = this.state.files.find((file) => sameFilePath(file.path, this.state.selectedPath ?? ''))
+    if (!selected) {
+      return
+    }
+    const groupIsOnlyExpanded = this.expandedGroups.size === 1
+      && this.expandedGroups.has(selected.packageSegment)
+    if (!groupIsOnlyExpanded) {
+      this.setExpandedGroup(selected.packageSegment, true)
+      this.renderFiles()
+      return
+    }
+    this.scrollActiveFileIntoView()
+  }
+
   private renderFileHeading(): void {
     const selectedFile = this.element<HTMLElement>('#selected-file')
-    const file = this.state.files.find((entry) => entry.path === this.state.selectedPath)
+    const file = this.state.files.find((entry) => sameFilePath(entry.path, this.state.selectedPath ?? ''))
     selectedFile.textContent = file?.name ?? ''
     const saveStatus = this.element<HTMLElement>('#save-status')
     saveStatus.className = 'save-status'
@@ -3419,7 +5147,7 @@ export class LeetcoderApp {
       dot.className = 'save-dot'
       dot.setAttribute('aria-hidden', 'true')
       saveStatus.append(dot, document.createTextNode('Unsaved'))
-      saveStatus.title = `Saves automatically · ${isMacPlatform() ? '⌘S' : 'Ctrl+S'}`
+      saveStatus.title = `Saves automatically · ${shortcutLabel('save', currentIsMacPlatform())}`
     } else if (this.savedFlash) {
       saveStatus.classList.add('is-saved')
       saveStatus.textContent = 'Saved'
@@ -3433,9 +5161,6 @@ export class LeetcoderApp {
     const body = this.element<HTMLElement>('#test-body')
     const liveRun = this.state.testRun?.status === 'running' ? this.state.testRun : null
     const result = this.state.testResult ?? (liveRun ? liveSnapshotResult(liveRun) : null)
-    // Live streaming rebuilds the panel each frame; keep a manually opened
-    // Logs disclosure open across those rebuilds.
-    const previousLogsOpen = body.querySelector<HTMLDetailsElement>('.raw-logs')?.open ?? false
     statusRow.className = 'test-status-row'
     statusRow.removeAttribute('title')
     statusRow.innerHTML = ''
@@ -3447,8 +5172,17 @@ export class LeetcoderApp {
       const idle = document.createElement('span')
       idle.className = 'test-idle-copy'
       const kbd = document.createElement('kbd')
-      kbd.textContent = isMacPlatform() ? '⌘R' : 'Ctrl+R'
-      idle.append(document.createTextNode('Run '), kbd, document.createTextNode(' to test the current file'))
+      const selectedKbd = document.createElement('kbd')
+      const mac = currentIsMacPlatform()
+      kbd.textContent = shortcutLabel('run-test', mac)
+      selectedKbd.textContent = shortcutLabel('run-test-at-cursor', mac)
+      idle.append(
+        document.createTextNode('Run '),
+        kbd,
+        document.createTextNode(' to test the current file · '),
+        selectedKbd,
+        document.createTextNode(' for the selected test'),
+      )
       statusRow.append(idle)
       this.renderedTestResult = null
       return
@@ -3527,6 +5261,13 @@ export class LeetcoderApp {
         statusRow.title = presentation.failureMessage
       }
     }
+    const targetedMethod = this.state.testRun?.testMethod
+    if (targetedMethod) {
+      const target = document.createElement('span')
+      target.className = 'test-run-target'
+      target.textContent = `Only ${targetedMethod}()`
+      statusRow.append(target)
+    }
 
     // Diagnostic cards: errors inline (compile and runner failures alike —
     // the runner message carries JDK guidance), warnings behind a disclosure.
@@ -3574,10 +5315,26 @@ export class LeetcoderApp {
       }
     }
 
+    const visibleTests = defaultVisibleTests(result.tests, isRunning)
+    const selectedTest = visibleTests.find((test) => testResultKey(test) === this.state.selectedTestKey) ?? null
+    // A refreshed JUnit report can legitimately omit a test that was visible
+    // during live progress. Fall back to the run item rather than leaving an
+    // option marked selected with an empty detail pane.
+    if (this.state.selectedTestKey !== null && selectedTest === null) {
+      this.state.selectedTestKey = null
+    }
+
+    const workspace = document.createElement('div')
+    workspace.className = 'test-results-workspace'
+
     const list = document.createElement('div')
-    list.className = 'test-list'
-    for (const test of defaultVisibleTests(result.tests, isRunning)) {
-      list.append(this.renderTestCase(test))
+    list.className = 'test-list test-results-tree'
+    list.setAttribute('role', 'listbox')
+    list.setAttribute('aria-label', 'Tests')
+    list.setAttribute('aria-controls', 'test-detail-pane')
+    list.append(this.renderTestTreeItem(null, result, isRunning))
+    for (const test of visibleTests) {
+      list.append(this.renderTestTreeItem(test, result, isRunning))
     }
     if (isRunning && result.tests.length === 0) {
       const empty = document.createElement('div')
@@ -3590,145 +5347,232 @@ export class LeetcoderApp {
       empty.textContent = 'No tests were reported.'
       list.append(empty)
     }
-    if (list.childElementCount > 0) {
-      body.append(list)
-    }
 
-    const stdoutText = stripAnsi(result.stdout ?? '')
-    const stderrText = stripAnsi(result.stderr ?? '')
-    if (stdoutText.trim().length > 0 || stderrText.trim().length > 0) {
-      const logs = document.createElement('details')
-      logs.className = 'raw-logs'
-      logs.open = previousLogsOpen
-      const heading = document.createElement('summary')
-      heading.textContent = 'Logs'
-      logs.append(heading)
-      for (const [label, text] of [['stdout', stdoutText], ['stderr', stderrText]] as const) {
-        if (text.trim().length === 0) {
-          continue
-        }
-        const pane = document.createElement('div')
-        pane.className = `log-pane log-${label}`
-        const paneLabel = document.createElement('span')
-        paneLabel.className = 'log-label'
-        paneLabel.textContent = label
-        const content = document.createElement('pre')
-        content.className = 'log-content'
-        content.textContent = text
-        pane.append(paneLabel, content)
-        logs.append(pane)
+    const detailPane = document.createElement('section')
+    detailPane.id = 'test-detail-pane'
+    detailPane.className = 'test-detail-pane'
+    detailPane.setAttribute('role', 'region')
+    detailPane.setAttribute('aria-live', 'polite')
+    if (selectedTest) {
+      detailPane.setAttribute('aria-label', `Details for ${selectedTest.displayName || selectedTest.name}`)
+      const heading = document.createElement('div')
+      heading.className = 'test-detail-heading'
+      const title = document.createElement('h3')
+      title.className = 'test-detail-title'
+      title.textContent = selectedTest.displayName || selectedTest.name
+      heading.append(this.statusIcon(selectedTest.status), title)
+      if (selectedTest.durationMs !== null && selectedTest.durationMs !== undefined) {
+        const duration = document.createElement('span')
+        duration.className = 'test-duration'
+        duration.textContent = formatDuration(selectedTest.durationMs)
+        heading.append(duration)
       }
-      body.append(logs)
+      detailPane.append(heading)
+      if (selectedTest.className) {
+        const className = document.createElement('p')
+        className.className = 'test-detail-class'
+        className.textContent = selectedTest.className
+        detailPane.append(className)
+      }
+      detailPane.append(this.renderTestCase(selectedTest))
+    } else {
+      detailPane.setAttribute('aria-label', 'Test run output')
+      const heading = document.createElement('div')
+      heading.className = 'test-detail-heading'
+      const rootStatus = isRunning ? 'running' : result.success ? 'passed' : phase === 'noTests' ? 'skipped' : 'failed'
+      heading.append(this.statusIcon(rootStatus))
+      const title = document.createElement('h3')
+      title.className = 'test-detail-title'
+      title.textContent = isRunning ? 'Test run' : 'Test run output'
+      heading.append(title)
+      detailPane.append(heading)
+      const summary = document.createElement('p')
+      summary.className = 'test-detail-class'
+      summary.textContent = testRunFacts(result.summary).join(' · ') || liveRunPhaseLabel(result.phase)
+      detailPane.append(summary)
+      const output = this.renderOutputConsole(result.stdout, result.stderr)
+      if (output) {
+        detailPane.append(output)
+      }
+    }
+    workspace.append(list, detailPane)
+    body.append(workspace)
+  }
+
+  /** Render one selectable row in the left-hand IntelliJ-style test tree. */
+  private renderTestTreeItem(
+    test: TestCaseResult | null,
+    result: TestResult,
+    isRunning: boolean,
+  ): HTMLButtonElement {
+    const item = document.createElement('button')
+    item.type = 'button'
+    item.className = test
+      ? `test-tree-item test-row-${test.status}`
+      : 'test-tree-item test-tree-root'
+    item.setAttribute('role', 'option')
+    const key = test ? testResultKey(test) : TEST_RUN_ROOT_KEY
+    const selected = test
+      ? this.state.selectedTestKey === key
+      : this.state.selectedTestKey === null
+    item.dataset.testKey = key
+    item.setAttribute('aria-selected', String(selected))
+    // Roving tab stop keeps keyboard navigation inside the test list while
+    // allowing arrow keys to move through every result.
+    item.tabIndex = selected ? 0 : -1
+    const status = test
+      ? test.status
+      : isRunning
+        ? 'running'
+        : result.success
+          ? 'passed'
+          : normalizeTestPhase(result.phase) === 'noTests'
+            ? 'skipped'
+            : 'failed'
+    item.append(this.statusIcon(status))
+    const name = document.createElement('span')
+    name.className = 'test-name'
+    name.textContent = test ? (test.displayName || test.name) : 'Test run'
+    item.append(name)
+    const facts = document.createElement('span')
+    facts.className = 'test-tree-facts'
+    if (test) {
+      if (test.durationMs !== null && test.durationMs !== undefined) {
+        facts.textContent = formatDuration(test.durationMs)
+      }
+      item.setAttribute('aria-label', `${test.displayName || test.name}, ${testStatusLabel(test.status)}${facts.textContent ? `, ${facts.textContent}` : ''}`)
+      if (test.className) {
+        item.title = test.className
+      }
+    } else {
+      facts.textContent = testRunFacts(result.summary).join(' · ')
+      item.setAttribute('aria-label', `Test run, ${testStatusLabel(status)}${facts.textContent ? `, ${facts.textContent}` : ''}`)
+    }
+    item.append(facts)
+    item.addEventListener('click', () => {
+      this.selectTestResult(key, true)
+    })
+    item.addEventListener('keydown', (event) => {
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+        return
+      }
+      const options = Array.from(item.parentElement?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])
+      const currentIndex = options.indexOf(item)
+      if (currentIndex < 0 || options.length === 0) {
+        return
+      }
+      const nextIndex = event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? options.length - 1
+          : Math.max(0, Math.min(
+            options.length - 1,
+            currentIndex + (event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1),
+          ))
+      event.preventDefault()
+      const nextKey = options[nextIndex].dataset.testKey ?? TEST_RUN_ROOT_KEY
+      this.selectTestResult(nextKey, true)
+    })
+    return item
+  }
+
+  private selectTestResult(key: string, focus = false): void {
+    const nextKey = key === TEST_RUN_ROOT_KEY ? null : key
+    if (this.state.selectedTestKey === nextKey) {
+      return
+    }
+    this.state.selectedTestKey = nextKey
+    this.renderResult()
+    if (focus) {
+      const item = Array.from(this.root.querySelectorAll<HTMLButtonElement>('.test-tree-item'))
+        .find((entry) => entry.dataset.testKey === key)
+      item?.focus()
     }
   }
 
+  /** Render assertion metadata, stack details, and the selected test console. */
   private renderTestCase(test: TestCaseResult): HTMLElement {
     const failed = test.status === 'failed' || test.status === 'error'
-    const hasOutput = testCaseHasOutput(test)
-    const hasDetail = failed || Boolean(
-      test.message || test.details || test.expected || test.actual || (test.file && test.line),
-    ) || hasOutput
-    const row = hasDetail ? document.createElement('details') : document.createElement('div')
-    row.className = `test-row test-row-${test.status}`
+    const detail = document.createElement('div')
+    detail.className = `test-detail-content test-row-${test.status}`
+    const failureSummary = conciseTestFailureMessage(test)
+    if (failureSummary) {
+      const message = document.createElement('p')
+      message.className = 'failure-message'
+      message.textContent = failureSummary
+      detail.append(message)
+    }
+    const hasExpected = test.expected !== null && test.expected !== undefined
+    const hasActual = test.actual !== null && test.actual !== undefined
+    const diff = hasExpected && hasActual ? charDiffSegments(test.expected!, test.actual!) : null
+    if (hasExpected) {
+      detail.append(renderComparisonValue(
+        'Expected',
+        test.expected!,
+        'expected-value',
+        diff ? { prefix: diff.prefix, mid: diff.expectedMid, suffix: diff.suffix } : null,
+      ))
+    }
+    if (hasActual) {
+      detail.append(renderComparisonValue(
+        'Actual',
+        test.actual!,
+        'actual-value',
+        diff ? { prefix: diff.prefix, mid: diff.actualMid, suffix: diff.suffix } : null,
+      ))
+    }
+    if (test.file && validSourceLine(test.line) !== null) {
+      detail.append(this.renderLocation(test.file, validSourceLine(test.line)!, test.column))
+    }
+    if (test.details) {
+      const stack = document.createElement('details')
+      stack.className = 'test-full-stack'
+      stack.open = failed
+      const stackSummary = document.createElement('summary')
+      stackSummary.textContent = 'Stack trace'
+      stack.append(stackSummary)
+      const relevantFrames = relevantTestStackFrames(test.details)
+      if (relevantFrames.length > 0) {
+        const userFrames = document.createElement('pre')
+        userFrames.className = 'test-user-frames'
+        userFrames.textContent = relevantFrames.join('\n')
+        stack.append(userFrames)
+      }
+      const stacktrace = document.createElement('pre')
+      stacktrace.className = 'test-stacktrace'
+      stacktrace.textContent = test.details
+      stack.append(stacktrace)
+      detail.append(stack)
+    }
+    const output = this.renderOutputConsole(test.stdout, test.stderr)
+    if (output) {
+      detail.append(output)
+    }
+    return detail
+  }
 
-    const summary = document.createElement(hasDetail ? 'summary' : 'div')
-    summary.className = 'test-row-summary'
-    summary.append(this.statusIcon(test.status))
-    const name = document.createElement('span')
-    name.className = 'test-name'
-    name.textContent = test.displayName || test.name
-    summary.append(name)
-    if (test.durationMs !== null && test.durationMs !== undefined) {
-      const duration = document.createElement('span')
-      duration.className = 'test-duration'
-      duration.textContent = formatDuration(test.durationMs)
-      summary.append(duration)
+  private renderOutputConsole(
+    stdout: string | null | undefined,
+    stderr: string | null | undefined,
+  ): HTMLElement | null {
+    const segments = testOutputSegments(stdout, stderr)
+    if (segments.length === 0) {
+      return null
     }
-    row.append(summary)
 
-    if (failed && row instanceof HTMLDetailsElement) {
-      row.open = true
+    const output = document.createElement('section')
+    output.className = 'test-console'
+    output.setAttribute('aria-label', 'Console output')
+    const content = document.createElement('pre')
+    content.className = 'test-output-content'
+    for (const segment of segments) {
+      const stream = document.createElement('span')
+      stream.className = `test-output-stream test-output-${segment.stream}`
+      stream.textContent = segment.text
+      content.append(stream)
     }
-    if (hasDetail && row instanceof HTMLDetailsElement) {
-      const detail = document.createElement('div')
-      detail.className = 'test-failure-detail'
-      const failureSummary = conciseTestFailureMessage(test)
-      if (failureSummary) {
-        const message = document.createElement('p')
-        message.className = 'failure-message'
-        message.textContent = failureSummary
-        detail.append(message)
-      }
-      const hasExpected = test.expected !== null && test.expected !== undefined
-      const hasActual = test.actual !== null && test.actual !== undefined
-      const diff = hasExpected && hasActual ? charDiffSegments(test.expected!, test.actual!) : null
-      if (hasExpected) {
-        detail.append(renderComparisonValue(
-          'Expected',
-          test.expected!,
-          'expected-value',
-          diff ? { prefix: diff.prefix, mid: diff.expectedMid, suffix: diff.suffix } : null,
-        ))
-      }
-      if (hasActual) {
-        detail.append(renderComparisonValue(
-          'Actual',
-          test.actual!,
-          'actual-value',
-          diff ? { prefix: diff.prefix, mid: diff.actualMid, suffix: diff.suffix } : null,
-        ))
-      }
-      if (test.file && validSourceLine(test.line) !== null) {
-        detail.append(this.renderLocation(test.file, validSourceLine(test.line)!, test.column))
-      }
-      if (test.details) {
-        const stack = document.createElement('details')
-        stack.className = 'test-full-stack'
-        const stackSummary = document.createElement('summary')
-        stackSummary.textContent = 'Stack trace'
-        stack.append(stackSummary)
-        const relevantFrames = relevantTestStackFrames(test.details)
-        if (relevantFrames.length > 0) {
-          const userFrames = document.createElement('pre')
-          userFrames.className = 'test-user-frames'
-          userFrames.textContent = relevantFrames.join('\n')
-          stack.append(userFrames)
-        }
-        const stacktrace = document.createElement('pre')
-        stacktrace.className = 'test-stacktrace'
-        stacktrace.textContent = test.details
-        stack.append(stacktrace)
-        detail.append(stack)
-      }
-      if (hasOutput) {
-        const outputDetails = document.createElement('details')
-        outputDetails.className = 'test-output-details'
-        const outputSummary = document.createElement('summary')
-        outputSummary.textContent = 'Output'
-        outputDetails.append(outputSummary)
-        const outputGrid = document.createElement('div')
-        outputGrid.className = 'test-output'
-        for (const [label, value] of [['stdout', test.stdout], ['stderr', test.stderr]] as const) {
-          if (!value) {
-            continue
-          }
-          const pane = document.createElement('div')
-          pane.className = `test-output-pane test-output-${label}`
-          const outputLabel = document.createElement('span')
-          outputLabel.className = 'test-output-label'
-          outputLabel.textContent = label
-          const output = document.createElement('pre')
-          output.className = 'test-output-content'
-          output.textContent = stripAnsi(value)
-          pane.append(outputLabel, output)
-          outputGrid.append(pane)
-        }
-        outputDetails.append(outputGrid)
-        detail.append(outputDetails)
-      }
-      row.append(detail)
-    }
-    return row
+    output.append(content)
+    return output
   }
 
   private renderDiagnostic(diagnostic: TestDiagnostic): HTMLElement {
@@ -3879,15 +5723,7 @@ function fqcnFromJavaPath(path: string): string | null {
 }
 
 async function defaultDirectoryPicker(): Promise<string | null> {
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    title: 'Select your leetcoder repository',
-  })
-  if (Array.isArray(selected)) {
-    return selected[0] ?? null
-  }
-  return selected
+  return tauriInvoke<string | null>('choose_repository')
 }
 
 function safeStorage(): Storage | undefined {
@@ -3906,11 +5742,16 @@ function createGroupDot(groupKey: ProblemFileEntry['packageSegment']): HTMLEleme
   return dot
 }
 
-function isMacPlatform(): boolean {
+/** Detect Apple platforms from explicit navigator values without reading globals. */
+export function isMacPlatform(platform: string, userAgent = ''): boolean {
+  return /Mac|iPhone|iPad|iPod/i.test(`${platform} ${userAgent}`)
+}
+
+function currentIsMacPlatform(): boolean {
   if (typeof navigator === 'undefined') {
     return false
   }
-  return /Mac|iPhone|iPad|iPod/i.test(`${navigator.platform} ${navigator.userAgent}`)
+  return isMacPlatform(navigator.platform, navigator.userAgent)
 }
 
 function formatDuration(durationMs: number): string {
@@ -4121,11 +5962,171 @@ export function deleteFileConfirmationMessage(fileName: string): string {
   return `Delete ${fileName}?\n\nThis cannot be undone.`
 }
 
+/**
+ * Produces the next collision-free duplicate name used by the file explorer.
+ * Numeric suffixes are appended immediately before the extension, matching
+ * the repository's `Q123Problem2.java`, `Q123Problem3.java` convention.
+ */
+export function duplicateFileName(fileName: string, existingNames: Iterable<string> = []): string {
+  const extensionMatch = fileName.match(/(\.[^.]+)$/)
+  const extension = extensionMatch?.[1] ?? ''
+  const stem = extension ? fileName.slice(0, -extension.length) : fileName
+  const occupied = new Set([...existingNames].map((name) => name.toLocaleLowerCase()))
+  let suffix = 2
+  let candidate = `${stem}${suffix}${extension}`
+  while (occupied.has(candidate.toLocaleLowerCase())) {
+    suffix += 1
+    candidate = `${stem}${suffix}${extension}`
+  }
+  return candidate
+}
+
+/** Return a safe Java basename, adding `.java` when the user omits it. */
+export function normalizeJavaFileName(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed === '.' || trimmed === '..' || /[\\/]/.test(trimmed)) {
+    return null
+  }
+  const withExtension = /\.java$/i.test(trimmed) ? trimmed : `${trimmed}.java`
+  if (!/^[^<>:"|?*\u0000-\u001f]+\.java$/i.test(withExtension)) {
+    return null
+  }
+  return withExtension
+}
+
+function joinFilePath(directory: string, name: string): string {
+  return directory ? `${directory.replace(/[\\/]$/, '')}/${name}` : name
+}
+
+/**
+ * Backends can return a path, a file DTO, or a wrapper around either. Keep the
+ * UI tolerant while the native bridge rolls out the file-operation commands.
+ */
+function fileMutationResultPath(value: unknown, originalPath: string): string | null {
+  const candidate = fileMutationResultString(value, ['path', 'newPath', 'new_path', 'filePath', 'file_path', 'relativePath', 'relative_path'])
+    ?? fileMutationResultString(value, ['name', 'fileName', 'file_name', 'newName', 'new_name'])
+  if (!candidate) {
+    return null
+  }
+  if (/[\\/]/.test(candidate)) {
+    return candidate.replace(/\\/g, '/').replace(/^\.\//, '')
+  }
+  return joinFilePath(gitDirectoryPath(originalPath), candidate)
+}
+
+function fileMutationResultContent(value: unknown): string | null {
+  if (!isRecordValue(value)) {
+    return null
+  }
+  for (const key of ['content', 'source']) {
+    if (typeof value[key] === 'string') {
+      return value[key]
+    }
+  }
+  for (const key of ['file', 'entry', 'result', 'renamed']) {
+    const content = fileMutationResultContent(value[key])
+    if (content !== null) {
+      return content
+    }
+  }
+  return null
+}
+
+function fileMutationResultString(value: unknown, keys: string[]): string | null {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    // A duplicate response may be the source text. Only treat strings that
+    // look like paths or Java basenames as operation results.
+    return /\.java$/i.test(value.trim()) || /[\\/]/.test(value.trim()) ? value.trim() : null
+  }
+  if (!isRecordValue(value)) {
+    return null
+  }
+  for (const key of keys) {
+    const result = fileMutationResultString(value[key], keys)
+    if (result) {
+      return result
+    }
+  }
+  for (const nestedKey of ['file', 'entry', 'result', 'created', 'renamed', 'duplicate']) {
+    const result = fileMutationResultString(value[nestedKey], keys)
+    if (result) {
+      return result
+    }
+  }
+  return null
+}
+
+export function findFileAfterDuplicate(
+  files: ProblemFileEntry[],
+  existingPaths: Set<string>,
+  original: ProblemFileEntry,
+  result: unknown,
+): ProblemFileEntry | null {
+  const resultPath = fileMutationResultPath(result, original.path)
+  const exact = resultPath
+    ? files.find((file) => normalizeSourcePath(file.path) === normalizeSourcePath(resultPath))
+    : null
+  if (exact && exact.path !== original.path) {
+    return exact
+  }
+  const siblingNames = files
+    .filter((file) => gitDirectoryPath(file.path) === gitDirectoryPath(original.path))
+    .map((file) => file.name)
+  const fallbackName = duplicateFileName(original.name, siblingNames)
+  const fallbackPath = joinFilePath(gitDirectoryPath(original.path), fallbackName)
+  return files.find((file) => !existingPaths.has(file.path) && file.path === fallbackPath)
+    ?? files.find((file) => !existingPaths.has(file.path)
+      && gitDirectoryPath(file.path) === gitDirectoryPath(original.path)
+      && file.name !== original.name
+      && file.name.toLocaleLowerCase().startsWith(original.name.replace(/\.java$/i, '').toLocaleLowerCase()))
+    ?? null
+}
+
+export function findRestoredFileAfterGitRename(
+  files: ProblemFileEntry[],
+  change: Pick<GitChangedFile, 'path' | 'originalPath'>,
+): ProblemFileEntry | null {
+  const originalPath = change.originalPath?.trim()
+  if (!originalPath || sameFilePath(originalPath, change.path)) {
+    return null
+  }
+  return files.find((file) => sameFilePath(file.path, originalPath)) ?? null
+}
+
+function findFileAfterRename(
+  files: ProblemFileEntry[],
+  original: ProblemFileEntry,
+  newName: string,
+  result: unknown,
+): ProblemFileEntry | null {
+  const resultPath = fileMutationResultPath(result, original.path)
+  const requestedPath = joinFilePath(gitDirectoryPath(original.path), newName)
+  return files.find((file) => resultPath && normalizeSourcePath(file.path) === normalizeSourcePath(resultPath))
+    ?? files.find((file) => normalizeSourcePath(file.path) === normalizeSourcePath(requestedPath))
+    ?? files.find((file) => file.path !== original.path
+      && gitDirectoryPath(file.path) === gitDirectoryPath(original.path)
+      && file.name.toLocaleLowerCase() === newName.toLocaleLowerCase())
+    ?? null
+}
+
 function confirmDeleteFile(fileName: string): boolean {
   if (typeof window === 'undefined' || typeof window.confirm !== 'function') {
     return false
   }
   return window.confirm(deleteFileConfirmationMessage(fileName))
+}
+
+export function discardGitChangesConfirmationMessage(filePath: string): string {
+  return `Discard changes to ${filePath}?\n\n${discardGitChangesWarningMessage()}`
+}
+
+export function discardGitChangesWarningMessage(): string {
+  return 'This permanently discards all staged and unstaged changes. Untracked/new files will be deleted. This cannot be undone.'
+}
+
+function isGitNewFile(status: string): boolean {
+  const normalized = normalizeGitStatusLabel(status)
+  return normalized === 'added' || normalized === 'untracked'
 }
 
 function renderUnifiedDiff(diff: string): HTMLElement {
@@ -4168,6 +6169,27 @@ export function clampBottomPanelHeight(value: number, viewportHeight = windowHei
   return Math.round(Math.min(maximum, Math.max(MIN_BOTTOM_PANEL_HEIGHT, candidate)))
 }
 
+export function clampContextMenuPosition(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  viewportWidth = typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 1000,
+  viewportHeight = windowHeight(),
+  margin = VIEWPORT_MARGIN,
+): { x: number; y: number } {
+  const safeX = Number.isFinite(x) ? x : margin
+  const safeY = Number.isFinite(y) ? y : margin
+  const safeWidth = Number.isFinite(width) && width > 0 ? width : 0
+  const safeHeight = Number.isFinite(height) && height > 0 ? height : 0
+  const safeViewportWidth = Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1000
+  const safeViewportHeight = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 800
+  return {
+    x: Math.max(margin, Math.min(safeX, safeViewportWidth - safeWidth - margin)),
+    y: Math.max(margin, Math.min(safeY, safeViewportHeight - safeHeight - margin)),
+  }
+}
+
 export function clampGitFileListWidth(value: number, availableWidth = 900): number {
   const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 900
   const maximum = maxGitFileListWidth(usableWidth)
@@ -4175,9 +6197,44 @@ export function clampGitFileListWidth(value: number, availableWidth = 900): numb
   return Math.round(Math.min(maximum, Math.max(MIN_GIT_FILE_LIST_WIDTH, candidate)))
 }
 
+/** Keep the resizable problem-file pane usable alongside the editor. */
+export function clampSidebarWidth(value: number, availableWidth = 1000): number {
+  const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 1000
+  const maximum = maxSidebarWidth(usableWidth)
+  const candidate = Number.isNaN(value) ? DEFAULT_SIDEBAR_WIDTH : value
+  return Math.round(Math.min(maximum, Math.max(MIN_SIDEBAR_WIDTH, candidate)))
+}
+
+/** Keep a visible editor area while resizing the open problem description. */
+export function clampDailyDescriptionHeight(value: number, availableHeight = 800): number {
+  const usableHeight = Number.isFinite(availableHeight) && availableHeight > 0 ? availableHeight : 800
+  const maximum = maxDailyDescriptionHeight(usableHeight)
+  const candidate = Number.isNaN(value) ? DEFAULT_DAILY_DESCRIPTION_HEIGHT : value
+  return Math.round(Math.min(maximum, Math.max(MIN_DAILY_DESCRIPTION_HEIGHT, candidate)))
+}
+
 function maxGitFileListWidth(availableWidth: number): number {
   const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 900
   return Math.max(MIN_GIT_FILE_LIST_WIDTH, Math.round(usableWidth - MIN_GIT_DIFF_WIDTH - GIT_SPLITTER_WIDTH - GIT_WORKSPACE_GAP))
+}
+
+function maxSidebarWidth(availableWidth: number): number {
+  const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 1000
+  return Math.max(
+    MIN_SIDEBAR_WIDTH,
+    Math.min(MAX_SIDEBAR_WIDTH, Math.round(usableWidth - MIN_EDITOR_WIDTH - SIDEBAR_SPLITTER_WIDTH)),
+  )
+}
+
+function maxDailyDescriptionHeight(availableHeight: number): number {
+  const usableHeight = Number.isFinite(availableHeight) && availableHeight > 0 ? availableHeight : 800
+  return Math.max(
+    MIN_DAILY_DESCRIPTION_HEIGHT,
+    Math.min(
+      MAX_DAILY_DESCRIPTION_HEIGHT,
+      Math.round(usableHeight - MIN_CODE_CARD_HEIGHT - DAILY_DESCRIPTION_LAYOUT_OVERHEAD),
+    ),
+  )
 }
 
 function maxBottomPanelHeight(): number {
@@ -4194,6 +6251,20 @@ function readGitFileListWidth(storage: Storage | undefined): number {
   const value = storage?.getItem(GIT_FILE_LIST_WIDTH_KEY)
   const parsed = value ? Number(value) : DEFAULT_GIT_FILE_LIST_WIDTH
   return clampGitFileListWidth(Number.isFinite(parsed) ? parsed : DEFAULT_GIT_FILE_LIST_WIDTH)
+}
+
+function readSidebarWidth(storage: Storage | undefined): number {
+  const value = storage?.getItem(SIDEBAR_WIDTH_KEY)
+  const parsed = value ? Number(value) : DEFAULT_SIDEBAR_WIDTH
+  return clampSidebarWidth(Number.isFinite(parsed) ? parsed : DEFAULT_SIDEBAR_WIDTH)
+}
+
+function readDailyDescriptionHeight(storage: Storage | undefined): number {
+  const value = storage?.getItem(DAILY_DESCRIPTION_HEIGHT_KEY)
+  const parsed = value ? Number(value) : DEFAULT_DAILY_DESCRIPTION_HEIGHT
+  return clampDailyDescriptionHeight(
+    Number.isFinite(parsed) ? parsed : DEFAULT_DAILY_DESCRIPTION_HEIGHT,
+  )
 }
 
 function windowHeight(): number {

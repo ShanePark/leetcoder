@@ -9,6 +9,8 @@ import {
   normalizeTestResult,
   normalizeTestRunProgress,
   type Invoke,
+  type Listen,
+  type RepositoryFilesChanged,
 } from '../../src/backend'
 
 describe('backend client', () => {
@@ -28,10 +30,11 @@ describe('backend client', () => {
     }])
   })
 
-  it('invokes Git diff, commit, and push with explicit arguments', async () => {
+  it('invokes Git actions with explicit arguments', async () => {
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
     const invoke: Invoke = async (command, args) => {
       calls.push({ command, args })
+      if (command === 'discard_git_changes' || command === 'show_in_file_manager') return undefined
       if (command === 'get_git_diff') return 'diff --git a/Q1.java b/Q1.java\n'
       if (command === 'commit_git') {
         return { commitHash: 'abc123', message: 'Create Q1.java', paths: ['Q1.java'] }
@@ -41,12 +44,16 @@ describe('backend client', () => {
     }
     const backend = createBackendClient(invoke)
 
+    await expect(backend.discardGitChanges('/repo', 'Q1.java')).resolves.toBeUndefined()
+    await expect(backend.showInFileManager('/repo', 'Q1.java')).resolves.toBeUndefined()
     await expect(backend.getGitDiff('/repo', ['Q1.java'])).resolves.toContain('diff --git')
     await expect(backend.commitGit('/repo', ['Q1.java'], 'Create Q1.java')).resolves.toMatchObject({
       commitHash: 'abc123',
     })
     await expect(backend.pushGit('/repo')).resolves.toMatchObject({ branch: 'main' })
     expect(calls).toEqual([
+      { command: 'discard_git_changes', args: { repoPath: '/repo', path: 'Q1.java' } },
+      { command: 'show_in_file_manager', args: { repoPath: '/repo', path: 'Q1.java' } },
       { command: 'get_git_diff', args: { repoPath: '/repo', paths: ['Q1.java'] } },
       { command: 'commit_git', args: { repoPath: '/repo', paths: ['Q1.java'], message: 'Create Q1.java' } },
       { command: 'push_git', args: { repoPath: '/repo' } },
@@ -63,6 +70,50 @@ describe('backend client', () => {
     await expect(
       createBackendClient(invoke).deleteProblemFile('/repo', 'src/main/java/Q1.java'),
     ).resolves.toBeUndefined()
+  })
+
+  it('invokes duplicate and returns the new repository-relative file', async () => {
+    const invoke: Invoke = async (command, args) => {
+      expect(command).toBe('duplicate_problem_file')
+      expect(args).toEqual({ repoPath: '/repo', path: 'src/main/java/Q1.java' })
+      return {
+        relativePath: 'src/main/java/Q12.java',
+        content: 'public class Q12 {}',
+      }
+    }
+
+    await expect(
+      createBackendClient(invoke).duplicateProblemFile('/repo', 'src/main/java/Q1.java'),
+    ).resolves.toEqual({
+      relativePath: 'src/main/java/Q12.java',
+      content: 'public class Q12 {}',
+    })
+  })
+
+  it('invokes rename with a requested path and normalizes legacy response fields', async () => {
+    const invoke: Invoke = async (command, args) => {
+      expect(command).toBe('rename_problem_file')
+      expect(args).toEqual({
+        repoPath: '/repo',
+        path: 'src/main/java/Q1.java',
+        newPath: 'src/main/java/Renamed.java',
+      })
+      return {
+        path: 'src/main/java/Renamed.java',
+        source: 'public class Renamed {}',
+      }
+    }
+
+    await expect(
+      createBackendClient(invoke).renameProblemFile(
+        '/repo',
+        'src/main/java/Q1.java',
+        'src/main/java/Renamed.java',
+      ),
+    ).resolves.toEqual({
+      relativePath: 'src/main/java/Renamed.java',
+      content: 'public class Renamed {}',
+    })
   })
 
   it('accepts legacy-compatible Git response shapes', () => {
@@ -394,6 +445,36 @@ describe('backend client', () => {
     ])
   })
 
+  it('passes an optional Java test method to the targeted test command', async () => {
+    const invoke: Invoke = async (command, args) => {
+      expect(command).toBe('run_problem_test')
+      expect(args).toMatchObject({
+        repoPath: '/repo',
+        fullyQualifiedClassName: 'shane.Q1',
+        testMethod: 'test2',
+      })
+      return {
+        success: true,
+        phase: 'test',
+        summary: { total: 1, passed: 1, failed: 0, skipped: 0, errors: 0 },
+        tests: [{ name: 'test2()', className: 'shane.Q1', status: 'passed' }],
+        diagnostics: [],
+        stdout: '',
+        stderr: '',
+      }
+    }
+
+    const result = await createBackendClient(invoke).runProblemTest(
+      '/repo',
+      'shane.Q1',
+      undefined,
+      'test2',
+    )
+
+    expect(result.tests).toHaveLength(1)
+    expect(result.tests[0].name).toBe('test2()')
+  })
+
   it('preserves runtime errors and exposes them as failures to the existing UI summary', () => {
     const result = normalizeTestResult({
       phase: 'test',
@@ -435,5 +516,72 @@ describe('backend client', () => {
   it('uses a non-zero legacy exit code when success is absent', () => {
     expect(normalizeTestResult({ stdout: '', stderr: '', exitCode: 1 }).success).toBe(false)
     expect(normalizeTestResult({ stdout: '', stderr: '', exitCode: 0 }).success).toBe(true)
+  })
+})
+
+describe('repository watcher bridge', () => {
+  const noopListen: Listen = async () => () => {}
+
+  it('starts and stops the watcher with the repository path', async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
+    const invoke: Invoke = async (command, args) => {
+      calls.push({ command, args })
+      return undefined as never
+    }
+    const client = createBackendClient(invoke, noopListen)
+
+    await client.watchRepository('/home/shane/leetcode')
+    await client.stopWatchingRepository()
+
+    expect(calls).toEqual([
+      { command: 'watch_repository', args: { repoPath: '/home/shane/leetcode' } },
+      { command: 'unwatch_repository', args: undefined },
+    ])
+  })
+
+  it('forwards watcher payloads and hands back the unsubscribe function', async () => {
+    let emit: ((message: { payload: unknown }) => void) | null = null
+    let unsubscribed = false
+    const listen: Listen = async (event, handler) => {
+      expect(event).toBe('repository-files-changed')
+      emit = handler
+      return () => {
+        unsubscribed = true
+      }
+    }
+    const seen: RepositoryFilesChanged[] = []
+    const client = createBackendClient(async () => undefined as never, listen)
+
+    const unsubscribe = await client.onRepositoryFilesChanged((change) => seen.push(change))
+    emit!({ payload: { paths: ['src/Q1.java'], structural: true } })
+    emit!({ payload: { paths: ['src/Q2.java'] } })
+
+    expect(seen).toEqual([
+      { paths: ['src/Q1.java'], structural: true },
+      { paths: ['src/Q2.java'], structural: false },
+    ])
+
+    unsubscribe()
+    expect(unsubscribed).toBe(true)
+  })
+
+  it('ignores watcher payloads that carry no usable paths', async () => {
+    let emit: ((message: { payload: unknown }) => void) | null = null
+    const listen: Listen = async (_event, handler) => {
+      emit = handler
+      return () => {}
+    }
+    let received = 0
+    const client = createBackendClient(async () => undefined as never, listen)
+
+    await client.onRepositoryFilesChanged(() => {
+      received += 1
+    })
+    emit!({ payload: null })
+    emit!({ payload: { structural: true } })
+    emit!({ payload: { paths: [] } })
+    emit!({ payload: { paths: [7, null] } })
+
+    expect(received).toBe(0)
   })
 })

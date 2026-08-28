@@ -1,4 +1,5 @@
-import { snippet, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
+import { pickedCompletion, snippet, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
+import type { EditorView } from '@codemirror/view'
 
 /**
  * This is intentionally a small, source-text based completion provider.  It is
@@ -79,9 +80,145 @@ const JAVA_TYPES = [
   'StringBuffer', 'System', 'TreeMap', 'TreeSet',
 ]
 
+export const JAVA_TYPE_IMPORTS: Readonly<Record<string, string>> = {
+  ArrayDeque: 'java.util.ArrayDeque',
+  ArrayList: 'java.util.ArrayList',
+  Arrays: 'java.util.Arrays',
+  BigDecimal: 'java.math.BigDecimal',
+  BigInteger: 'java.math.BigInteger',
+  Collections: 'java.util.Collections',
+  Comparator: 'java.util.Comparator',
+  Deque: 'java.util.Deque',
+  HashMap: 'java.util.HashMap',
+  HashSet: 'java.util.HashSet',
+  InputStream: 'java.io.InputStream',
+  Iterator: 'java.util.Iterator',
+  LinkedHashMap: 'java.util.LinkedHashMap',
+  LinkedHashSet: 'java.util.LinkedHashSet',
+  LinkedList: 'java.util.LinkedList',
+  List: 'java.util.List',
+  Map: 'java.util.Map',
+  PrintStream: 'java.io.PrintStream',
+  PriorityQueue: 'java.util.PriorityQueue',
+  Queue: 'java.util.Queue',
+  Set: 'java.util.Set',
+  Stack: 'java.util.Stack',
+  TreeMap: 'java.util.TreeMap',
+  TreeSet: 'java.util.TreeSet',
+}
+
+export interface ImportLine {
+  name: string
+  static: boolean
+  from: number
+  to: number
+}
+
+export function importLines(source: string): ImportLine[] {
+  const lines: ImportLine[] = []
+  const pattern = /^[\t ]*import[\t ]+(static[\t ]+)?([\w.*]+)[\t ]*;[^\S\r\n]*(?:\r?\n|$)/gm
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(source)) !== null) {
+    lines.push({
+      name: match[2],
+      static: Boolean(match[1]),
+      from: match.index,
+      to: match.index + match[0].length,
+    })
+  }
+  return lines
+}
+
+function localTypeDeclared(source: string, typeName: string): boolean {
+  const escaped = typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`\\b(?:class|interface|enum|record)\\s+${escaped}\\b`).test(maskJavaCommentsAndLiterals(source))
+}
+
+function importInsertion(source: string, fullyQualifiedName: string): { from: number, insert: string } | null {
+  const packageName = fullyQualifiedName.slice(0, fullyQualifiedName.lastIndexOf('.'))
+  const typeName = fullyQualifiedName.slice(fullyQualifiedName.lastIndexOf('.') + 1)
+  const imports = importLines(source)
+  if (imports.some((line) => !line.static && (line.name === fullyQualifiedName || line.name === `${packageName}.*`))) {
+    return null
+  }
+  if (imports.some((line) => !line.static && !line.name.endsWith('.*') && line.name.split('.').at(-1) === typeName)) {
+    return null
+  }
+
+  const newline = source.includes('\r\n') ? '\r\n' : '\n'
+  const ordinaryImports = imports.filter((line) => !line.static)
+  const followingImport = ordinaryImports.find((line) => line.name.localeCompare(fullyQualifiedName) > 0)
+  if (followingImport) {
+    return { from: followingImport.from, insert: `import ${fullyQualifiedName};${newline}` }
+  }
+  if (ordinaryImports.length > 0) {
+    const lastImport = ordinaryImports.at(-1)!
+    const prefix = lastImport.to === source.length || !source.slice(lastImport.from, lastImport.to).endsWith('\n') ? newline : ''
+    return { from: lastImport.to, insert: `${prefix}import ${fullyQualifiedName};${newline}` }
+  }
+
+  const firstStaticImport = imports.find((line) => line.static)
+  if (firstStaticImport) {
+    return { from: firstStaticImport.from, insert: `import ${fullyQualifiedName};${newline}${newline}` }
+  }
+
+  const packageMatch = /^[\t ]*package[\t ]+[\w.]+[\t ]*;[^\S\r\n]*(?:\r?\n|$)/m.exec(source)
+  if (packageMatch) {
+    const afterPackage = packageMatch.index + packageMatch[0].length
+    let firstCode = afterPackage
+    while (firstCode < source.length && /\s/.test(source[firstCode])) firstCode += 1
+    const separator = source.slice(afterPackage, firstCode).includes('\n') ? '' : newline
+    return { from: firstCode, insert: `${separator}import ${fullyQualifiedName};${newline}${newline}` }
+  }
+  return { from: 0, insert: `import ${fullyQualifiedName};${newline}${newline}` }
+}
+
+export function addJavaTypeImports(source: string, typeNames: Iterable<string>): string {
+  const imports = [...new Set(typeNames)]
+    .map((typeName) => ({ typeName, fullyQualifiedName: JAVA_TYPE_IMPORTS[typeName] }))
+    .filter((candidate): candidate is { typeName: string; fullyQualifiedName: string } => Boolean(candidate.fullyQualifiedName))
+    .sort((left, right) => left.fullyQualifiedName.localeCompare(right.fullyQualifiedName))
+
+  let updated = source
+  for (const { typeName, fullyQualifiedName } of imports) {
+    if (localTypeDeclared(updated, typeName)) continue
+    const insertion = importInsertion(updated, fullyQualifiedName)
+    if (!insertion) continue
+    updated = `${updated.slice(0, insertion.from)}${insertion.insert}${updated.slice(insertion.from)}`
+  }
+  return updated
+}
+
+function applyJavaType(fullyQualifiedName: string): Completion['apply'] {
+  return (view: EditorView, completion: Completion, from: number, to: number) => {
+    const source = view.state.doc.toString()
+    const typeName = fullyQualifiedName.slice(fullyQualifiedName.lastIndexOf('.') + 1)
+    const maskedSelection = maskJavaCommentsAndLiterals(source).slice(from, to)
+    const selectionIsCode = maskedSelection === source.slice(from, to)
+    const insertion = selectionIsCode && !localTypeDeclared(source, typeName)
+      ? importInsertion(source, fullyQualifiedName)
+      : null
+    const changes = insertion
+      ? [{ from: insertion.from, insert: insertion.insert }, { from, to, insert: completion.label }]
+      : [{ from, to, insert: completion.label }]
+    const importOffset = insertion && insertion.from <= from ? insertion.insert.length : 0
+    view.dispatch({
+      changes,
+      selection: { anchor: from + completion.label.length + importOffset },
+      annotations: pickedCompletion.of(completion),
+      scrollIntoView: true,
+      userEvent: 'input.complete',
+    })
+  }
+}
+
 const JAVA_COMPLETIONS: Completion[] = [
   ...JAVA_KEYWORDS.map((label) => ({ label, type: 'keyword' as const })),
-  ...JAVA_TYPES.map((label) => ({ label, type: 'type' as const })),
+  ...JAVA_TYPES.map((label) => ({
+    label,
+    type: 'type' as const,
+    apply: JAVA_TYPE_IMPORTS[label] ? applyJavaType(JAVA_TYPE_IMPORTS[label]) : label,
+  })),
   methodCompletion({ name: 'assertThat', parameters: ['value'], detail: 'AssertJ' }, 'function'),
   snippetCompletion('assertThat(...).isEqualTo(...)', 'AssertJ', 'assertThat(${actual}).isEqualTo(${expected})'),
   snippetCompletion('assertThat(...).isTrue()', 'AssertJ', 'assertThat(${actual}).isTrue()'),
@@ -585,7 +722,7 @@ export function collectJavaSymbols(source: string, position = source.length): Ja
  * lightweight Java scanners below.  This prevents a string such as
  * `"helper() {"` from looking like a declaration or a clickable call.
  */
-function maskJavaCommentsAndLiterals(source: string): string {
+export function maskJavaCommentsAndLiterals(source: string): string {
   // `split('')` intentionally keeps UTF-16 code-unit indexing. CodeMirror
   // positions are UTF-16 offsets, while spreading a string would collapse
   // astral characters and shift every later source range.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { EditorState } from '@codemirror/state'
 import type { CompletionContext } from '@codemirror/autocomplete'
+import type { EditorView } from '@codemirror/view'
 
 import { collectJavaMethods, collectJavaSymbols, javaCompletions, resolveJavaDefinition } from '../../src/completions'
 
@@ -15,7 +16,8 @@ function complete(source: string, explicit = false) {
     explicit,
     matchBefore(pattern: RegExp) {
       const before = document.slice(0, cursor)
-      const match = pattern.exec(before)
+      const anchoredPattern = new RegExp(`(?:${pattern.source})$`, pattern.flags.replace(/[gy]/g, ''))
+      const match = anchoredPattern.exec(before)
       if (!match) return null
       return { from: cursor - match[0].length, to: cursor, text: match[0] }
     },
@@ -27,7 +29,80 @@ function labels(source: string, explicit = false): string[] {
   return complete(source, explicit)?.options.map((option) => option.label) ?? []
 }
 
+function applyCompletion(source: string, label: string): string {
+  const marker = source.indexOf('|')
+  if (marker < 0) throw new Error('Completion source must include a | cursor marker')
+  const document = `${source.slice(0, marker)}${source.slice(marker + 1)}`
+  let state = EditorState.create({ doc: document })
+  const result = complete(source)
+  const completion = result?.options.find((option) => option.label === label)
+  if (!result || !completion) throw new Error(`Completion not found: ${label}`)
+
+  const view = {
+    get state() { return state },
+    dispatch(spec: Parameters<EditorState['update']>[0]) {
+      state = state.update(spec).state
+    },
+  } as unknown as EditorView
+
+  if (typeof completion.apply === 'function') {
+    completion.apply(view, completion, result.from, marker)
+  } else {
+    const insert = completion.apply ?? completion.label
+    state = state.update({ changes: { from: result.from, to: marker, insert } }).state
+  }
+  return state.doc.toString()
+}
+
 describe('lightweight Java completions', () => {
+  it('adds a specific import after the package when a Java type completion is picked', () => {
+    const source = 'package example;\n\nclass Solution { Li| value; }'
+    expect(applyCompletion(source, 'List')).toBe(
+      'package example;\n\nimport java.util.List;\n\nclass Solution { List value; }',
+    )
+  })
+
+  it('sorts multiple auto-imports and does not duplicate exact or wildcard imports', () => {
+    const withList = applyCompletion(
+      'package example;\n\nimport java.util.List;\n\nclass Solution { Arr| value; }',
+      'ArrayList',
+    )
+    expect(withList).toContain('import java.util.ArrayList;\nimport java.util.List;')
+
+    expect(applyCompletion(
+      'import java.util.List;\n\nclass Solution { Li| value; }',
+      'List',
+    ).match(/import java\.util\.List;/g)).toHaveLength(1)
+
+    expect(applyCompletion(
+      'import java.util.*;\n\nclass Solution { Li| value; }',
+      'List',
+    )).toBe('import java.util.*;\n\nclass Solution { List value; }')
+  })
+
+  it('keeps static imports in a separate group', () => {
+    expect(applyCompletion(
+      'package example;\n\nimport static org.assertj.core.api.Assertions.assertThat;\n\nclass Solution { Li| value; }',
+      'List',
+    )).toBe(
+      'package example;\n\nimport java.util.List;\n\nimport static org.assertj.core.api.Assertions.assertThat;\n\nclass Solution { List value; }',
+    )
+  })
+
+  it('does not import over a type declared in the same source file', () => {
+    expect(applyCompletion(
+      'class List {}\nclass Solution { Li| value; }',
+      'List',
+    )).toBe('class List {}\nclass Solution { List value; }')
+  })
+
+  it('does not add an import when a completion is applied inside a literal', () => {
+    expect(applyCompletion(
+      'class Solution { String value = "Li|"; }',
+      'List',
+    )).toBe('class Solution { String value = "List"; }')
+  })
+
   it('offers methods from the declared interface and the new implementation', () => {
     const options = labels('class Solution { void solve() { List<Integer> l = new ArrayList<>(); l.| } }')
     expect(options).toContain('size()')

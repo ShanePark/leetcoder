@@ -7,6 +7,7 @@ mod models;
 mod repository;
 mod runner;
 mod security;
+mod watcher;
 
 use tauri_plugin_window_state::{Builder as WindowStateBuilder, StateFlags};
 
@@ -18,12 +19,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             WindowStateBuilder::default()
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION)
                 .build(),
         )
+        .manage(watcher::RepositoryWatcher::default())
         .invoke_handler(tauri::generate_handler![
+            commands::choose_repository,
             commands::validate_project,
             commands::fetch_daily_problem,
             commands::list_problem_files,
@@ -31,11 +35,17 @@ pub fn run() {
             commands::create_problem_file,
             commands::save_problem_file,
             commands::delete_problem_file,
+            commands::duplicate_problem_file,
+            commands::rename_problem_file,
             commands::list_git_changes,
+            commands::discard_git_changes,
+            commands::show_in_file_manager,
             commands::get_git_diff,
             commands::commit_git,
             commands::push_git,
             commands::run_problem_test,
+            commands::watch_repository,
+            commands::unwatch_repository,
         ])
         .run(tauri::generate_context!())
         .expect("error while running leetcoder");
