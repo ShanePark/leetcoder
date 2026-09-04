@@ -71,6 +71,9 @@ describe('Lucide app icons', () => {
       'chevronRight',
       'fileCode',
       'locate',
+      'menu',
+      'settings',
+      'power',
     ]
     expect(new Set(names).size).toBe(names.length)
   })

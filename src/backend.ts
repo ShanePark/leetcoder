@@ -14,6 +14,14 @@ export interface DailyProblem {
   content?: string | null
 }
 
+/** Build metadata used by the self-update control in the desktop shell. */
+export interface UpdateStatus {
+  supported: boolean
+  available: boolean
+  currentCommit: string
+  latestCommit: string
+}
+
 /** A Java source file returned by the repository file-list command. */
 export interface ProblemFileEntry {
   path: string
@@ -150,6 +158,8 @@ export interface BackendClient {
   onRepositoryFilesChanged(
     handler: (change: RepositoryFilesChanged) => void,
   ): Promise<() => void>
+  checkForUpdate(): Promise<UpdateStatus>
+  updateAndRestart(): Promise<void>
 }
 
 /** Tauri's event bridge, narrowed to what the watcher subscription needs. */
@@ -305,6 +315,15 @@ export function createBackendClient(
         }
       })
     },
+
+    async checkForUpdate() {
+      const response = await invoke<unknown>('check_for_update')
+      return normalizeUpdateStatus(response)
+    },
+
+    async updateAndRestart() {
+      await invoke<unknown>('update_and_restart')
+    },
   }
 }
 
@@ -402,6 +421,25 @@ function normalizeValidation(value: unknown): ProjectValidation {
     }
   }
   throw new Error('The project validation response was invalid.')
+}
+
+export function normalizeUpdateStatus(value: unknown): UpdateStatus {
+  if (!isRecord(value)) {
+    throw new Error('The update status response was invalid.')
+  }
+  const currentCommit = stringValue(value.currentCommit) ?? stringValue(value.current_commit) ?? ''
+  const latestCommit = stringValue(value.latestCommit) ?? stringValue(value.latest_commit) ?? ''
+  const supported = typeof value.supported === 'boolean'
+    ? value.supported
+    : currentCommit.length > 0 && latestCommit.length > 0
+  const available = typeof value.available === 'boolean'
+    ? value.available
+    : supported && commitsDiffer(currentCommit, latestCommit)
+  return { supported, available, currentCommit, latestCommit }
+}
+
+function commitsDiffer(currentCommit: string, latestCommit: string): boolean {
+  return currentCommit.length > 0 && latestCommit.length > 0 && currentCommit !== latestCommit
 }
 
 function normalizeDailyProblem(value: unknown): DailyProblem {

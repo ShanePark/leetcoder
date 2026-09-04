@@ -2247,6 +2247,7 @@ dependencies = [
 name = "leetcoder"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "notify",
  "quick-xml",
  "reqwest",

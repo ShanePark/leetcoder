@@ -30,13 +30,21 @@ import { sanitizeProblemHtml } from './sanitize'
 import {
   SHORTCUT_SECTIONS,
   formatShortcut,
+  isSettingsShortcut,
   platformBindings,
   runShortcutAction,
   shortcutHints,
   shortcutLabel,
 } from './shortcuts'
+import { createUpdateController, UPDATE_CHECK_INTERVAL_MS, type UpdateController } from './update-controller'
+import {
+  createUpdateProgressView,
+  listenForUpdateProgress,
+} from './update-progress'
 
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
+const THEME_MODE_KEY = 'leetcoder.theme-mode'
+const APP_VERSION = '0.1.0'
 const BOTTOM_PANEL_HEIGHT_KEY = 'leetcoder.bottom-panel-height'
 const GIT_FILE_LIST_WIDTH_KEY = 'leetcoder.git-file-list-width'
 const SIDEBAR_WIDTH_KEY = 'leetcoder.sidebar-width'
@@ -73,6 +81,10 @@ const VIEWPORT_MARGIN = 8
 const SAVED_FLASH_MS = 1500
 const TOAST_DISMISS_MS = 3000
 const MAX_VISIBLE_TOASTS = 3
+
+export type ThemeMode = 'system' | 'dark' | 'light'
+export type ShortcutPlatform = 'linux' | 'macos'
+export type SettingsSection = 'appearance' | 'keymap'
 const FILE_GROUPS: Array<{ key: ProblemFileEntry['packageSegment']; label: string }> = [
   { key: 'easy', label: 'Easy' },
   { key: 'medium', label: 'Medium' },
@@ -187,6 +199,8 @@ export interface AppOptions {
   backend?: BackendClient
   directoryPicker?: DirectoryPicker
   storage?: Storage
+  /** Request a native window close through the close-safety handler. */
+  requestClose?: () => Promise<void>
 }
 
 export interface AutosaveSnapshot {
@@ -443,14 +457,25 @@ export function testFailureMessage(result: TestResult): string {
   const diagnostic = result.diagnostics.find(
     (entry) => entry.message.trim().length > 0 && entry.severity.trim().toLowerCase() === 'error',
   ) ?? result.diagnostics.find((entry) => entry.message.trim().length > 0)
-  const failedTest = result.tests.find(
-    (test) => (test.status === 'failed' || test.status === 'error') && test.message?.trim().length,
-  )
+  const failedTest = result.tests.find((test) => {
+    if (test.status !== 'failed' && test.status !== 'error') {
+      return false
+    }
+    return Boolean(
+      test.message?.trim().length
+      || test.details?.trim().length
+      || test.expected !== null && test.expected !== undefined
+      || test.actual !== null && test.actual !== undefined,
+    )
+  })
   if (phase === 'compile' && diagnostic) {
     return shortenResultMessage(diagnostic.message)
   }
-  if (phase === 'test' && failedTest?.message) {
-    return shortenResultMessage(failedTest.message)
+  if (phase === 'test' && failedTest) {
+    const conciseFailure = conciseTestFailureMessage(failedTest)
+    if (conciseFailure) {
+      return conciseFailure
+    }
   }
   const stderr = firstUsefulOutputLine(result.stderr)
   if (stderr) {
@@ -522,14 +547,60 @@ export function filterTestDiagnostics(diagnostics: TestDiagnostic[]): TestDiagno
 }
 
 export function conciseTestFailureMessage(test: TestCaseResult): string | null {
+  const expected = test.expected !== null && test.expected !== undefined
+    ? test.expected.trim()
+    : null
+  const actual = test.actual !== null && test.actual !== undefined
+    ? test.actual.trim()
+    : null
+  if (expected !== null && actual !== null) {
+    return shortenResultMessage(`Expected ${expected}, but was ${actual}`)
+  }
   const message = test.message?.trim()
   if (message) {
-    return shortenResultMessage(message)
+    return shortenResultMessage(stripTestFailureExceptionPrefix(message))
   }
   const details = test.details?.split(/\r?\n/)
     .map((line) => line.trim())
     .find((line) => line.length > 0 && !/^at\s+/.test(line) && !/^caused by:\s*$/i.test(line))
-  return details ? shortenResultMessage(details) : null
+  return details ? shortenResultMessage(stripTestFailureExceptionPrefix(details)) : null
+}
+
+function stripTestFailureExceptionPrefix(message: string): string {
+  const prefix = 'org.opentest4j.AssertionFailedError:'
+  return message.startsWith(prefix)
+    ? message.slice(prefix.length).trim()
+    : message.trim()
+}
+
+export type TestCaseDetailSection = 'console' | 'failure' | 'comparison' | 'location' | 'stack'
+
+/**
+ * Keep the selected-test detail order testable without requiring a DOM in
+ * frontend unit tests. Console output intentionally leads all failure data.
+ */
+export function testCaseDetailSectionOrder(test: TestCaseResult): TestCaseDetailSection[] {
+  const sections: TestCaseDetailSection[] = []
+  if (testCaseHasOutput(test)) {
+    sections.push('console')
+  }
+  const hasExpected = test.expected !== null && test.expected !== undefined
+  const hasActual = test.actual !== null && test.actual !== undefined
+  // Expected/Actual rows already explain a structured assertion failure, so
+  // don't spend vertical space on the same message a second time.
+  if ((!hasExpected || !hasActual) && conciseTestFailureMessage(test)) {
+    sections.push('failure')
+  }
+  if (hasExpected || hasActual) {
+    sections.push('comparison')
+  }
+  if (test.file && validSourceLine(test.line) !== null) {
+    sections.push('location')
+  }
+  if (test.details) {
+    sections.push('stack')
+  }
+  return sections
 }
 
 export function relevantTestStackFrames(details: string | null | undefined): string[] {
@@ -578,7 +649,7 @@ export function defaultVisibleTests(
  * Character-level diff for single-line Expected/Actual values: the common
  * prefix and suffix stay plain while the differing middle of each value is
  * highlighted. Returns null when a character diff would not help (multi-line
- * values or equal strings).
+ * values, equal strings, or values with no shared context).
  */
 export function charDiffSegments(
   expected: string,
@@ -598,6 +669,13 @@ export function charDiffSegments(
     && expected[expected.length - 1 - suffix] === actual[actual.length - 1 - suffix]
   ) {
     suffix += 1
+  }
+  // A full replacement such as `true` → `false` has no useful context for an
+  // inline mark. Leave both values as plain text in their Expected/Actual
+  // rows so the row-level colors carry the comparison without a redundant
+  // block around the entire value.
+  if (prefix < 2 && suffix < 2) {
+    return null
   }
   return {
     prefix: expected.slice(0, prefix),
@@ -1125,6 +1203,33 @@ function testResultKey(test: TestCaseResult): string {
 }
 
 /**
+ * Return the first actionable test in the runner's source/order-preserved
+ * result list. The result tree may sort rows for readability, but automatic
+ * selection should follow the order in which the runner reported tests.
+ */
+export function firstFailedTestKey(tests: TestCaseResult[]): string | null {
+  const failed = tests.find((test) => test.status === 'failed' || test.status === 'error')
+  return failed ? testResultKey(failed) : null
+}
+
+/**
+ * Choose a failed test for automatic live-result selection while preserving
+ * an existing selection. A root or row selected by the user is represented by
+ * `selectionExplicit`; an automatically selected row is retained so later
+ * failures cannot make the detail pane jump to a different test.
+ */
+export function autoSelectedTestKey(
+  tests: TestCaseResult[],
+  selectedTestKey: string | null,
+  selectionExplicit: boolean,
+): string | null {
+  if (selectionExplicit || selectedTestKey !== null) {
+    return selectedTestKey
+  }
+  return firstFailedTestKey(tests)
+}
+
+/**
  * Coalesces editor changes into one debounced write and follows an in-flight
  * write with the newest snapshot when the document changes while saving.
  */
@@ -1359,6 +1464,21 @@ export class LeetcoderApp {
   private readonly directoryPicker: DirectoryPicker
   private readonly repositoryPicker = new RepositoryPickerCoordinator()
   private readonly storage: Storage | undefined
+  private readonly requestClose: (() => Promise<void>) | undefined
+  private readonly updateProgressView = createUpdateProgressView()
+  private updateController: UpdateController
+  private updateProgressListenerStop: (() => void) | null = null
+  private updateCheckTimer: ReturnType<typeof setInterval> | null = null
+  private themeMode: ThemeMode
+  private appMenuOpen = false
+  private appMenuFocusTarget: HTMLElement | null = null
+  private settingsDialogOpen = false
+  private settingsDialogFocusTarget: HTMLElement | null = null
+  private settingsSection: SettingsSection = 'appearance'
+  private aboutDialogOpen = false
+  private aboutDialogFocusTarget: HTMLElement | null = null
+  private updateAvailable = false
+  private updateBusy = false
   private readonly state: AppState = {
     repoPath: null,
     projectValid: false,
@@ -1408,9 +1528,10 @@ export class LeetcoderApp {
   private refreshRequestId = 0
   private externalReloadInFlight = false
   private stopWatchingFiles: (() => void) | null = null
-  private shortcutsDialogOpen = false
-  private shortcutsDialogFocusTarget: HTMLElement | null = null
+  private shortcutsPlatform: ShortcutPlatform = defaultShortcutPlatform(currentIsMacPlatform())
   private testRunGeneration = 0
+  /** Whether the user has explicitly chosen a row in the current run. */
+  private testSelectionExplicit = false
   private nextOpenTabId = 1
   private closePreparation: Promise<void> | null = null
   private destroyed = false
@@ -1445,6 +1566,8 @@ export class LeetcoderApp {
   private gitDiscardInProgress = false
   private gitDiscardDialogFile: GitChangedFile | null = null
   private gitDiscardDialogFocusTarget: HTMLElement | null = null
+  private deleteDialogFile: ProblemFileEntry | null = null
+  private deleteDialogFocusTarget: HTMLElement | null = null
   private renderedFileTabsActiveId: number | null = null
   private renameTargetFile: ProblemFileEntry | null = null
   private errorToastElement: HTMLElement | null = null
@@ -1454,11 +1577,16 @@ export class LeetcoderApp {
     accordionGroupKeys('easy', true),
   )
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
-    if (isShortcutHelpAltShortcut(event)) {
-      // The shortcut list has to be reachable from anywhere, including the
-      // file explorer and the run panel.
+    if (isSettingsShortcut(event, currentIsMacPlatform())) {
       event.preventDefault()
-      this.toggleShortcutsDialog()
+      this.openSettingsDialog('appearance')
+      return
+    }
+    if (isShortcutHelpAltShortcut(event)) {
+      // The keymap has to be reachable from anywhere, including the file
+      // explorer and the run panel.
+      event.preventDefault()
+      this.openSettingsDialog('keymap')
       return
     }
     if (isCloseAllTabsShortcut(event, currentIsMacPlatform())) {
@@ -1491,7 +1619,9 @@ export class LeetcoderApp {
       if (runAction === 'run-test') {
         void this.runCurrentTest()
       } else {
-        void this.runCurrentTest(findJavaTestMethodAt(this.editor.view.state))
+        // Ctrl+Shift+R is still useful outside an @Test method. In that
+        // context it follows Ctrl+R and runs the complete test class.
+        void this.runCurrentTest(findJavaTestMethodAt(this.editor.view.state) ?? undefined)
       }
       return
     }
@@ -1502,6 +1632,37 @@ export class LeetcoderApp {
       event.preventDefault()
       void this.saveCurrentFile()
     }
+  }
+
+  private readonly handleAppMenuKeydown = (event: KeyboardEvent): void => {
+    if (!this.appMenuOpen) {
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      this.closeAppMenu()
+      return
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      return
+    }
+    const items = Array.from(this.element<HTMLElement>('#app-menu')
+      .querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .filter((item) => !item.hidden && !item.disabled)
+    if (items.length === 0) {
+      return
+    }
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement)
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? items.length - 1
+        : Math.max(0, Math.min(
+          items.length - 1,
+          currentIndex + (event.key === 'ArrowDown' ? 1 : -1),
+        ))
+    event.preventDefault()
+    items[nextIndex]?.focus()
   }
 
   private readonly handlePanelPointerMove = (event: PointerEvent): void => {
@@ -1716,11 +1877,18 @@ export class LeetcoderApp {
   }
 
   private readonly handleContextMenuOutside = (event: PointerEvent): void => {
+    const appMenu = this.root.querySelector<HTMLElement>('#app-menu')
+    const appMenuButton = this.root.querySelector<HTMLElement>('#app-menu-button')
     const fileMenu = this.root.querySelector<HTMLElement>('#file-context-menu')
     const gitMenu = this.root.querySelector<HTMLElement>('#git-context-menu')
     const target = event.target instanceof Node ? event.target : null
+    const insideAppMenu = Boolean(appMenu && !appMenu.hidden && target && appMenu.contains(target))
+    const insideAppMenuButton = Boolean(appMenuButton && target && appMenuButton.contains(target))
     const insideFileMenu = Boolean(fileMenu && !fileMenu.hidden && target && fileMenu.contains(target))
     const insideGitMenu = Boolean(gitMenu && !gitMenu.hidden && target && gitMenu.contains(target))
+    if (!insideAppMenu && !insideAppMenuButton) {
+      this.closeAppMenu()
+    }
     if (!insideFileMenu && !insideGitMenu) {
       this.closeFileContextMenu()
       this.closeGitContextMenu()
@@ -1731,12 +1899,21 @@ export class LeetcoderApp {
     if (event.key !== 'Escape') {
       return
     }
-    if (this.shortcutsDialogOpen) {
+    if (this.settingsDialogOpen) {
       event.preventDefault()
-      this.closeShortcutsDialog()
+      this.closeSettingsDialog()
+    } else if (this.aboutDialogOpen) {
+      event.preventDefault()
+      this.closeAboutDialog()
+    } else if (this.appMenuOpen) {
+      event.preventDefault()
+      this.closeAppMenu()
     } else if (this.gitDiscardDialogFile) {
       event.preventDefault()
       this.closeDiscardGitDialog()
+    } else if (this.deleteDialogFile) {
+      event.preventDefault()
+      this.closeDeleteFileDialog()
     } else if (this.renameTargetFile) {
       event.preventDefault()
       this.closeRenameDialog()
@@ -1772,12 +1949,46 @@ export class LeetcoderApp {
     this.backend = options.backend ?? createBackendClient()
     this.directoryPicker = options.directoryPicker ?? defaultDirectoryPicker
     this.storage = options.storage ?? safeStorage()
+    this.requestClose = options.requestClose
+    this.themeMode = readThemeMode(this.storage)
+    applyTheme(this.themeMode)
     this.bottomPanelHeight = readBottomPanelHeight(this.storage)
     this.gitFileListWidth = readGitFileListWidth(this.storage)
     this.sidebarWidth = readSidebarWidth(this.storage)
     this.dailyDescriptionHeight = readDailyDescriptionHeight(this.storage)
     this.dailyDescriptionOpen = this.storage?.getItem(DAILY_DESCRIPTION_KEY) === 'open'
     this.renderShell()
+    this.updateController = createUpdateController(
+      {
+        checkForUpdate: () => this.backend.checkForUpdate(),
+        updateAndRestart: () => this.backend.updateAndRestart(),
+      },
+      {
+        setUpdateAvailable: (available) => {
+          this.updateAvailable = available
+          const button = this.root.querySelector<HTMLButtonElement>('#update-button')
+          if (button) button.hidden = !available
+          this.renderAppMenu()
+        },
+        setUpdateBusy: (busy) => {
+          this.updateBusy = busy
+          const button = this.root.querySelector<HTMLButtonElement>('#update-button')
+          if (button) {
+            button.disabled = busy
+            button.classList.toggle('is-spinning', busy)
+            button.setAttribute('aria-busy', String(busy))
+            button.setAttribute('aria-label', busy ? 'Updating leetcoder' : 'Update leetcoder')
+            button.title = busy ? 'Updating leetcoder — building and restarting' : 'Update available — build and restart'
+          }
+          this.renderAppMenu()
+        },
+        showUpdateStarted: () => this.updateProgressView.start(),
+        showError: (message) => {
+          this.updateProgressView.fail()
+          this.setMessage(`Update failed: ${message}`, 'error')
+        },
+      },
+    )
     this.autosave = new AutosaveCoordinator(
       (snapshot) => this.persistSnapshot(snapshot),
       {
@@ -1800,14 +2011,15 @@ export class LeetcoderApp {
         return true
       },
       onShowShortcuts: () => {
-        this.openShortcutsDialog()
+        this.openSettingsDialog('keymap')
+      },
+      onShowSettings: () => {
+        this.openSettingsDialog('appearance')
       },
       onRunTestAtCursor: (methodName) => {
-        if (!methodName) {
-          this.setMessage('Place the cursor inside an @Test method to run only that test.', 'info')
-          return true
-        }
-        void this.runCurrentTest(methodName)
+        // A cursor miss falls back to the same all-tests run as Ctrl+R. This
+        // keeps the editor keymap and the window-level shortcut consistent.
+        void this.runCurrentTest(methodName ?? undefined)
         return true
       },
     })
@@ -1816,6 +2028,9 @@ export class LeetcoderApp {
   }
 
   async start(): Promise<void> {
+    this.updateProgressListenerStop = await listenForUpdateProgress((payload) => {
+      this.updateProgressView.update(payload)
+    })
     try {
       this.stopWatchingFiles = await this.backend.onRepositoryFilesChanged(
         this.handleRepositoryFilesChanged,
@@ -1830,6 +2045,17 @@ export class LeetcoderApp {
     } else {
       this.setMessage('Choose a repository to get started.', 'info')
     }
+    this.installUpdatePolling()
+  }
+
+  private installUpdatePolling(): void {
+    if (this.updateCheckTimer !== null) {
+      clearInterval(this.updateCheckTimer)
+    }
+    void this.updateController.checkForUpdate()
+    this.updateCheckTimer = setInterval(() => {
+      void this.updateController.checkForUpdate()
+    }, UPDATE_CHECK_INTERVAL_MS)
   }
 
   async prepareToClose(): Promise<void> {
@@ -1885,6 +2111,13 @@ export class LeetcoderApp {
     window.removeEventListener('pointerdown', this.handleContextMenuOutside)
     window.removeEventListener('keydown', this.handleContextMenuKeydown)
     this.clearScheduledDailyRefresh()
+    if (this.updateCheckTimer !== null) {
+      clearInterval(this.updateCheckTimer)
+      this.updateCheckTimer = null
+    }
+    this.updateProgressListenerStop?.()
+    this.updateProgressListenerStop = null
+    this.updateProgressView.fail()
     this.clearSavedFlash()
     this.stopWatchingFiles?.()
     this.stopWatchingFiles = null
@@ -1896,10 +2129,16 @@ export class LeetcoderApp {
     this.root.innerHTML = `
       <div class="app-shell">
         <header class="app-header">
-          <span class="wordmark">leetcoder</span>
-          <button id="choose-repository" class="repo-chip" type="button">
-            <span id="repo-path" class="repo-chip-label">Choose repository</span>
-          </button>
+          <div class="app-header-leading">
+            <button id="app-menu-button" class="icon-button app-menu-button" type="button" aria-label="Open application menu" aria-haspopup="menu" aria-expanded="false" title="Application menu"></button>
+            <span class="wordmark">leetcoder</span>
+          </div>
+          <div class="app-header-actions">
+            <button id="update-button" class="icon-button update-button" type="button" aria-label="Update leetcoder" title="Update available — build and restart" hidden></button>
+            <button id="choose-repository" class="repo-chip" type="button">
+              <span id="repo-path" class="repo-chip-label">Choose repository</span>
+            </button>
+          </div>
         </header>
 
         <main class="workspace">
@@ -2033,6 +2272,27 @@ export class LeetcoderApp {
           </section>
         </section>
         <div id="toast-stack" class="toast-stack" role="status" aria-live="polite"></div>
+        <div id="app-menu" class="app-menu" role="menu" aria-label="Application menu" hidden>
+          <button id="update-menu-action" class="app-menu-item app-menu-item-update" type="button" role="menuitem" hidden>
+            <span id="update-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
+            <span class="app-menu-item-label">Update leetcoder</span>
+            <span class="app-menu-item-detail">Build and restart</span>
+          </button>
+          <button id="settings-menu-action" class="app-menu-item" type="button" role="menuitem">
+            <span id="settings-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
+            <span class="app-menu-item-label">Settings</span>
+            <span id="settings-menu-shortcut" class="app-menu-item-detail" aria-hidden="true"></span>
+          </button>
+          <button id="about-menu-action" class="app-menu-item" type="button" role="menuitem">
+            <span id="about-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
+            <span class="app-menu-item-label">About leetcoder</span>
+          </button>
+          <div class="app-menu-divider" role="separator"></div>
+          <button id="exit-menu-action" class="app-menu-item app-menu-item-danger" type="button" role="menuitem">
+            <span id="exit-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
+            <span class="app-menu-item-label">Exit</span>
+          </button>
+        </div>
         <div id="file-context-menu" class="file-context-menu" role="menu" aria-label="File actions" hidden>
           <button id="duplicate-file-action" class="file-context-menu-item file-context-menu-item-neutral" type="button" role="menuitem">
             <span id="duplicate-file-label">Duplicate</span>
@@ -2063,13 +2323,67 @@ export class LeetcoderApp {
             </div>
           </form>
         </div>
-        <div id="shortcuts-dialog" class="dialog-backdrop" hidden>
-          <div class="shortcuts-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
-            <h2 id="shortcuts-title" class="shortcuts-title">Keyboard shortcuts</h2>
-            <div id="shortcuts-body" class="shortcuts-body"></div>
-            <p class="shortcuts-note">macOS and Linux use the same physical keys. Most shortcuts pair macOS Cmd with Linux Alt; the run shortcuts use Ctrl on both platforms.</p>
-            <div class="shortcuts-actions">
-              <button id="close-shortcuts" class="text-button" type="button">Close</button>
+        <div id="settings-dialog" class="dialog-backdrop" hidden>
+          <form id="settings-form" class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+            <div class="settings-header">
+              <div>
+                <h2 id="settings-title" class="settings-title">Settings</h2>
+                <p class="settings-subtitle">Configure your editor workspace.</p>
+              </div>
+            </div>
+            <div class="settings-layout">
+              <nav class="settings-nav" aria-label="Settings sections" role="tablist" aria-orientation="vertical">
+                <button id="settings-appearance-nav" class="settings-nav-item" type="button" role="tab" aria-controls="settings-appearance-panel">Appearance</button>
+                <button id="settings-keymap-nav" class="settings-nav-item" type="button" role="tab" aria-controls="settings-keymap-panel">Keymap</button>
+              </nav>
+              <div class="settings-content">
+                <section id="settings-appearance-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-appearance-nav">
+                  <fieldset class="settings-theme-fieldset">
+                    <legend class="settings-section-title">Appearance</legend>
+                    <p class="settings-description">Choose how leetcoder follows your display theme.</p>
+                    <div class="settings-theme-options">
+                      <label class="settings-theme-option">
+                        <input type="radio" name="theme-mode" value="system">
+                        <span class="settings-theme-option-copy"><strong>System</strong><small>Follow your device</small></span>
+                      </label>
+                      <label class="settings-theme-option">
+                        <input type="radio" name="theme-mode" value="dark">
+                        <span class="settings-theme-option-copy"><strong>Dark</strong><small>Easy on the eyes</small></span>
+                      </label>
+                      <label class="settings-theme-option">
+                        <input type="radio" name="theme-mode" value="light">
+                        <span class="settings-theme-option-copy"><strong>Light</strong><small>Bright and clear</small></span>
+                      </label>
+                    </div>
+                  </fieldset>
+                </section>
+                <section id="settings-keymap-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-keymap-nav" hidden>
+                  <div class="settings-panel-heading">
+                    <h3 class="settings-panel-title">Keyboard shortcuts</h3>
+                    <p class="settings-description">Reference for the shortcuts available in leetcoder.</p>
+                  </div>
+                  <div class="shortcuts-platform-tabs" role="tablist" aria-label="Operating system">
+                    <button id="shortcuts-linux-tab" class="shortcuts-platform-tab" type="button" role="tab" aria-controls="shortcuts-body">Linux</button>
+                    <button id="shortcuts-macos-tab" class="shortcuts-platform-tab" type="button" role="tab" aria-controls="shortcuts-body">macOS</button>
+                  </div>
+                  <div id="shortcuts-body" class="shortcuts-body" role="tabpanel"></div>
+                  <p class="shortcuts-note">App commands use Alt on Linux and Cmd on macOS. Standard editor shortcuts such as Ctrl+C, Ctrl+V, and Ctrl+Z remain available on Linux.</p>
+                </section>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="close-settings" class="text-button" type="button">Close</button>
+            </div>
+          </form>
+        </div>
+        <div id="about-dialog" class="dialog-backdrop" hidden>
+          <div class="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title">
+            <h2 id="about-title" class="about-title">About leetcoder</h2>
+            <p class="about-name">leetcoder <span class="about-version">${APP_VERSION}</span></p>
+            <p class="about-description">A focused LeetCode Java practice editor.</p>
+            <p class="about-note">Built for the daily problem-solving workflow.</p>
+            <div class="about-actions">
+              <button id="close-about" class="text-button" type="button">Close</button>
             </div>
           </div>
         </div>
@@ -2084,14 +2398,32 @@ export class LeetcoderApp {
             </div>
           </form>
         </div>
+        <div id="delete-file-dialog" class="dialog-backdrop" hidden>
+          <form id="delete-file-form" class="discard-git-dialog delete-file-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-file-title" aria-describedby="delete-file-message">
+            <h2 id="delete-file-title" class="discard-git-title">Delete file?</h2>
+            <code id="delete-file-name" class="discard-git-path"></code>
+            <p id="delete-file-message" class="discard-git-message">This permanently deletes this file. This cannot be undone.</p>
+            <div class="discard-git-actions">
+              <button id="cancel-delete-file" class="text-button" type="button">Cancel</button>
+              <button id="confirm-delete-file" class="primary-button discard-git-confirm" type="submit">Delete</button>
+            </div>
+          </form>
+        </div>
       </div>
+      <div id="modal-root"></div>
     `
     this.installStaticIcons()
     this.renderEditorEmptyState()
   }
 
   private installStaticIcons(): void {
+    this.element<HTMLButtonElement>('#app-menu-button').append(iconFor('menu', 'button-icon'))
+    this.element<HTMLElement>('#update-menu-icon').append(iconFor('refresh', 'app-menu-action-icon'))
+    this.element<HTMLElement>('#settings-menu-icon').append(iconFor('settings', 'app-menu-action-icon'))
+    this.element<HTMLElement>('#about-menu-icon').append(iconFor('info', 'app-menu-action-icon'))
+    this.element<HTMLElement>('#exit-menu-icon').append(iconFor('power', 'app-menu-action-icon'))
     this.element<HTMLButtonElement>('#choose-repository').prepend(iconFor('folderOpen', 'button-icon'))
+    this.element<HTMLButtonElement>('#update-button').append(iconFor('refresh', 'button-icon'))
     this.element<HTMLButtonElement>('#refresh-files').append(iconFor('refresh', 'button-icon'))
     this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
     this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
@@ -2122,6 +2454,28 @@ export class LeetcoderApp {
 
 
   private bindEvents(): void {
+    this.element<HTMLButtonElement>('#app-menu-button').addEventListener('click', () => {
+      this.toggleAppMenu()
+    })
+    this.element<HTMLElement>('#app-menu').addEventListener('keydown', this.handleAppMenuKeydown)
+    this.element<HTMLButtonElement>('#update-menu-action').addEventListener('click', () => {
+      void this.requestApplicationUpdate()
+    })
+    this.element<HTMLButtonElement>('#settings-menu-action').addEventListener('click', () => {
+      this.closeAppMenu(false)
+      this.openSettingsDialog('appearance')
+    })
+    this.element<HTMLButtonElement>('#about-menu-action').addEventListener('click', () => {
+      this.closeAppMenu(false)
+      this.openAboutDialog()
+    })
+    this.element<HTMLButtonElement>('#exit-menu-action').addEventListener('click', () => {
+      this.closeAppMenu(false)
+      void this.requestApplicationClose()
+    })
+    this.element<HTMLButtonElement>('#update-button').addEventListener('click', () => {
+      void this.requestApplicationUpdate()
+    })
     this.element<HTMLButtonElement>('#choose-repository').addEventListener('click', () => {
       void this.chooseRepository()
     })
@@ -2193,7 +2547,7 @@ export class LeetcoderApp {
       void this.commitAndPushGitChanges()
     })
     this.element<HTMLButtonElement>('#delete-file-action').addEventListener('click', () => {
-      void this.deleteContextMenuFile()
+      this.openDeleteFileDialog()
     })
     this.element<HTMLButtonElement>('#git-discard-action').addEventListener('click', () => {
       this.openDiscardGitDialog()
@@ -2226,17 +2580,89 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#cancel-discard-git').addEventListener('click', () => {
       this.closeDiscardGitDialog()
     })
-    this.element<HTMLButtonElement>('#close-shortcuts').addEventListener('click', () => {
-      this.closeShortcutsDialog()
+    const shortcutPlatformTabs = [
+      this.element<HTMLButtonElement>('#shortcuts-linux-tab'),
+      this.element<HTMLButtonElement>('#shortcuts-macos-tab'),
+    ]
+    for (const tab of shortcutPlatformTabs) {
+      tab.addEventListener('click', () => {
+        this.setShortcutsPlatform(tab.id === 'shortcuts-macos-tab' ? 'macos' : 'linux')
+      })
+      tab.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+          return
+        }
+        event.preventDefault()
+        const platform: ShortcutPlatform = event.key === 'Home' || event.key === 'ArrowLeft'
+          ? 'linux'
+          : 'macos'
+        this.setShortcutsPlatform(platform, true)
+      })
+    }
+    for (const [section, id] of [
+      ['appearance', '#settings-appearance-nav'],
+      ['keymap', '#settings-keymap-nav'],
+    ] as const) {
+      this.element<HTMLButtonElement>(id).addEventListener('click', () => {
+        this.setSettingsSection(section)
+      })
+    }
+    const settingsNavItems = [
+      this.element<HTMLButtonElement>('#settings-appearance-nav'),
+      this.element<HTMLButtonElement>('#settings-keymap-nav'),
+    ]
+    for (const tab of settingsNavItems) {
+      tab.addEventListener('keydown', (event) => {
+        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+          return
+        }
+        event.preventDefault()
+        const section: SettingsSection = event.key === 'Home'
+          || event.key === 'ArrowUp'
+          || event.key === 'ArrowLeft'
+          ? 'appearance'
+          : 'keymap'
+        this.setSettingsSection(section, true)
+      })
+    }
+    this.element<HTMLButtonElement>('#close-settings').addEventListener('click', () => {
+      this.closeSettingsDialog()
     })
-    this.element<HTMLElement>('#shortcuts-dialog').addEventListener('pointerdown', (event) => {
+    this.element<HTMLElement>('#settings-dialog').addEventListener('pointerdown', (event) => {
       if (event.target === event.currentTarget) {
-        this.closeShortcutsDialog()
+        this.closeSettingsDialog()
+      }
+    })
+    this.element<HTMLFormElement>('#settings-form').addEventListener('change', (event) => {
+      const target = event.target
+      if (!(target instanceof HTMLInputElement) || target.name !== 'theme-mode' || !target.checked) {
+        return
+      }
+      this.setThemeMode(target.value)
+    })
+    this.element<HTMLButtonElement>('#close-about').addEventListener('click', () => {
+      this.closeAboutDialog()
+    })
+    this.element<HTMLElement>('#about-dialog').addEventListener('pointerdown', (event) => {
+      if (event.target === event.currentTarget) {
+        this.closeAboutDialog()
       }
     })
     this.element<HTMLElement>('#discard-git-dialog').addEventListener('pointerdown', (event) => {
       if (event.target === event.currentTarget) {
         this.closeDiscardGitDialog()
+      }
+    })
+    this.element<HTMLFormElement>('#delete-file-form').addEventListener('submit', (event) => {
+      event.preventDefault()
+      this.confirmDeleteFileDialog()
+    })
+    this.element<HTMLButtonElement>('#cancel-delete-file').addEventListener('click', () => {
+      this.closeDeleteFileDialog()
+    })
+    this.element<HTMLElement>('#delete-file-dialog').addEventListener('pointerdown', (event) => {
+      if (event.target === event.currentTarget) {
+        this.closeDeleteFileDialog()
       }
     })
     const sidebarSplitter = this.element<HTMLElement>('#sidebar-splitter')
@@ -2522,6 +2948,7 @@ export class LeetcoderApp {
     this.state.testResult = null
     this.state.testRun = null
     this.state.selectedTestKey = null
+    this.testSelectionExplicit = false
     this.testRunGeneration += 1
     this.editor.setIssues([])
   }
@@ -2797,12 +3224,8 @@ export class LeetcoderApp {
     this.renderAll()
   }
 
-  private async runCurrentTest(testMethod?: string | null): Promise<void> {
+  private async runCurrentTest(testMethod?: string): Promise<void> {
     if (this.state.busy) {
-      return
-    }
-    if (testMethod === null) {
-      this.setMessage('Place the cursor inside an @Test method to run only that test.', 'info')
       return
     }
     if (!this.state.repoPath || !this.state.selectedPath || !this.state.selectedFqcn) {
@@ -2834,6 +3257,7 @@ export class LeetcoderApp {
     this.state.testRun = run
     this.state.testResult = null
     this.state.selectedTestKey = null
+    this.testSelectionExplicit = false
     this.editor.setIssues([])
     // A starting run always brings the Tests tab forward so progress is visible.
     this.selectBottomPanelTab('tests')
@@ -2852,6 +3276,7 @@ export class LeetcoderApp {
           run.status = 'error'
           run.error = testFailureMessage(failure)
           this.state.testResult = failure
+          this.autoSelectFailedTest(failure)
         }
         return
       }
@@ -2868,6 +3293,7 @@ export class LeetcoderApp {
         return
       }
       this.state.testResult = result
+      this.autoSelectFailedTest(result)
       this.editor.setIssues(collectEditorIssues(result, runFilePath))
       run.status = 'completed'
       run.phase = result.phase
@@ -2892,6 +3318,7 @@ export class LeetcoderApp {
         run.error = testFailureMessage(failure)
         run.activeTest = null
         this.state.testResult = failure
+        this.autoSelectFailedTest(failure)
       }
     } finally {
       this.state.busy = false
@@ -2919,6 +3346,7 @@ export class LeetcoderApp {
     this.state.testRun = null
     this.state.testResult = null
     this.state.selectedTestKey = null
+    this.testSelectionExplicit = false
     this.renderedTestResult = null
     this.editor.setIssues([])
     this.setMessage('Run cancelled — file changed', 'info')
@@ -2948,6 +3376,9 @@ export class LeetcoderApp {
         break
       case 'testFinished':
         this.upsertLiveTest(run, progress.test)
+        if (progress.test.status === 'failed' || progress.test.status === 'error') {
+          this.autoSelectFailedTest(liveSnapshotResult(run))
+        }
         if (sameTest(run.activeTest, progress.test)) {
           run.activeTest = null
         }
@@ -3905,6 +4336,9 @@ export class LeetcoderApp {
     this.applyBottomPanelHeight()
     this.applySidebarWidth()
     this.renderHeader()
+    this.renderAppMenu()
+    this.renderSettingsDialog()
+    this.renderAboutDialog()
     this.renderShortcutLabels()
     this.renderDailyProblem()
     this.renderFiles()
@@ -3915,6 +4349,7 @@ export class LeetcoderApp {
     this.renderGitPanel()
     this.renderContextMenu()
     this.renderDiscardGitDialog()
+    this.renderDeleteFileDialog()
     this.updateBusyControls()
     this.updateEditorVisibility()
     this.scheduleGitRefreshIfNeeded()
@@ -4460,53 +4895,229 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#git-tab').focus()
   }
 
-  private toggleShortcutsDialog(): void {
-    if (this.shortcutsDialogOpen) {
-      this.closeShortcutsDialog()
+  private toggleAppMenu(): void {
+    if (this.appMenuOpen) {
+      this.closeAppMenu()
     } else {
-      this.openShortcutsDialog()
+      this.openAppMenu()
     }
   }
 
-  private openShortcutsDialog(): void {
-    if (this.shortcutsDialogOpen) {
+  private openAppMenu(): void {
+    if (this.appMenuOpen) {
       return
     }
     const active = document.activeElement
-    this.shortcutsDialogFocusTarget = active instanceof HTMLElement ? active : null
-    this.shortcutsDialogOpen = true
-    this.renderShortcutsDialog()
+    this.appMenuFocusTarget = active instanceof HTMLElement ? active : null
+    this.appMenuOpen = true
+    this.renderAppMenu()
     queueMicrotask(() => {
-      if (this.shortcutsDialogOpen) {
-        this.element<HTMLButtonElement>('#close-shortcuts').focus()
+      if (!this.appMenuOpen) {
+        return
+      }
+      this.root.querySelector<HTMLButtonElement>('#app-menu [role="menuitem"]:not([hidden]):not(:disabled)')?.focus()
+    })
+  }
+
+  private closeAppMenu(restoreFocus = true): void {
+    if (!this.appMenuOpen) {
+      return
+    }
+    this.appMenuOpen = false
+    const target = this.appMenuFocusTarget
+    this.appMenuFocusTarget = null
+    this.renderAppMenu()
+    if (restoreFocus && target && target.isConnected && !target.closest('[hidden]')) {
+      target.focus()
+    }
+  }
+
+  private renderAppMenu(): void {
+    const menu = this.root.querySelector<HTMLElement>('#app-menu')
+    const button = this.root.querySelector<HTMLButtonElement>('#app-menu-button')
+    const update = this.root.querySelector<HTMLButtonElement>('#update-menu-action')
+    const settings = this.root.querySelector<HTMLButtonElement>('#settings-menu-action')
+    const settingsShortcut = this.root.querySelector<HTMLElement>('#settings-menu-shortcut')
+    if (!menu || !button || !update) {
+      return
+    }
+    menu.hidden = !this.appMenuOpen
+    button.setAttribute('aria-expanded', String(this.appMenuOpen))
+    update.hidden = !this.updateAvailable
+    update.disabled = this.updateBusy
+    update.setAttribute('aria-busy', String(this.updateBusy))
+    if (settings && settingsShortcut) {
+      const label = shortcutLabel('open-settings', currentIsMacPlatform())
+      settingsShortcut.textContent = label
+      settings.title = `Open Settings (${label})`
+      settings.setAttribute('aria-label', `Settings (${label})`)
+    }
+  }
+
+  private setThemeMode(mode: string): void {
+    this.themeMode = normalizeThemeMode(mode)
+    applyTheme(this.themeMode)
+    this.storage?.setItem(THEME_MODE_KEY, this.themeMode)
+    this.renderSettingsDialog()
+  }
+
+  private openAboutDialog(): void {
+    if (this.aboutDialogOpen) {
+      return
+    }
+    const active = document.activeElement
+    this.aboutDialogFocusTarget = active instanceof HTMLElement ? active : null
+    this.aboutDialogOpen = true
+    this.renderAboutDialog()
+    queueMicrotask(() => {
+      if (this.aboutDialogOpen) {
+        this.element<HTMLButtonElement>('#close-about').focus()
       }
     })
   }
 
-  private closeShortcutsDialog(): void {
-    if (!this.shortcutsDialogOpen) {
+  private closeAboutDialog(): void {
+    if (!this.aboutDialogOpen) {
       return
     }
-    this.shortcutsDialogOpen = false
-    const target = this.shortcutsDialogFocusTarget
-    this.shortcutsDialogFocusTarget = null
-    this.renderShortcutsDialog()
+    this.aboutDialogOpen = false
+    const target = this.aboutDialogFocusTarget
+    this.aboutDialogFocusTarget = null
+    this.renderAboutDialog()
     if (target && target.isConnected && !target.closest('[hidden]')) {
       target.focus()
     } else {
-      this.editor.focus()
+      this.element<HTMLButtonElement>('#app-menu-button').focus()
     }
   }
 
-  private renderShortcutsDialog(): void {
-    const dialog = this.element<HTMLElement>('#shortcuts-dialog')
-    dialog.hidden = !this.shortcutsDialogOpen
-    const body = this.element<HTMLElement>('#shortcuts-body')
-    body.innerHTML = ''
-    if (!this.shortcutsDialogOpen) {
+  private renderAboutDialog(): void {
+    const dialog = this.root.querySelector<HTMLElement>('#about-dialog')
+    if (dialog) {
+      dialog.hidden = !this.aboutDialogOpen
+    }
+  }
+
+  private async requestApplicationClose(): Promise<void> {
+    try {
+      if (this.requestClose) {
+        await this.requestClose()
+      } else if (typeof window !== 'undefined') {
+        window.close()
+      }
+    } catch (error) {
+      this.setMessage(`Could not close leetcoder: ${errorMessage(error)}`, 'error')
+    }
+  }
+
+  private async requestApplicationUpdate(): Promise<void> {
+    this.closeAppMenu(false)
+    if (!this.updateAvailable || this.updateBusy) {
       return
     }
-    const mac = currentIsMacPlatform()
+    try {
+      await this.prepareToClose()
+    } catch (error) {
+      this.setMessage(`Could not prepare update: ${errorMessage(error)}`, 'error')
+      return
+    }
+    await this.updateController.updateAndRestart()
+  }
+
+  private setShortcutsPlatform(platform: ShortcutPlatform, focus = false): void {
+    if (this.shortcutsPlatform === platform && !focus) {
+      return
+    }
+    this.shortcutsPlatform = platform
+    this.renderSettingsDialog()
+    if (focus) {
+      this.element<HTMLButtonElement>(platform === 'macos' ? '#shortcuts-macos-tab' : '#shortcuts-linux-tab').focus()
+    }
+  }
+
+  private openSettingsDialog(section: SettingsSection = 'appearance'): void {
+    if (!this.settingsDialogOpen) {
+      const active = document.activeElement
+      this.settingsDialogFocusTarget = active instanceof HTMLElement ? active : null
+      this.settingsDialogOpen = true
+    }
+    this.settingsSection = section
+    this.renderSettingsDialog()
+    queueMicrotask(() => {
+      if (!this.settingsDialogOpen) {
+        return
+      }
+      if (this.settingsSection === 'keymap') {
+        this.element<HTMLButtonElement>(this.shortcutsPlatform === 'macos'
+          ? '#shortcuts-macos-tab'
+          : '#shortcuts-linux-tab').focus()
+      } else {
+        this.root.querySelector<HTMLInputElement>('#settings-form input:checked')?.focus()
+      }
+    })
+  }
+
+  private closeSettingsDialog(): void {
+    if (!this.settingsDialogOpen) {
+      return
+    }
+    this.settingsDialogOpen = false
+    const target = this.settingsDialogFocusTarget
+    this.settingsDialogFocusTarget = null
+    this.renderSettingsDialog()
+    if (target && target.isConnected && !target.closest('[hidden]')) {
+      target.focus()
+    } else {
+      this.element<HTMLButtonElement>('#app-menu-button').focus()
+    }
+  }
+
+  private setSettingsSection(section: SettingsSection, focus = false): void {
+    if (this.settingsSection === section && !focus) {
+      return
+    }
+    this.settingsSection = section
+    this.renderSettingsDialog()
+    if (focus) {
+      this.element<HTMLButtonElement>(section === 'keymap'
+        ? '#settings-keymap-nav'
+        : '#settings-appearance-nav').focus()
+    }
+  }
+
+  private renderSettingsDialog(): void {
+    const dialog = this.root.querySelector<HTMLElement>('#settings-dialog')
+    if (!dialog) {
+      return
+    }
+    dialog.hidden = !this.settingsDialogOpen
+    const appearanceNav = this.element<HTMLButtonElement>('#settings-appearance-nav')
+    const keymapNav = this.element<HTMLButtonElement>('#settings-keymap-nav')
+    const appearancePanel = this.element<HTMLElement>('#settings-appearance-panel')
+    const keymapPanel = this.element<HTMLElement>('#settings-keymap-panel')
+    const appearanceSelected = this.settingsSection === 'appearance'
+    for (const [tab, selected] of [[appearanceNav, appearanceSelected], [keymapNav, !appearanceSelected]] as const) {
+      tab.classList.toggle('is-active', selected)
+      tab.setAttribute('aria-selected', String(selected))
+      tab.tabIndex = selected ? 0 : -1
+    }
+    appearancePanel.hidden = !appearanceSelected
+    keymapPanel.hidden = appearanceSelected
+    const linuxTab = this.element<HTMLButtonElement>('#shortcuts-linux-tab')
+    const macosTab = this.element<HTMLButtonElement>('#shortcuts-macos-tab')
+    const mac = this.shortcutsPlatform === 'macos'
+    for (const [tab, selected] of [[linuxTab, !mac], [macosTab, mac]] as const) {
+      tab.classList.toggle('is-active', selected)
+      tab.setAttribute('aria-selected', String(selected))
+      tab.tabIndex = selected ? 0 : -1
+    }
+    const body = this.element<HTMLElement>('#shortcuts-body')
+    body.setAttribute('aria-labelledby', mac ? 'shortcuts-macos-tab' : 'shortcuts-linux-tab')
+    body.innerHTML = ''
+    keymapPanel.classList.toggle('is-macos', mac)
+    this.root.querySelectorAll<HTMLInputElement>('#settings-form input[name="theme-mode"]').forEach((input) => {
+      input.checked = input.value === this.themeMode
+    })
     for (const section of SHORTCUT_SECTIONS) {
       const group = document.createElement('section')
       group.className = 'shortcuts-group'
@@ -4524,7 +5135,11 @@ export class LeetcoderApp {
             keys.append(document.createTextNode(' / '))
           }
           const key = document.createElement('kbd')
-          key.textContent = formatShortcut(binding, mac)
+          const label = formatShortcut(binding, mac)
+          const displayLabel = mac ? macShortcutDialogLabel(binding, label) : label
+          key.textContent = displayLabel
+          key.setAttribute('aria-label', displayLabel)
+          key.title = displayLabel
           keys.append(key)
         }
         const description = document.createElement('dd')
@@ -4588,6 +5203,58 @@ export class LeetcoderApp {
     this.element<HTMLElement>('#discard-git-path').textContent = file.path
     this.element<HTMLElement>('#discard-git-message').textContent = discardGitChangesWarningMessage()
     this.element<HTMLButtonElement>('#confirm-discard-git').disabled = this.state.busy || this.state.git.busy
+  }
+
+  private openDeleteFileDialog(): void {
+    const context = this.state.contextMenu
+    if (!context || !this.state.repoPath || !this.state.projectValid || this.state.busy) {
+      return
+    }
+    this.deleteDialogFocusTarget = Array.from(this.root.querySelectorAll<HTMLElement>('.file-item'))
+      .find((item) => sameFilePath(item.dataset.path ?? '', context.file.path))
+      ?? null
+    this.closeFileContextMenu()
+    this.deleteDialogFile = context.file
+    this.renderDeleteFileDialog()
+    queueMicrotask(() => {
+      if (this.deleteDialogFile === context.file) {
+        this.element<HTMLButtonElement>('#cancel-delete-file').focus()
+      }
+    })
+  }
+
+  private closeDeleteFileDialog(): void {
+    if (!this.deleteDialogFile) {
+      return
+    }
+    const focusTarget = this.deleteDialogFocusTarget
+    this.deleteDialogFile = null
+    this.deleteDialogFocusTarget = null
+    this.renderDeleteFileDialog()
+    if (focusTarget?.isConnected && !focusTarget.closest('[hidden]')) {
+      focusTarget.focus()
+    } else {
+      this.element<HTMLInputElement>('#file-search').focus()
+    }
+  }
+
+  private confirmDeleteFileDialog(): void {
+    const file = this.deleteDialogFile
+    if (!file || this.state.busy) {
+      return
+    }
+    this.deleteDialogFile = null
+    this.deleteDialogFocusTarget = null
+    this.renderDeleteFileDialog()
+    void this.deleteFileAfterConfirmation(file)
+  }
+
+  private renderDeleteFileDialog(): void {
+    const dialog = this.element<HTMLElement>('#delete-file-dialog')
+    const file = this.deleteDialogFile
+    dialog.hidden = !file
+    this.element<HTMLElement>('#delete-file-name').textContent = file?.name ?? ''
+    this.element<HTMLButtonElement>('#confirm-delete-file').disabled = this.state.busy
   }
 
   private renderContextMenu(): void {
@@ -4839,25 +5506,18 @@ export class LeetcoderApp {
     }
   }
 
-  private async deleteContextMenuFile(): Promise<void> {
-    const context = this.state.contextMenu
+  private async deleteFileAfterConfirmation(file: ProblemFileEntry): Promise<void> {
     const repoPath = this.state.repoPath
-    if (!context || !repoPath || !this.state.projectValid || this.state.busy) {
+    if (!repoPath || !this.state.projectValid || this.state.busy) {
       return
     }
     const method = (this.backend as unknown as FileManagementBackend).deleteProblemFile
     if (!method) {
-      this.closeFileContextMenu()
       this.setMessage('Not available in this build', 'error')
       return
     }
-    if (!confirmDeleteFile(context.file.name)) {
-      return
-    }
-    const file = context.file
     const repositoryGeneration = this.repositoryGeneration
     const operationId = ++this.fileOperationId
-    this.closeFileContextMenu()
     this.state.busy = true
     this.renderAll()
     try {
@@ -5322,6 +5982,7 @@ export class LeetcoderApp {
     // option marked selected with an empty detail pane.
     if (this.state.selectedTestKey !== null && selectedTest === null) {
       this.state.selectedTestKey = null
+      this.testSelectionExplicit = false
     }
 
     const workspace = document.createElement('div')
@@ -5355,25 +6016,6 @@ export class LeetcoderApp {
     detailPane.setAttribute('aria-live', 'polite')
     if (selectedTest) {
       detailPane.setAttribute('aria-label', `Details for ${selectedTest.displayName || selectedTest.name}`)
-      const heading = document.createElement('div')
-      heading.className = 'test-detail-heading'
-      const title = document.createElement('h3')
-      title.className = 'test-detail-title'
-      title.textContent = selectedTest.displayName || selectedTest.name
-      heading.append(this.statusIcon(selectedTest.status), title)
-      if (selectedTest.durationMs !== null && selectedTest.durationMs !== undefined) {
-        const duration = document.createElement('span')
-        duration.className = 'test-duration'
-        duration.textContent = formatDuration(selectedTest.durationMs)
-        heading.append(duration)
-      }
-      detailPane.append(heading)
-      if (selectedTest.className) {
-        const className = document.createElement('p')
-        className.className = 'test-detail-class'
-        className.textContent = selectedTest.className
-        detailPane.append(className)
-      }
       detailPane.append(this.renderTestCase(selectedTest))
     } else {
       detailPane.setAttribute('aria-label', 'Test run output')
@@ -5478,6 +6120,7 @@ export class LeetcoderApp {
 
   private selectTestResult(key: string, focus = false): void {
     const nextKey = key === TEST_RUN_ROOT_KEY ? null : key
+    this.testSelectionExplicit = true
     if (this.state.selectedTestKey === nextKey) {
       return
     }
@@ -5490,20 +6133,32 @@ export class LeetcoderApp {
     }
   }
 
+  private autoSelectFailedTest(result: TestResult): void {
+    this.state.selectedTestKey = autoSelectedTestKey(
+      result.tests,
+      this.state.selectedTestKey,
+      this.testSelectionExplicit,
+    )
+  }
+
   /** Render assertion metadata, stack details, and the selected test console. */
   private renderTestCase(test: TestCaseResult): HTMLElement {
     const failed = test.status === 'failed' || test.status === 'error'
     const detail = document.createElement('div')
     detail.className = `test-detail-content test-row-${test.status}`
-    const failureSummary = conciseTestFailureMessage(test)
+    const output = this.renderOutputConsole(test.stdout, test.stderr)
+    if (output) {
+      detail.append(output)
+    }
+    const hasExpected = test.expected !== null && test.expected !== undefined
+    const hasActual = test.actual !== null && test.actual !== undefined
+    const failureSummary = hasExpected && hasActual ? null : conciseTestFailureMessage(test)
     if (failureSummary) {
       const message = document.createElement('p')
       message.className = 'failure-message'
       message.textContent = failureSummary
       detail.append(message)
     }
-    const hasExpected = test.expected !== null && test.expected !== undefined
-    const hasActual = test.actual !== null && test.actual !== undefined
     const diff = hasExpected && hasActual ? charDiffSegments(test.expected!, test.actual!) : null
     if (hasExpected) {
       detail.append(renderComparisonValue(
@@ -5543,10 +6198,6 @@ export class LeetcoderApp {
       stacktrace.textContent = test.details
       stack.append(stacktrace)
       detail.append(stack)
-    }
-    const output = this.renderOutputConsole(test.stdout, test.stderr)
-    if (output) {
-      detail.append(output)
     }
     return detail
   }
@@ -5734,6 +6385,24 @@ function safeStorage(): Storage | undefined {
   }
 }
 
+/** Accept only the persisted appearance modes supported by the settings UI. */
+export function normalizeThemeMode(value: unknown): ThemeMode {
+  return value === 'system' || value === 'light' || value === 'dark' ? value : 'dark'
+}
+
+export function readThemeMode(storage: Storage | undefined): ThemeMode {
+  return normalizeThemeMode(storage?.getItem(THEME_MODE_KEY))
+}
+
+/** Apply an appearance immediately while leaving the selected mode persisted separately. */
+export function applyTheme(mode: ThemeMode): void {
+  if (typeof document === 'undefined') {
+    return
+  }
+  document.documentElement.dataset.theme = mode
+  document.documentElement.style.colorScheme = mode === 'system' ? 'dark light' : mode
+}
+
 /** The 6px colored difficulty dot in a sidebar group heading. */
 function createGroupDot(groupKey: ProblemFileEntry['packageSegment']): HTMLElement {
   const dot = document.createElement('span')
@@ -5745,6 +6414,45 @@ function createGroupDot(groupKey: ProblemFileEntry['packageSegment']): HTMLEleme
 /** Detect Apple platforms from explicit navigator values without reading globals. */
 export function isMacPlatform(platform: string, userAgent = ''): boolean {
   return /Mac|iPhone|iPad|iPod/i.test(`${platform} ${userAgent}`)
+}
+
+/** The first shortcut tab follows the operating system running the app. */
+export function defaultShortcutPlatform(macPlatform: boolean): ShortcutPlatform {
+  return macPlatform ? 'macos' : 'linux'
+}
+
+/**
+ * Use readable modifier names in the macOS shortcut dialog while keeping the
+ * formatter output available to the hover tooltip. The binding remains the
+ * source of truth; these are display aliases only.
+ */
+export function macShortcutDialogLabel(binding: string, formatted: string): string {
+  const parts = binding.split('-')
+  const key = parts.at(-1)
+  const modifiers = parts.slice(0, -1)
+  const modifierNames: Readonly<Record<string, string>> = {
+    Shift: 'Shift',
+    Mod: 'Cmd',
+    Cmd: 'Cmd',
+    Alt: 'Opt',
+    Ctrl: 'Ctrl',
+  }
+  const keyNames: Readonly<Record<string, string>> = {
+    ArrowUp: 'Arrow Up',
+    ArrowDown: 'Arrow Down',
+    ArrowLeft: 'Arrow Left',
+    ArrowRight: 'Arrow Right',
+    Backspace: 'Backspace',
+    Enter: 'Enter',
+    Escape: 'Esc',
+    Space: 'Space',
+  }
+  if (!key) {
+    return formatted
+  }
+  const keyLabel = keyNames[key] ?? (key.length === 1 ? key.toUpperCase() : key)
+  const modifierLabels = modifiers.map((modifier) => modifierNames[modifier] ?? modifier)
+  return [...modifierLabels, keyLabel].join(' + ')
 }
 
 function currentIsMacPlatform(): boolean {
@@ -6107,13 +6815,6 @@ function findFileAfterRename(
       && gitDirectoryPath(file.path) === gitDirectoryPath(original.path)
       && file.name.toLocaleLowerCase() === newName.toLocaleLowerCase())
     ?? null
-}
-
-function confirmDeleteFile(fileName: string): boolean {
-  if (typeof window === 'undefined' || typeof window.confirm !== 'function') {
-    return false
-  }
-  return window.confirm(deleteFileConfirmationMessage(fileName))
 }
 
 export function discardGitChangesConfirmationMessage(filePath: string): string {

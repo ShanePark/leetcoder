@@ -6,6 +6,7 @@ import {
   normalizeGitCommitResult,
   normalizeGitDiff,
   normalizeGitPushResult,
+  normalizeUpdateStatus,
   normalizeTestResult,
   normalizeTestRunProgress,
   type Invoke,
@@ -14,6 +15,45 @@ import {
 } from '../../src/backend'
 
 describe('backend client', () => {
+  it('normalizes local update status and accepts the Rust snake-case shape', () => {
+    expect(normalizeUpdateStatus({
+      supported: true,
+      available: true,
+      current_commit: 'old',
+      latest_commit: 'new',
+    })).toEqual({
+      supported: true,
+      available: true,
+      currentCommit: 'old',
+      latestCommit: 'new',
+    })
+    expect(normalizeUpdateStatus({ currentCommit: 'same', latestCommit: 'same' })).toEqual({
+      supported: true,
+      available: false,
+      currentCommit: 'same',
+      latestCommit: 'same',
+    })
+  })
+
+  it('invokes the native update commands', async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
+    const invoke: Invoke = async (command, args) => {
+      calls.push({ command, args })
+      if (command === 'check_for_update') {
+        return { supported: true, available: false, currentCommit: 'same', latestCommit: 'same' }
+      }
+      if (command === 'update_and_restart') return undefined
+      throw new Error(`unexpected command ${command}`)
+    }
+    const backend = createBackendClient(invoke)
+    await expect(backend.checkForUpdate()).resolves.toMatchObject({ supported: true })
+    await expect(backend.updateAndRestart()).resolves.toBeUndefined()
+    expect(calls).toEqual([
+      { command: 'check_for_update', args: undefined },
+      { command: 'update_and_restart', args: undefined },
+    ])
+  })
+
   it('normalizes Git status paths and preserves staged/worktree columns', () => {
     expect(normalizeGitChanges({ changes: [{
       path: 'src/a file.java',

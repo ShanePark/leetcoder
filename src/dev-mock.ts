@@ -10,6 +10,7 @@ import type {
   TestDiagnostic,
   TestResult,
   TestRunProgressHandler,
+  UpdateStatus,
 } from './backend'
 import type { ProblemFilePlan } from './domain'
 
@@ -520,6 +521,19 @@ export function createDevMockBackend(): BackendClient & {
 
     async onRepositoryFilesChanged(): Promise<() => void> {
       return () => {}
+    },
+
+    async checkForUpdate(): Promise<UpdateStatus> {
+      return {
+        supported: false,
+        available: false,
+        currentCommit: '',
+        latestCommit: '',
+      }
+    },
+
+    async updateAndRestart(): Promise<void> {
+      throw new Error('Updates are unavailable in the browser preview.')
     },
   }
 }

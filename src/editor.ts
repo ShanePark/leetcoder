@@ -6,7 +6,7 @@ import {
   completionStatus,
   startCompletion,
 } from '@codemirror/autocomplete'
-import { java } from '@codemirror/lang-java'
+import { java, javaLanguage } from '@codemirror/lang-java'
 import {
   HighlightStyle,
   bracketMatching,
@@ -14,6 +14,8 @@ import {
   foldEffect,
   foldGutter,
   foldService,
+  getIndentation,
+  indentString,
   indentOnInput,
   indentRange,
   indentUnit,
@@ -28,11 +30,16 @@ import {
   history,
   historyKeymap,
   indentWithTab,
+  moveLineDown,
+  moveLineUp,
   redo,
+  selectAll,
+  toggleComment,
   undo,
 } from '@codemirror/commands'
 import {
   EditorState,
+  EditorSelection,
   Prec,
   RangeSet,
   RangeSetBuilder,
@@ -63,7 +70,7 @@ import {
 } from './completions'
 import type { ClipboardBridge } from './clipboard'
 import { createClipboardBridge } from './clipboard'
-import { shortcutBindings, shortcutLabel } from './shortcuts'
+import { platformShortcutBindings, shortcutLabel } from './shortcuts'
 import {
   formatJavaSource,
   importBlockRange,
@@ -71,34 +78,24 @@ import {
 } from './java-format'
 
 /**
- * Editor palette derived from the design tokens in styles.css. Keep the two
- * files in sync:
- *   background      = --bg        (#0d1017)
- *   surface         = --surface-2 (#171c27, panels/tooltips)
- *   text            = --text      (#e8ecf4)
- *   textDim         = --text-dim  (#98a2b6)
- *   textFaint       = --text-faint(#5d6778)
- *   accent          = --accent    (#5b9dff)
- *   green           = --green     (#3ecf8e)
- *   amber           = --amber     (#ffbf3f)
- *   red             = --red       (#ff5c7a)
- * Syntax-only colors (no styles.css counterpart): violet #c792ea for
- * keywords, blue #82aaff for types/classes.
+ * Editor palette references the design tokens in styles.css. CSS variables are
+ * used instead of resolved colors so an appearance change can update the
+ * CodeMirror surface without rebuilding the editor state.
  */
 const editorPalette = {
-  background: '#0d1017',
-  surface: '#171c27',
-  text: '#e8ecf4',
-  textDim: '#98a2b6',
-  textFaint: '#5d6778',
-  accent: '#5b9dff',
-  green: '#3ecf8e',
-  amber: '#ffbf3f',
-  red: '#ff5c7a',
-  violet: '#c792ea',
-  blue: '#82aaff',
-  selection: 'rgba(91, 157, 255, 0.22)',
-  activeLine: 'rgba(255, 255, 255, 0.04)',
+  background: 'var(--bg)',
+  surface: 'var(--surface-2)',
+  text: 'var(--text)',
+  textDim: 'var(--text-dim)',
+  textFaint: 'var(--text-faint)',
+  accent: 'var(--accent)',
+  green: 'var(--green)',
+  amber: 'var(--amber)',
+  red: 'var(--red)',
+  violet: 'var(--editor-violet)',
+  blue: 'var(--editor-blue)',
+  selection: 'var(--editor-selection)',
+  activeLine: 'var(--editor-active-line)',
 } as const
 
 const leetcoderTheme = EditorView.theme({
@@ -118,7 +115,7 @@ const leetcoderTheme = EditorView.theme({
     backgroundColor: editorPalette.selection,
   },
   '.cm-selectionMatch': {
-    backgroundColor: 'rgba(91, 157, 255, 0.14)',
+    backgroundColor: 'var(--editor-link-background)',
   },
   '.cm-activeLine': {
     backgroundColor: editorPalette.activeLine,
@@ -158,7 +155,7 @@ const leetcoderTheme = EditorView.theme({
   '.cm-foldPlaceholder': {
     margin: '0 2px',
     padding: '0 6px',
-    border: '1px solid rgba(148, 163, 190, 0.24)',
+    border: '1px solid var(--editor-link-border)',
     borderRadius: '4px',
     backgroundColor: editorPalette.surface,
     color: editorPalette.textDim,
@@ -192,7 +189,7 @@ const leetcoderTheme = EditorView.theme({
     opacity: '0.8',
   },
   '.cm-test-run-button:hover': {
-    backgroundColor: 'rgba(62, 207, 142, 0.14)',
+    backgroundColor: 'var(--green-soft)',
     opacity: '1',
   },
   '.cm-test-run-button:focus-visible': {
@@ -203,17 +200,17 @@ const leetcoderTheme = EditorView.theme({
     color: editorPalette.red,
   },
   '.cm-matchingBracket, &.cm-focused .cm-matchingBracket': {
-    backgroundColor: 'rgba(91, 157, 255, 0.18)',
+    backgroundColor: 'var(--editor-link-background)',
     outline: 'none',
   },
   '.cm-tooltip': {
     backgroundColor: editorPalette.surface,
     color: editorPalette.text,
-    border: '1px solid rgba(148, 163, 190, 0.18)',
+    border: '1px solid var(--border-strong)',
     borderRadius: '8px',
   },
   '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': {
-    backgroundColor: 'rgba(91, 157, 255, 0.13)',
+    backgroundColor: 'var(--accent-soft)',
     color: editorPalette.text,
   },
   '.cm-panels': {
@@ -241,7 +238,8 @@ export interface EditorCallbacks {
   onRun?: () => boolean | void
   onRunTestAtCursor?: (methodName: string | null) => boolean | void
   onShowShortcuts?: () => void
-  /** Overridable so tests can drive cut and paste without a system clipboard. */
+  onShowSettings?: () => void
+  /** Overridable so tests can drive clipboard shortcuts without a system clipboard. */
   clipboard?: ClipboardBridge
 }
 
@@ -709,9 +707,33 @@ export function isPasteAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return isPlainAltShortcut(event, 'KeyV')
 }
 
-/** Match the Option+/ form that opens the shortcut list. */
-export function isShortcutHelpAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+/** Match the Option+C form when the keymap cannot consume it. */
+export function isCopyAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyC')
+}
+
+/** Match the Option+A form of Select All on its physical key. */
+export function isSelectAllAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyA')
+}
+
+/** Match the plain Option+/ form that toggles a line comment. */
+export function isToggleCommentAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return isPlainAltShortcut(event, 'Slash')
+}
+
+/** Match the shifted Option+/ form that opens the shortcut list. */
+export function isShortcutHelpAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'Slash'
+    && event.altKey
+    && event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the Option+S form when the keymap cannot consume it. */
+export function isSaveAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyS')
 }
 
 /** Match the Option+Z form when the keymap cannot consume it. */
@@ -734,6 +756,151 @@ export function isReformatShortcut(event: JavaDocAltShortcutEvent): boolean {
     && event.altKey
     && !event.shiftKey
     && (event.metaKey || event.ctrlKey)
+}
+
+/** Match the Shift+Option+Enter form of Complete Current Statement. */
+export function isCompleteStatementAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'Enter'
+    && event.shiftKey
+    && event.altKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the Option+Right Arrow form of Move to Line End. */
+export function isLineEndAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'ArrowRight'
+    && event.altKey
+    && !event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the Linux physical-key form for moving a line one row upward. */
+export function isMoveLineUpAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'ArrowUp'
+    && event.altKey
+    && event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the Linux physical-key form for moving a line one row downward. */
+export function isMoveLineDownAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'ArrowDown'
+    && event.altKey
+    && event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the Linux physical-key form of the Settings shortcut. */
+export function isSettingsAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'Comma')
+}
+
+/**
+ * CodeMirror wraps a non-empty selection when `(` is typed. Completion can
+ * leave the just-typed Java identifier selected, where that behavior turns a
+ * method call into `(methodName)`. Collapse only an exact identifier to its
+ * end before the normal close-brackets input handler runs.
+ */
+export function prepareSelectedJavaIdentifierCall(view: EditorView): boolean {
+  const selection = view.state.selection.main
+  if (view.state.selection.ranges.length !== 1 || selection.empty) {
+    return false
+  }
+  const selected = view.state.sliceDoc(selection.from, selection.to)
+  if (!isJavaIdentifier(selected)) {
+    return false
+  }
+  const identifier = javaIdentifierAt(view.state.doc.toString(), selection.from)
+  if (!identifier || identifier.from !== selection.from || identifier.to !== selection.to) {
+    return false
+  }
+  view.dispatch({ selection: { anchor: selection.to } })
+  return true
+}
+
+/**
+ * Handle the input event itself when a browser doesn't expose `(` on the
+ * keydown event (keyboard layouts and IMEs can do that). This runs before
+ * closeBrackets, so the selected identifier is never handed to its wrapping
+ * behavior as the range to replace.
+ */
+export function handleJavaIdentifierCallInput(
+  view: EditorView,
+  from: number,
+  to: number,
+  text: string,
+): boolean {
+  if (text !== '(') {
+    return false
+  }
+  const selection = view.state.selection.main
+  if (view.state.selection.ranges.length !== 1
+    || selection.empty
+    || selection.from !== from
+    || selection.to !== to) {
+    return false
+  }
+  const selected = view.state.sliceDoc(selection.from, selection.to)
+  if (!isJavaIdentifier(selected)) {
+    return false
+  }
+  const identifier = javaIdentifierAt(view.state.doc.toString(), selection.from)
+  if (!identifier || identifier.from !== selection.from || identifier.to !== selection.to) {
+    return false
+  }
+
+  // Match closeBrackets' default `before` rule. If another non-whitespace
+  // character follows, leave the insertion to closeBrackets' normal wrapper
+  // behavior rather than changing unrelated selection editing.
+  const next = view.state.sliceDoc(selection.to, selection.to + 1)
+  if (next && !/[\s)\]}:;>]/.test(next)) {
+    return false
+  }
+
+  view.dispatch({
+    changes: { from: selection.to, insert: '()' },
+    selection: { anchor: selection.to + 1 },
+    scrollIntoView: true,
+    userEvent: 'input.type',
+  })
+  return true
+}
+
+/**
+ * Handle a printable `(` key before the browser creates an input event.
+ *
+ * A keymap command can prevent the browser from replaying the same key after
+ * dispatching the transaction, which keeps the original selection from being
+ * handed to closeBrackets a second time. Returning false deliberately leaves
+ * all other selections to the normal close-brackets behavior.
+ */
+export function handleJavaIdentifierCallKey(view: EditorView): boolean {
+  const selection = view.state.selection.main
+  if (view.state.selection.ranges.length !== 1 || selection.empty) {
+    return false
+  }
+  return handleJavaIdentifierCallInput(view, selection.from, selection.to, '(')
+}
+
+/** Key names for both an unshifted layout and the usual Shift+9 `(` input. */
+const javaIdentifierCallKeyBindings = [
+  { key: '(', run: handleJavaIdentifierCallKey },
+  { key: 'Shift-(', run: handleJavaIdentifierCallKey },
+]
+
+/** High-precedence keymap used by the editor and its keyboard regression tests. */
+export const javaIdentifierCallKeymap = Prec.highest(keymap.of(javaIdentifierCallKeyBindings))
+
+/** Match the IntelliJ-style Ctrl/Command+Option+V chord by physical key. */
+export function isIntroduceVariableShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyV'
+    && event.altKey
+    && !event.shiftKey
+    && (event.metaKey !== event.ctrlKey)
 }
 
 function lineAt(source: string, position: number): SourceLine {
@@ -783,6 +950,473 @@ function lineBreakFor(source: string, line?: SourceLine): string {
   }
   const match = /\r\n|\r|\n/.exec(source)
   return match?.[0] ?? '\n'
+}
+
+export interface JavaStatementCompletion {
+  /** Position at which completion text is inserted, before trailing spaces/comments. */
+  semicolonFrom: number
+  /** Empty when the current statement already has its semicolon. */
+  semicolon: string
+  /** Closing parentheses/brackets needed to make the statement syntactically complete. */
+  closing: string
+  /** Cursor position immediately after the completed statement. */
+  cursor: number
+}
+
+function lineCodeEnd(text: string): number {
+  let blockComment = false
+  let quote: '"' | "'" | null = null
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    const next = text[index + 1]
+    if (blockComment) {
+      if (character === '*' && next === '/') {
+        blockComment = false
+        index += 1
+      }
+      continue
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false
+      } else if (character === '\\') {
+        escaped = true
+      } else if (character === quote) {
+        quote = null
+      }
+      continue
+    }
+    if (character === '/' && next === '/') {
+      return index
+    }
+    if (character === '/' && next === '*') {
+      blockComment = true
+      index += 1
+    } else if (character === '"' || character === "'") {
+      quote = character
+    }
+  }
+  return text.length
+}
+
+function balancedJavaDelimiters(text: string): boolean {
+  const stack: string[] = []
+  let quote: '"' | "'" | null = null
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (quote) {
+      if (escaped) {
+        escaped = false
+      } else if (character === '\\') {
+        escaped = true
+      } else if (character === quote) {
+        quote = null
+      }
+      continue
+    }
+    if (character === '"' || character === "'") {
+      quote = character
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') {
+      stack.push(character)
+      continue
+    }
+    if (character !== ')' && character !== ']' && character !== '}') {
+      continue
+    }
+    const opening = character === ')' ? '(' : character === ']' ? '[' : '{'
+    if (stack.pop() !== opening) {
+      return false
+    }
+  }
+  return quote === null && stack.length === 0
+}
+
+/**
+ * Return the closing delimiters needed by a source fragment, or null when its
+ * delimiters are mismatched. Parentheses and square brackets can be repaired
+ * for an incomplete expression; an unmatched brace is deliberately rejected
+ * because it may be the beginning of a block rather than an expression.
+ */
+function missingJavaClosingDelimiters(text: string): string | null {
+  const stack: string[] = []
+  let blockComment = false
+  let quote: '"' | "'" | null = null
+  let escaped = false
+  let textBlock = false
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    const next = text[index + 1]
+    if (blockComment) {
+      if (character === '*' && next === '/') {
+        blockComment = false
+        index += 1
+      }
+      continue
+    }
+    if (textBlock) {
+      if (character === '"' && next === '"' && text[index + 2] === '"'
+        && !isEscaped(text, index)) {
+        textBlock = false
+        index += 2
+      }
+      continue
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false
+      } else if (character === '\\') {
+        escaped = true
+      } else if (character === quote) {
+        quote = null
+      }
+      continue
+    }
+    if (character === '/' && next === '*') {
+      blockComment = true
+      index += 1
+      continue
+    }
+    if (character === '"' && next === '"' && text[index + 2] === '"'
+      && !isEscaped(text, index)) {
+      textBlock = true
+      index += 2
+      continue
+    }
+    if (character === '"' || character === "'") {
+      quote = character
+      continue
+    }
+    if (character === '(') {
+      stack.push(')')
+      continue
+    }
+    if (character === '[') {
+      stack.push(']')
+      continue
+    }
+    if (character === '{') {
+      stack.push('}')
+      continue
+    }
+    if (character !== ')' && character !== ']' && character !== '}') {
+      continue
+    }
+    if (stack.pop() !== character) {
+      return null
+    }
+  }
+
+  if (blockComment || textBlock || quote !== null || stack.includes('}')) {
+    return null
+  }
+  return stack.reverse().join('')
+}
+
+function hasJavaSyntaxError(node: JavaSyntaxNode): boolean {
+  if (node.type.isError) {
+    return true
+  }
+  for (let child = node.firstChild; child; child = child.nextSibling) {
+    if (hasJavaSyntaxError(child)) {
+      return true
+    }
+  }
+  return false
+}
+
+function isStatementCandidate(text: string, closing = ''): boolean {
+  const statement = text.trim().replace(/;\s*$/, '').trimEnd()
+  if (!statement || missingJavaClosingDelimiters(statement) === null) {
+    return false
+  }
+  if (/^(?:package|import|@)\b/.test(statement)) {
+    return false
+  }
+  // Parse the exact text that the command would produce. The Java grammar
+  // keeps recoverable parse errors as zero-width `⚠` nodes, so checking only
+  // the top-level statement name would incorrectly accept `foo =;` and
+  // `return value +;` as completable statements.
+  const tree = javaLanguage.parser.parse(`${statement}${closing};`)
+  const node = tree.topNode.firstChild
+  if (!node || node.nextSibling || hasJavaSyntaxError(tree.topNode)) {
+    return false
+  }
+  return new Set([
+    'AssertStatement',
+    'BreakStatement',
+    'ContinueStatement',
+    'ExpressionStatement',
+    'LocalVariableDeclaration',
+    'ReturnStatement',
+    'ThrowStatement',
+    'YieldStatement',
+  ]).has(node.name)
+}
+
+/** Plan the minimal syntax completion for the current Java statement. */
+export function planJavaStatementCompletion(
+  source: string,
+  position: number,
+): JavaStatementCompletion | null {
+  const line = lineAt(source, position)
+  if (isInsideCommentOrString(source, line.from) || isInsideCommentOrString(source, position)) {
+    return null
+  }
+  const codeEnd = line.from + lineCodeEnd(line.text)
+  const code = source.slice(line.from, codeEnd)
+  const trimmed = code.trim()
+  if (!trimmed || code.includes('/*')) {
+    return null
+  }
+  const hasSemicolon = /;\s*$/.test(trimmed)
+  const statement = hasSemicolon ? trimmed.slice(0, -1).trimEnd() : trimmed
+  const closing = missingJavaClosingDelimiters(statement)
+  if (closing === null || !isStatementCandidate(statement, closing)) {
+    return null
+  }
+  const codeEndWithoutSpaces = line.from + code.trimEnd().length
+  const semicolonPosition = hasSemicolon ? codeEndWithoutSpaces - 1 : codeEndWithoutSpaces
+  const semicolonFrom = closing && hasSemicolon ? semicolonPosition : codeEndWithoutSpaces
+  const semicolon = hasSemicolon ? '' : ';'
+  return {
+    semicolonFrom,
+    semicolon,
+    closing,
+    cursor: hasSemicolon
+      ? codeEndWithoutSpaces + closing.length
+      : semicolonFrom + closing.length + semicolon.length,
+  }
+}
+
+/** Complete the current Java statement without inserting a line break. */
+export function completeJavaStatement(view: EditorView): boolean {
+  const { state } = view
+  const selection = state.selection.main
+  if (state.selection.ranges.length !== 1 || !selection.empty) {
+    return false
+  }
+  const plan = planJavaStatementCompletion(state.doc.toString(), selection.head)
+  if (!plan) {
+    return false
+  }
+  const insert = `${plan.closing}${plan.semicolon}`
+  view.dispatch({
+    ...(insert ? { changes: { from: plan.semicolonFrom, insert } } : {}),
+    selection: { anchor: plan.cursor },
+    userEvent: 'input.completeStatement',
+  })
+  return true
+}
+
+/** Move every cursor to its physical line end, correcting blank-line indent when known. */
+export function moveToJavaLineEnd(view: EditorView): boolean {
+  const { state } = view
+  const changes: Array<{ from: number; to: number; insert: string }> = []
+  const lines = new Set<number>()
+  for (const range of state.selection.ranges) {
+    const line = state.doc.lineAt(range.head)
+    if (line.text.trim() !== '' || lines.has(line.number)) {
+      continue
+    }
+    lines.add(line.number)
+    const columns = getIndentation(state, line.from)
+    if (columns === null) {
+      continue
+    }
+    const indent = indentString(state, columns)
+    if (indent !== line.text) {
+      changes.push({ from: line.from, to: line.to, insert: indent })
+    }
+  }
+  if (changes.length > 0) {
+    view.dispatch({ changes, userEvent: 'input.indent' })
+  }
+  const selection = EditorSelection.create(
+    view.state.selection.ranges.map((range) => (
+      EditorSelection.cursor(view.state.doc.lineAt(range.head).to)
+    )),
+  )
+  view.dispatch({ selection })
+  return true
+}
+
+export interface JavaVariableInsertion {
+  from: number
+  insert: string
+  replaceFrom: number
+  replaceTo: number
+  selected: string
+  name: string
+  nameFrom: number
+  nameTo: number
+}
+
+type JavaSyntaxNode = ReturnType<typeof syntaxTree>['topNode']
+
+const JAVA_KEYWORDS = new Set([
+  'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class',
+  'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final',
+  'finally', 'float', 'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int',
+  'interface', 'long', 'native', 'new', 'package', 'private', 'protected', 'public',
+  'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this',
+  'throw', 'throws', 'transient', 'try', 'void', 'volatile', 'while', 'var', 'true',
+  'false', 'null', 'record', 'sealed', 'permits', 'non-sealed', 'yield',
+])
+
+function javaVariableBase(expression: string): string {
+  const value = expression.trim()
+  const method = /(?:^|\.)([A-Za-z_$][\w$]*)\s*\(/.exec(value)
+  if (method) {
+    const methodName = method[1]
+    const property = /^(?:get|is|has)([A-Z][A-Za-z0-9_$]*)$/.exec(methodName)
+    return property ? property[1][0].toLowerCase() + property[1].slice(1) : methodName
+  }
+  const created = /\bnew\s+(?:[A-Za-z_$][\w$]*\.)*([A-Za-z_$][\w$]*)/.exec(value)
+  if (created) {
+    return created[1][0].toLowerCase() + created[1].slice(1)
+  }
+  const identifier = /^[A-Za-z_$][\w$]*$/.exec(value)
+  if (identifier) {
+    return identifier[0]
+  }
+  const property = /\.([A-Za-z_$][\w$]*)$/.exec(value)
+  return property?.[1] ?? 'value'
+}
+
+function uniqueJavaVariableName(source: string, from: number, to: number, base: string): string {
+  const fallback = /^[A-Za-z_$][\w$]*$/.test(base) && !JAVA_KEYWORDS.has(base) ? base : 'value'
+  const surrounding = `${source.slice(0, from)} ${source.slice(to)}`
+  const used = new Set(surrounding.match(/[A-Za-z_$][\w$]*/g) ?? [])
+  if (!used.has(fallback) && !JAVA_KEYWORDS.has(fallback)) {
+    return fallback
+  }
+  let suffix = 2
+  while (used.has(`${fallback}${suffix}`) || JAVA_KEYWORDS.has(`${fallback}${suffix}`)) {
+    suffix += 1
+  }
+  return `${fallback}${suffix}`
+}
+
+function exactJavaSyntaxNode(
+  state: EditorState,
+  from: number,
+  to: number,
+): JavaSyntaxNode | null {
+  let node: JavaSyntaxNode | null = syntaxTree(state).resolveInner(from, 1)
+  while (node) {
+    if (node.from === from && node.to === to) {
+      return node
+    }
+    node = node.parent
+  }
+  return null
+}
+
+function allowsJavaExpressionSelection(state: EditorState, from: number, to: number): boolean {
+  const exact = exactJavaSyntaxNode(state, from, to)
+  if (!exact) {
+    return true
+  }
+  if (exact.name === 'Definition' || exact.name === 'TypeName' || exact.name === 'PrimitiveType'
+    || exact.name === 'MethodName' || exact.name.endsWith('Statement')) {
+    return false
+  }
+  for (let node = exact.parent; node; node = node.parent) {
+    if (node.name === 'FieldDeclaration') {
+      return false
+    }
+  }
+  return true
+}
+
+/** Plan introducing a `var` for one single-line expression selection. */
+export function planJavaVariableInsertion(
+  source: string,
+  selectionFrom: number,
+  selectionTo: number,
+): JavaVariableInsertion | null {
+  if (selectionFrom < 0 || selectionTo <= selectionFrom || selectionTo > source.length) {
+    return null
+  }
+  const line = lineAt(source, selectionFrom)
+  if (lineAt(source, selectionTo).from !== line.from
+    || isInsideCommentOrString(source, line.from)
+    || isInsideCommentOrString(source, selectionFrom)
+    || isInsideCommentOrString(source, selectionTo)) {
+    return null
+  }
+  const codeEnd = line.from + lineCodeEnd(line.text)
+  const code = source.slice(line.from, codeEnd)
+  const indent = /^[ \t]*/.exec(line.text)?.[0] ?? ''
+  const codeStart = line.from + indent.length
+  const selected = source.slice(selectionFrom, selectionTo)
+  if (code.includes('/*')
+    || selectionFrom < codeStart
+    || selectionTo > codeEnd
+    || selected.trim() !== selected
+    || !balancedJavaDelimiters(selected)
+    || !isStatementCandidate(code.slice(indent.length))) {
+    return null
+  }
+  if (/;/.test(selected) || /(?:^|[^=!<>])=(?!=|>)/.test(selected)) {
+    return null
+  }
+  const name = uniqueJavaVariableName(source, selectionFrom, selectionTo, javaVariableBase(selected))
+  if (/^[A-Za-z_$][\w$]*$/.test(selected)) {
+    return null
+  }
+  const lineBreak = lineBreakFor(source, line)
+  const insert = `${indent}var ${name} = ${selected};${lineBreak}`
+  const nameFrom = line.from + indent.length + 4
+  return {
+    from: line.from,
+    insert,
+    replaceFrom: selectionFrom,
+    replaceTo: selectionTo,
+    selected,
+    name,
+    nameFrom,
+    nameTo: nameFrom + name.length,
+  }
+}
+
+/** Introduce a local `var` for the current single expression selection. */
+export function introduceJavaVariable(view: EditorView): boolean {
+  const { state } = view
+  const selection = state.selection.main
+  if (state.selection.ranges.length !== 1 || selection.empty) {
+    return false
+  }
+  const from = Math.min(selection.from, selection.to)
+  const to = Math.max(selection.from, selection.to)
+  const plan = planJavaVariableInsertion(state.doc.toString(), from, to)
+  if (!plan || !allowsJavaExpressionSelection(state, from, to)) {
+    return false
+  }
+  let changes
+  if (plan.replaceFrom === plan.from + plan.insert.indexOf('var ')) {
+    changes = [{
+      from: plan.from,
+      to: plan.replaceTo,
+      insert: `${plan.insert}${state.sliceDoc(plan.from, plan.replaceFrom)}${plan.name}`,
+    }]
+  } else {
+    changes = [
+      { from: plan.from, insert: plan.insert },
+      { from: plan.replaceFrom, to: plan.replaceTo, insert: plan.name },
+    ]
+  }
+  view.dispatch({
+    changes,
+    selection: { anchor: plan.nameFrom, head: plan.nameTo },
+    userEvent: 'input.introduceVariable',
+  })
+  return true
 }
 
 function javaDocBodyCursor(line: SourceLine): number | null {
@@ -886,6 +1520,26 @@ export function formatJavaDocClipboard(text: string, source: string, position: n
   const withoutTrailingNewlines = normalized.replace(/\n+$/, '')
   const lines = withoutTrailingNewlines.split('\n')
   return [lines[0], ...lines.slice(1).map((line) => `${body.prefix}${line}`)].join('\n')
+}
+
+/** Copy the selected text, or the current line when there is no selection. */
+export function copySelectedText(
+  state: EditorState,
+  clipboard: Pick<ClipboardBridge, 'writeText'>,
+): boolean {
+  const selected = state.selection.ranges.filter((range) => !range.empty)
+  const text = selected.length > 0
+    ? selected
+      .map((range) => state.sliceDoc(range.from, range.to))
+      .join(state.lineBreak)
+    : selectedLineBlocks(state)
+      .map((block) => state.sliceDoc(block.from, block.to))
+      .join('')
+  if (!text) {
+    return false
+  }
+  void clipboard.writeText(text)
+  return true
 }
 
 const setEditorIssues = StateEffect.define<readonly EditorIssue[]>()
@@ -1070,6 +1724,7 @@ export class JavaEditor {
   readonly view: EditorView
 
   constructor(parent: HTMLElement, callbacks: EditorCallbacks = {}) {
+    const macPlatform = isMacPlatform()
     const save = () => callbacks.onSave?.() !== false
     const run = () => callbacks.onRun?.() !== false
     const runTestAtCursor = (view: EditorView): boolean => {
@@ -1078,12 +1733,43 @@ export class JavaEditor {
       // Ctrl+R refresh shortcut from escaping the editor.
       return callbacks.onRunTestAtCursor?.(methodName) !== false
     }
-    const runTestAtCursorShortcut = shortcutBindings('run-test-at-cursor')[0]
-    const runAllTestsShortcut = shortcutBindings('run-test')[0]
-    const shortcutLabel = testRunShortcutLabel(isMacPlatform() ? 'mac' : 'other')
+    const bindings = (id: string): readonly string[] => platformShortcutBindings(id, macPlatform)
+    const runTestAtCursorShortcuts = bindings('run-test-at-cursor')
+    const runAllTestsShortcuts = bindings('run-test')
+    const duplicateLineShortcuts = bindings('duplicate-line')
+    const deleteLineShortcuts = bindings('delete-line')
+    const cutLineShortcuts = bindings('cut-line')
+    const copyShortcuts = bindings('copy')
+    const pasteShortcuts = bindings('paste')
+    const selectAllShortcuts = bindings('select-all')
+    const javaDocShortcuts = bindings('insert-javadoc')
+    const completeStatementShortcuts = bindings('complete-statement')
+    const toggleCommentShortcuts = bindings('toggle-comment')
+    const undoShortcuts = bindings('undo')
+    const redoShortcuts = bindings('redo')
+    const moveLineUpShortcuts = bindings('move-line-up')
+    const moveLineDownShortcuts = bindings('move-line-down')
+    const reformatShortcuts = bindings('reformat')
+    const completeShortcuts = bindings('complete')
+    const saveShortcuts = bindings('save')
+    const lineEndShortcuts = bindings('move-to-line-end')
+    const showShortcutsBindings = bindings('show-shortcuts')
+    const settingsShortcuts = bindings('open-settings')
+    const introduceVariableShortcuts = bindings('introduce-variable')
+    const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const showShortcuts = (): boolean => {
       callbacks.onShowShortcuts?.()
+      return true
+    }
+    const showSettings = (): boolean => {
+      callbacks.onShowSettings?.()
+      return true
+    }
+    const copySelection = (view: EditorView): boolean => {
+      // Consume Alt+C even without a selection so a composed character is not
+      // inserted on layouts where the browser treats Alt+C as text input.
+      copySelectedText(view.state, clipboard)
       return true
     }
 
@@ -1189,22 +1875,41 @@ export class JavaEditor {
       view.dispatch({ effects: setDefinitionHover.of(null) })
     }
 
-    // macOS reports Option+key as a typed glyph, so these bindings cannot be
-    // matched by name in the keymap above and are recognized by physical key.
+    // Linux app shortcuts use the physical Alt key. Register them from
+    // `event.code` at the highest precedence so CodeMirror's built-in
+    // Alt+Shift+Arrow line-copy commands cannot consume the chord first.
     const altShortcutCommands: Array<[
       (event: JavaDocAltShortcutEvent) => boolean,
       (view: EditorView) => boolean,
     ]> = [
-      [isJavaDocAltShortcut, insertJavaDoc],
-      [isLineDuplicateAltShortcut, copyLineDown],
-      [isLineDeleteAltShortcut, deleteLine],
-      [isLineCutAltShortcut, cutSelectionOrLine],
-      [isPasteAltShortcut, pasteFromClipboard],
-      [isShortcutHelpAltShortcut, showShortcuts],
-      [isRedoAltShortcut, redo],
-      [isUndoAltShortcut, undo],
+      ...(!macPlatform ? [
+        [isJavaDocAltShortcut, insertJavaDoc],
+        [isLineDuplicateAltShortcut, copyLineDown],
+        [isLineDeleteAltShortcut, deleteLine],
+        [isLineCutAltShortcut, cutSelectionOrLine],
+        [isCopyAltShortcut, copySelection],
+        [isPasteAltShortcut, pasteFromClipboard],
+        [isSelectAllAltShortcut, selectAll],
+        [isToggleCommentAltShortcut, toggleComment],
+        [isShortcutHelpAltShortcut, showShortcuts],
+        [isSaveAltShortcut, save],
+        [isRedoAltShortcut, redo],
+        [isUndoAltShortcut, undo],
+        [isCompleteStatementAltShortcut, completeJavaStatement],
+        [isLineEndAltShortcut, moveToJavaLineEnd],
+        [isMoveLineUpAltShortcut, moveLineUp],
+        [isMoveLineDownAltShortcut, moveLineDown],
+        [isSettingsAltShortcut, showSettings],
+      ] as Array<[(event: JavaDocAltShortcutEvent) => boolean, (view: EditorView) => boolean]> : []),
       [isReformatShortcut, reformatJavaDocument],
+      [isIntroduceVariableShortcut, introduceJavaVariable],
     ]
+
+    const commandBindings = (
+      keys: readonly string[],
+      command: (view: EditorView) => boolean,
+      preventDefault = true,
+    ) => keys.map((key) => ({ key, run: command, preventDefault }))
 
     const state = EditorState.create({
       doc: '',
@@ -1256,11 +1961,18 @@ export class JavaEditor {
         drawSelection(),
         highlightActiveLine(),
         highlightSpecialChars(),
+        // Handle the actual text insertion before closeBrackets. This is the
+        // reliable path for keyboard layouts whose keydown event doesn't
+        // report the printable `(` key.
+        Prec.high(EditorView.inputHandler.of(handleJavaIdentifierCallInput)),
         closeBrackets(),
         bracketMatching(),
         indentUnit.of('    '),
         EditorState.tabSize.of(4),
         indentOnInput(),
+        // Consume the printable opening parenthesis before the browser can
+        // emit a second input event with the stale selection range.
+        javaIdentifierCallKeymap,
         keymap.of([
           ...closeBracketsKeymap,
           ...completionKeymap,
@@ -1270,30 +1982,31 @@ export class JavaEditor {
         ]),
         Prec.high(keymap.of([
           // Run chords intentionally use Ctrl on both macOS and Linux.
-          { key: 'Mod-s', run: save },
-          { key: 'Alt-s', run: save },
-          { key: runTestAtCursorShortcut, run: runTestAtCursor, preventDefault: true },
-          { key: runAllTestsShortcut, run, preventDefault: true },
-          { key: 'Shift-Mod-j', run: insertJavaDoc },
-          { key: 'Shift-Alt-j', run: insertJavaDoc },
+          ...commandBindings(saveShortcuts, save),
+          ...commandBindings(runTestAtCursorShortcuts, runTestAtCursor),
+          ...commandBindings(runAllTestsShortcuts, run),
+          ...commandBindings(javaDocShortcuts, insertJavaDoc, false),
+          ...commandBindings(completeStatementShortcuts, completeJavaStatement),
+          ...commandBindings(lineEndShortcuts, moveToJavaLineEnd),
+          ...commandBindings(moveLineUpShortcuts, moveLineUp),
+          ...commandBindings(moveLineDownShortcuts, moveLineDown),
+          ...commandBindings(introduceVariableShortcuts, introduceJavaVariable),
           // IntelliJ-style line editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while
           // preserving the document's configured line separator.
-          { key: 'Mod-d', run: copyLineDown, preventDefault: true },
-          { key: 'Alt-d', run: copyLineDown, preventDefault: true },
-          { key: 'Mod-Backspace', run: deleteLine, preventDefault: true },
-          { key: 'Alt-Backspace', run: deleteLine, preventDefault: true },
-          { key: 'Mod-x', run: cutLineWithoutSelection },
-          { key: 'Alt-x', run: cutSelectionOrLine, preventDefault: true },
-          { key: 'Alt-v', run: pasteFromClipboard, preventDefault: true },
-          { key: 'Alt-z', run: undo, preventDefault: true },
-          { key: 'Shift-Alt-z', run: redo, preventDefault: true },
-          // Mod-/ stays on the default keymap's comment toggle, so only the
-          // Alt form opens the shortcut list.
-          { key: 'Alt-/', run: showShortcuts, preventDefault: true },
-          { key: 'Mod-Alt-l', run: reformatJavaDocument, preventDefault: true },
-          { key: 'Ctrl-Space', run: startCompletion },
-          { key: 'Cmd-Space', run: startCompletion },
+          ...commandBindings(duplicateLineShortcuts, copyLineDown),
+          ...commandBindings(deleteLineShortcuts, deleteLine),
+          ...commandBindings(cutLineShortcuts, macPlatform ? cutLineWithoutSelection : cutSelectionOrLine),
+          ...commandBindings(copyShortcuts, copySelection),
+          ...commandBindings(pasteShortcuts, pasteFromClipboard),
+          ...commandBindings(selectAllShortcuts, selectAll),
+          ...commandBindings(undoShortcuts, undo),
+          ...commandBindings(redoShortcuts, redo),
+          ...commandBindings(toggleCommentShortcuts, toggleComment),
+          ...commandBindings(showShortcutsBindings, showShortcuts),
+          ...commandBindings(settingsShortcuts, showSettings),
+          ...commandBindings(reformatShortcuts, reformatJavaDocument),
+          ...commandBindings(completeShortcuts, startCompletion, false),
         ])),
         EditorView.clipboardInputFilter.of((text, state) => state.selection.ranges.length === 1
           ? formatJavaDocClipboard(text, state.doc.toString(), state.selection.main.head)
@@ -1308,6 +2021,25 @@ export class JavaEditor {
             callbacks.onChange?.(update.state.doc.toString())
           }
         }),
+        // CodeMirror's built-in keymap contains an Alt+ArrowRight movement
+        // command. Run our physical-key fallbacks before that keymap so the
+        // Linux Cmd-equivalent cannot be consumed as a group/line movement.
+        // The same ordering also makes Option-letter shortcuts reliable on
+        // macOS, where the browser reports a composed glyph in event.key.
+        Prec.highest(EditorView.domEventHandlers({
+          keydown: (event, view) => {
+            const command = altShortcutCommands.find(([matches]) => matches(event))?.[1]
+            if (!command) {
+              return false
+            }
+            const handled = command(view)
+            if (handled) {
+              event.preventDefault()
+              event.stopPropagation()
+            }
+            return handled
+          },
+        })),
         EditorView.domEventHandlers({
           click: (event, view) => {
             if (event.button !== 0 || !(event.metaKey || event.altKey || event.ctrlKey)) {
@@ -1339,17 +2071,6 @@ export class JavaEditor {
             }
             clearDefinitionHover(view)
             return false
-          },
-          keydown: (event, view) => {
-            const command = altShortcutCommands.find(([matches]) => matches(event))?.[1]
-            if (!command) {
-              return false
-            }
-            const handled = command(view)
-            if (handled) {
-              event.preventDefault()
-            }
-            return handled
           },
         }),
       ],

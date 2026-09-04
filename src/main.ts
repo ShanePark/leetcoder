@@ -17,11 +17,15 @@ const options: AppOptions = isDevMockActive()
   }
   : {}
 
-const app = new LeetcoderApp(root, options)
+let requestClose: (() => Promise<void>) | null = null
+const app = new LeetcoderApp(root, {
+  ...options,
+  requestClose: () => requestClose?.() ?? Promise.resolve(),
+})
 void bootstrap(app)
 
 async function bootstrap(editorApp: LeetcoderApp): Promise<void> {
-  await installCloseHandler(editorApp)
+  requestClose = await installCloseHandler(editorApp)
   await editorApp.start()
 }
 
@@ -30,7 +34,7 @@ async function bootstrap(editorApp: LeetcoderApp): Promise<void> {
  * preview remains usable. In the desktop runtime, prevent the native close
  * until the current editor snapshot has reached disk.
  */
-async function installCloseHandler(editorApp: LeetcoderApp): Promise<void> {
+async function installCloseHandler(editorApp: LeetcoderApp): Promise<() => Promise<void>> {
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window')
     const currentWindow = getCurrentWindow()
@@ -53,8 +57,14 @@ async function installCloseHandler(editorApp: LeetcoderApp): Promise<void> {
         console.error('Could not close leetcoder safely.', error)
       }
     })
+    return () => currentWindow.close()
   } catch {
     // The Vite browser preview has no Tauri window bridge; it needs no close
     // interception and should remain a normal browser page.
+    return async () => {
+      if (typeof window !== 'undefined') {
+        window.close()
+      }
+    }
   }
 }

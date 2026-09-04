@@ -7,6 +7,7 @@ mod models;
 mod repository;
 mod runner;
 mod security;
+mod update;
 mod watcher;
 
 use tauri_plugin_window_state::{Builder as WindowStateBuilder, StateFlags};
@@ -46,6 +47,8 @@ pub fn run() {
             commands::run_problem_test,
             commands::watch_repository,
             commands::unwatch_repository,
+            update::check_for_update,
+            update::update_and_restart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running leetcoder");

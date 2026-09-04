@@ -1631,13 +1631,35 @@ fn extract_expected_actual(text: &str) -> (Option<String>, Option<String>) {
         .or_else(|| extract_label_value(text, "to be equal to:"));
     let explicit_actual = extract_label_value(text, "actual:");
     let was = extract_label_value(text, "but was:");
-    if explicit_expected.is_some() {
+    if let Some((expected, actual)) = extract_assertj_boolean_comparison(text) {
+        (Some(expected), Some(actual))
+    } else if explicit_expected.is_some() {
         (explicit_expected, explicit_actual.or(was))
     } else if explicit_actual.is_some() && was.is_some() {
         (was, explicit_actual)
     } else {
         (explicit_expected, explicit_actual.or(was))
     }
+}
+
+/// AssertJ uses this exact sentence for boolean assertions. Keep this parser
+/// deliberately narrow so prose such as "expecting value to be ready but was
+/// false" is not mistaken for a structured comparison.
+fn extract_assertj_boolean_comparison(text: &str) -> Option<(String, String)> {
+    const PREFIX: &str = "Expecting value to be ";
+    const SEPARATOR: &str = " but was ";
+
+    text.lines().map(str::trim).find_map(|line| {
+        let remainder = line.strip_prefix(PREFIX)?;
+        let (expected, actual) = remainder.split_once(SEPARATOR)?;
+        let expected_is_boolean = matches!(expected, "true" | "false");
+        let actual_is_boolean = matches!(actual, "true" | "false");
+        if expected_is_boolean && actual_is_boolean {
+            Some((expected.to_string(), actual.to_string()))
+        } else {
+            None
+        }
+    })
 }
 
 fn extract_label_value(text: &str, label: &str) -> Option<String> {
@@ -2099,6 +2121,38 @@ expected: <5>
         assert_eq!(summary.skipped, 1);
         assert_eq!(summary.errors, 1);
         assert_eq!(summary.duration_ms, 125);
+    }
+
+    #[test]
+    fn parses_assertj_boolean_comparisons_without_matching_arbitrary_prose() {
+        assert_eq!(
+            extract_expected_actual("Expecting value to be true but was false"),
+            (Some("true".to_string()), Some("false".to_string()))
+        );
+        assert_eq!(
+            extract_expected_actual("Expecting value to be false but was true"),
+            (Some("false".to_string()), Some("true".to_string()))
+        );
+        assert_eq!(
+            extract_expected_actual("Expecting value to be ready but was false"),
+            (None, None)
+        );
+        // An exact AssertJ comparison wins over unrelated labels elsewhere in
+        // the combined failure description.
+        assert_eq!(
+            extract_expected_actual(
+                "expected: <5> but was: <4>\nExpecting value to be true but was false"
+            ),
+            (Some("true".to_string()), Some("false".to_string()))
+        );
+        assert_eq!(
+            extract_expected_actual(concat!(
+                "Description: expected: <5> and actual: <4>\n",
+                "Expecting value to be false but was true\n",
+                "Additional prose: expected: <8> and actual: <9>"
+            )),
+            (Some("false".to_string()), Some("true".to_string()))
+        );
     }
 
     #[test]
