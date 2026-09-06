@@ -15,6 +15,8 @@ import {
   buildTestRunMarkers,
   completeJavaStatement,
   copySelectedText,
+  extractJavaMethod,
+  expandJavaTemplateOnTab,
   findJavaTestMethodAt,
   findJavaTestMethodMarkers,
   formatJavaDocClipboard,
@@ -23,6 +25,7 @@ import {
   javaIdentifierCallKeymap,
   isCompleteStatementAltShortcut,
   isCopyAltShortcut,
+  isExtractMethodShortcut,
   introduceJavaVariable,
   isIntroduceVariableShortcut,
   isJavaDocAltShortcut,
@@ -71,6 +74,21 @@ function runEditorCommand(
 
   expect(command(view)).toBe(true)
   return current
+}
+
+function mutableEditorView(initial: EditorState): { view: EditorView, state: () => EditorState } {
+  let current = initial
+  const view = {
+    get state() {
+      return current
+    },
+    lineWrapping: false,
+    moveVertically: (range: unknown) => range,
+    dispatch: (spec: TransactionSpec) => {
+      current = current.update(spec).state
+    },
+  } as unknown as EditorView
+  return { view, state: () => current }
 }
 
 describe('line block selection', () => {
@@ -192,6 +210,74 @@ describe('Option shortcut matchers', () => {
     expect(isReformatShortcut({ ...base, code: 'KeyL', ctrlKey: true })).toBe(true)
     expect(isReformatShortcut({ ...base, code: 'KeyL' })).toBe(false)
     expect(isReformatShortcut({ ...base, code: 'KeyL', metaKey: true, shiftKey: true })).toBe(false)
+  })
+
+  it('matches method extraction on the physical M key for both primary modifiers', () => {
+    expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true })).toBe(true)
+    expect(isExtractMethodShortcut({ ...base, code: 'KeyM', ctrlKey: true })).toBe(true)
+    expect(isExtractMethodShortcut({ ...base, code: 'KeyM' })).toBe(false)
+    expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true, ctrlKey: true })).toBe(false)
+    expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true, shiftKey: true })).toBe(false)
+    expect(isExtractMethodShortcut({ ...base, code: 'KeyV', metaKey: true })).toBe(false)
+  })
+})
+
+describe('Java template Tab command', () => {
+  it('expands sout at the cursor', () => {
+    const source = `class S {
+    void f() {
+        sout
+    }
+}`
+    const cursor = source.indexOf('sout') + 'sout'.length
+    const state = runEditorCommand(
+      javaState(source, true).update({ selection: { anchor: cursor } }).state,
+      expandJavaTemplateOnTab,
+    )
+
+    expect(state.doc.toString()).toBe(`class S {
+    void f() {
+        System.out.println();
+    }
+}`)
+  })
+
+  it('moves to the next snippet field before trying another expansion', () => {
+    const source = `class S {
+    void f(int[] nums) {
+        soutv
+    }
+}`
+    const cursor = source.indexOf('soutv') + 'soutv'.length
+    const harness = mutableEditorView(
+      javaState(source, true).update({ selection: { anchor: cursor } }).state,
+    )
+
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    const expanded = harness.state()
+    expect(expanded.doc.toString()).toContain('System.out.println("nums = " + nums);')
+    expect(expanded.selection.ranges).toHaveLength(2)
+
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    const moved = harness.state()
+    expect(moved.doc.toString()).toBe(expanded.doc.toString())
+    expect(moved.selection.ranges).toHaveLength(1)
+    expect(moved.selection.main.empty).toBe(true)
+  })
+
+  it('returns false so ordinary Tab handling can continue', () => {
+    const source = `class S {
+    void f() {
+        value
+    }
+}`
+    const cursor = source.indexOf('value') + 'value'.length
+    const harness = mutableEditorView(
+      javaState(source).update({ selection: { anchor: cursor } }).state,
+    )
+
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(false)
+    expect(harness.state().doc.toString()).toBe(source)
   })
 })
 
@@ -616,12 +702,52 @@ describe('Introduce Variable', () => {
       javaState(source).update({ selection: { anchor: from, head: to } }).state,
       introduceJavaVariable,
     )
-    const expected = 'class S {\n    void f() {\n        var compute = compute();\n        compute;\n    }\n}'
+    const expected = 'class S {\n    void f() {\n        var compute = compute();\n    }\n}'
 
     expect(state.doc.toString()).toBe(expected)
     const declarationName = expected.indexOf('var compute') + 4
     expect(state.selection.main.from).toBe(declarationName)
     expect(state.selection.main.to).toBe(declarationName + 'compute'.length)
+  })
+
+  it('introduces one variable for an array expression selected with or without its semicolon', () => {
+    const expression = 'nums[nums.length - 1]'
+    const source = `class S {\n    void f(int[] nums) {\n        ${expression};\n    }\n}`
+    const expected = `class S {\n    void f(int[] nums) {\n        var value = ${expression};\n    }\n}`
+
+    for (const suffix of ['', ';']) {
+      const from = source.indexOf(expression)
+      const to = from + expression.length + suffix.length
+      const state = runEditorCommand(
+        javaState(source).update({ selection: { anchor: from, head: to } }).state,
+        introduceJavaVariable,
+      )
+
+      expect(state.doc.toString()).toBe(expected)
+      expect(state.doc.toString().match(/var value =/g)).toHaveLength(1)
+      expect(state.doc.toString()).not.toContain('\n        value;')
+    }
+  })
+
+  it('keeps declaration and replacement linked for multiple-selection renaming', () => {
+    const source = 'class S {\n    void f() {\n        return compute();\n    }\n}'
+    const from = source.indexOf('compute()')
+    const to = from + 'compute()'.length
+    const state = runEditorCommand(
+      javaState(source, true).update({ selection: { anchor: from, head: to } }).state,
+      introduceJavaVariable,
+    )
+
+    expect(state.selection.ranges).toHaveLength(2)
+    expect(state.selection.ranges.map((range) => state.sliceDoc(range.from, range.to)))
+      .toEqual(['compute', 'compute'])
+
+    const renamed = state.update({
+      changes: state.selection.ranges.map((range) => ({ from: range.from, to: range.to, insert: 'result' })),
+    }).state
+    expect(renamed.doc.toString()).toBe(
+      'class S {\n    void f() {\n        var result = compute();\n        return result;\n    }\n}',
+    )
   })
 
   it('uses a value fallback and avoids an existing name', () => {
@@ -687,10 +813,54 @@ describe('Introduce Variable', () => {
   })
 })
 
-function javaState(source: string): EditorState {
+describe('Extract Method command', () => {
+  it('extracts a selected array expression and reports no error', () => {
+    const source = `class S {
+    int f(int[] nums) {
+        return nums[nums.length - 1];
+    }
+}`
+    const expression = 'nums[nums.length - 1]'
+    const from = source.indexOf(expression)
+    const to = from + expression.length
+    const harness = mutableEditorView(
+      javaState(source, true).update({ selection: { anchor: from, head: to } }).state,
+    )
+    const errors: string[] = []
+
+    expect(extractJavaMethod(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual([])
+    expect(harness.state().doc.toString()).toBe(`class S {
+    int f(int[] nums) {
+        return extractedMethod(nums);
+    }
+    private int extractedMethod(int[] nums) {
+        return nums[nums.length - 1];
+    }
+}`)
+    expect(harness.state().selection.ranges).toHaveLength(2)
+  })
+
+  it('reports an invalid no-cursor selection without changing the document', () => {
+    const source = 'class S {\n    void f() { }\n}'
+    const harness = mutableEditorView(
+      javaState(source, true).update({ selection: { anchor: source.indexOf('{', source.indexOf('f')) + 1 } }).state,
+    )
+    const errors: string[] = []
+
+    expect(extractJavaMethod(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual(['Select an expression or complete statements to extract a method.'])
+    expect(harness.state().doc.toString()).toBe(source)
+  })
+})
+
+function javaState(source: string, allowMultipleSelections = false): EditorState {
   return EditorState.create({
     doc: source,
-    extensions: [java()],
+    extensions: [
+      java(),
+      ...(allowMultipleSelections ? [EditorState.allowMultipleSelections.of(true)] : []),
+    ],
   })
 }
 

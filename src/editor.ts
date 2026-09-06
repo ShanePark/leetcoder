@@ -1,9 +1,11 @@
 import {
   autocompletion,
+  acceptCompletion,
   closeBrackets,
   closeBracketsKeymap,
   completionKeymap,
   completionStatus,
+  nextSnippetField,
   startCompletion,
 } from '@codemirror/autocomplete'
 import { java, javaLanguage } from '@codemirror/lang-java'
@@ -66,6 +68,7 @@ import {
   JAVA_TYPE_IMPORTS,
   javaCompletions,
   javaIdentifierAt,
+  expandJavaPrintTemplate,
   resolveJavaDefinition,
 } from './completions'
 import type { ClipboardBridge } from './clipboard'
@@ -76,6 +79,7 @@ import {
   importBlockRange,
   removeUnusedJavaTypeImports,
 } from './java-format'
+import { planJavaMethodExtraction } from './java-refactor'
 
 /**
  * Editor palette references the design tokens in styles.css. CSS variables are
@@ -239,6 +243,7 @@ export interface EditorCallbacks {
   onRunTestAtCursor?: (methodName: string | null) => boolean | void
   onShowShortcuts?: () => void
   onShowSettings?: () => void
+  onRefactorError?: (message: string) => void
   /** Overridable so tests can drive clipboard shortcuts without a system clipboard. */
   clipboard?: ClipboardBridge
 }
@@ -935,6 +940,14 @@ export function isIntroduceVariableShortcut(event: JavaDocAltShortcutEvent): boo
     && (event.metaKey !== event.ctrlKey)
 }
 
+/** Match the IntelliJ-style Ctrl/Command+Option+M chord by physical key. */
+export function isExtractMethodShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyM'
+    && event.altKey
+    && !event.shiftKey
+    && (event.metaKey !== event.ctrlKey)
+}
+
 function lineAt(source: string, position: number): SourceLine {
   const bounded = Math.max(0, Math.min(position, source.length))
   let from = bounded
@@ -1386,11 +1399,17 @@ export function planJavaVariableInsertion(
   const code = source.slice(line.from, codeEnd)
   const indent = /^[ \t]*/.exec(line.text)?.[0] ?? ''
   const codeStart = line.from + indent.length
-  const selected = source.slice(selectionFrom, selectionTo)
+  const rawSelected = source.slice(selectionFrom, selectionTo)
+  // IntelliJ accepts selecting an entire expression statement, including its
+  // semicolon. Keep the selection range intact for the replacement, but omit
+  // that terminator when building the declaration initializer.
+  const selected = rawSelected.endsWith(';')
+    ? rawSelected.slice(0, -1).trimEnd()
+    : rawSelected
   if (code.includes('/*')
     || selectionFrom < codeStart
     || selectionTo > codeEnd
-    || selected.trim() !== selected
+    || rawSelected.trim() !== rawSelected
     || !balancedJavaDelimiters(selected)
     || !isStatementCandidate(code.slice(indent.length))) {
     return null
@@ -1427,8 +1446,20 @@ export function introduceJavaVariable(view: EditorView): boolean {
   const from = Math.min(selection.from, selection.to)
   const to = Math.max(selection.from, selection.to)
   const plan = planJavaVariableInsertion(state.doc.toString(), from, to)
-  if (!plan || !allowsJavaExpressionSelection(state, from, to)) {
+  if (!plan || !allowsJavaExpressionSelection(state, from, from + plan.selected.length)) {
     return false
+  }
+  const line = state.doc.lineAt(from)
+  const codeEnd = line.from + lineCodeEnd(line.text)
+  const indent = /^[\t ]*/.exec(line.text)?.[0] ?? ''
+  if (from === line.from + indent.length
+    && /^\s*;?\s*$/.test(state.sliceDoc(from + plan.selected.length, codeEnd))) {
+    view.dispatch({
+      changes: { from, to: codeEnd, insert: `var ${plan.name} = ${plan.selected};` },
+      selection: { anchor: from + 4, head: from + 4 + plan.name.length },
+      userEvent: 'input.introduceVariable',
+    })
+    return true
   }
   let changes
   if (plan.replaceFrom === plan.from + plan.insert.indexOf('var ')) {
@@ -1443,12 +1474,43 @@ export function introduceJavaVariable(view: EditorView): boolean {
       { from: plan.replaceFrom, to: plan.replaceTo, insert: plan.name },
     ]
   }
+  const usageEnd = state.changes(changes).mapPos(plan.replaceTo, 1)
   view.dispatch({
     changes,
-    selection: { anchor: plan.nameFrom, head: plan.nameTo },
+    selection: EditorSelection.create([
+      EditorSelection.range(plan.nameFrom, plan.nameTo),
+      EditorSelection.range(usageEnd - plan.name.length, usageEnd),
+    ]),
     userEvent: 'input.introduceVariable',
   })
   return true
+}
+
+/** Extract a selected expression or complete statement range into a helper. */
+export function extractJavaMethod(view: EditorView, onError?: (message: string) => void): boolean {
+  const { state } = view
+  if (state.selection.ranges.length !== 1 || state.selection.main.empty) {
+    onError?.('Select an expression or complete statements to extract a method.')
+    return true
+  }
+  const selection = state.selection.main
+  const plan = planJavaMethodExtraction(state.doc.toString(), selection.from, selection.to)
+  if ('reason' in plan) {
+    onError?.(plan.reason)
+    return true
+  }
+  view.dispatch({
+    changes: plan.changes,
+    selection: EditorSelection.create(plan.nameRanges.map((range) => EditorSelection.range(range.from, range.to))),
+    scrollIntoView: true,
+    userEvent: 'input.extractMethod',
+  })
+  return true
+}
+
+/** Snippet navigation takes precedence over expanding a fresh abbreviation. */
+export function expandJavaTemplateOnTab(view: EditorView): boolean {
+  return nextSnippetField(view) || acceptCompletion(view) || expandJavaPrintTemplate(view)
 }
 
 function javaDocBodyCursor(line: SourceLine): number | null {
@@ -1788,8 +1850,10 @@ export class JavaEditor {
     const showShortcutsBindings = bindings('show-shortcuts')
     const settingsShortcuts = bindings('open-settings')
     const introduceVariableShortcuts = bindings('introduce-variable')
+    const extractMethodShortcuts = bindings('extract-method')
     const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
+    const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
     const showShortcuts = (): boolean => {
       callbacks.onShowShortcuts?.()
       return true
@@ -1935,6 +1999,7 @@ export class JavaEditor {
       ] as Array<[(event: JavaDocAltShortcutEvent) => boolean, (view: EditorView) => boolean]> : []),
       [isReformatShortcut, reformatJavaDocument],
       [isIntroduceVariableShortcut, introduceJavaVariable],
+      [isExtractMethodShortcut, extractMethod],
     ]
 
     const commandBindings = (
@@ -2001,6 +2066,7 @@ export class JavaEditor {
         bracketMatching(),
         indentUnit.of('    '),
         EditorState.tabSize.of(4),
+        EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
         // Consume the printable opening parenthesis before the browser can
         // emit a second input event with the stale selection range.
@@ -2013,6 +2079,7 @@ export class JavaEditor {
           indentWithTab,
         ]),
         Prec.high(keymap.of([
+          ...commandBindings(bindings('expand-template'), expandJavaTemplateOnTab, false),
           // Run chords intentionally use Ctrl on both macOS and Linux.
           ...commandBindings(saveShortcuts, save),
           ...commandBindings(runTestAtCursorShortcuts, runTestAtCursor),
@@ -2023,6 +2090,7 @@ export class JavaEditor {
           ...commandBindings(moveLineUpShortcuts, moveLineUp),
           ...commandBindings(moveLineDownShortcuts, moveLineDown),
           ...commandBindings(introduceVariableShortcuts, introduceJavaVariable),
+          ...commandBindings(extractMethodShortcuts, extractMethod),
           // IntelliJ-style line editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while
           // preserving the document's configured line separator.

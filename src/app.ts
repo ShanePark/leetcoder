@@ -2069,6 +2069,7 @@ export class LeetcoderApp {
       onShowSettings: () => {
         this.openSettingsDialog('appearance')
       },
+      onRefactorError: (message) => this.setMessage(message, 'error'),
       onRunTestAtCursor: (methodName) => {
         // A cursor miss falls back to the same all-tests run as Ctrl+R. This
         // keeps the editor keymap and the window-level shortcut consistent.

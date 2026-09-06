@@ -53,6 +53,10 @@ describe('platform primary binding', () => {
     expect(primaryShortcut(entryFor('Complete current statement'), true)).toBe('⇧⌘Enter')
     expect(primaryShortcut(entryFor('Move to line end'), false)).toBe('Alt+ArrowRight')
     expect(primaryShortcut(entryFor('Move to line end'), true)).toBe('⌘ArrowRight')
+    expect(primaryShortcut(entryFor('Extract method'), false)).toBe('Ctrl+Alt+M')
+    expect(primaryShortcut(entryFor('Extract method'), true)).toBe('⌘⌥M')
+    expect(primaryShortcut(entryFor('Expand live template / next template field'), false)).toBe('Tab')
+    expect(primaryShortcut(entryFor('Expand live template / next template field'), true)).toBe('Tab')
   })
 
   it('shows only the app binding for the selected operating system', () => {
@@ -111,6 +115,9 @@ describe('shortcut table', () => {
     expect(shortcutLabel('show-shortcuts', false)).toBe('Alt+Shift+/')
     expect(shortcutLabel('open-settings', false)).toBe('Alt+,')
     expect(shortcutLabel('open-settings', true)).toBe('⌘,')
+    expect(shortcutLabel('extract-method', false)).toBe('Ctrl+Alt+M')
+    expect(shortcutLabel('extract-method', true)).toBe('⌘⌥M')
+    expect(shortcutLabel('expand-template', false)).toBe('Tab')
     expect(() => shortcutLabel('not-a-shortcut', false)).toThrow(/Unknown shortcut id/)
   })
 

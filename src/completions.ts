@@ -212,6 +212,123 @@ function applyJavaType(fullyQualifiedName: string): Completion['apply'] {
   }
 }
 
+export type JavaPrintTemplateKind = 'sout' | 'soutv' | 'serr' | 'serrv'
+
+const JAVA_PRINT_TEMPLATE_KINDS = new Set<JavaPrintTemplateKind>(['sout', 'soutv', 'serr', 'serrv'])
+
+function isJavaPrintTemplateKind(value: string): value is JavaPrintTemplateKind {
+  return JAVA_PRINT_TEMPLATE_KINDS.has(value as JavaPrintTemplateKind)
+}
+
+function javaPrintVariable(source: string, position: number): string {
+  const symbols = collectJavaSymbols(source, position)
+  const visible = symbols
+    .filter((symbol) => symbol.scopeStart <= position
+      && position <= symbol.scopeEnd
+      && (symbol.kind === 'field' || symbol.declaredAt <= position))
+    .sort((left, right) => {
+      // A local or parameter is more useful to print than a field. Among
+      // equally useful symbols the latest declaration is the best default.
+      const leftKind = left.kind === 'field' ? 0 : 1
+      const rightKind = right.kind === 'field' ? 0 : 1
+      return rightKind - leftKind || right.declaredAt - left.declaredAt
+    })
+  return visible[0]?.name ?? 'value'
+}
+
+function javaPrintTemplateBody(
+  kind: JavaPrintTemplateKind,
+  variable: string,
+  includeSemicolon: boolean,
+): string {
+  const stream = kind.startsWith('sout') ? 'out' : 'err'
+  const suffix = includeSemicolon ? ';' : ''
+  if (!kind.endsWith('v')) {
+    return `System.${stream}.println(\${})${suffix}`
+  }
+
+  // The two occurrences share snippet field 1. CodeMirror selects the first
+  // field on activation, so the inferred variable can be replaced while the
+  // string label and the expression stay in sync.
+  const field = `\${1:${variable}}`
+  return `System.${stream}.println("${field} = " + ${field})${suffix}\${0}`
+}
+
+function followingJavaSemicolon(source: string, position: number): boolean {
+  return /^[\t ]*;/.test(source.slice(position))
+}
+
+function applyJavaPrintTemplate(
+  view: EditorView,
+  kind: JavaPrintTemplateKind,
+  from: number,
+  to: number,
+  completion: Completion | null,
+): void {
+  const source = view.state.doc.toString()
+  const variable = javaPrintVariable(source, to)
+  const body = javaPrintTemplateBody(kind, variable, !followingJavaSemicolon(source, to))
+  snippet(body)(view, completion, from, to)
+}
+
+function javaPrintCompletion(kind: JavaPrintTemplateKind): Completion {
+  const stream = kind.startsWith('sout') ? 'out' : 'err'
+  const detail = kind.endsWith('v')
+    ? `Prints a value to System.${stream}`
+    : `Prints a string to System.${stream}`
+  return {
+    label: kind,
+    type: 'snippet',
+    detail,
+    apply: (view, completion, from, to) => applyJavaPrintTemplate(view, kind, from, to, completion),
+  }
+}
+
+function javaPrintAbbreviation(source: string, position: number): { kind: JavaPrintTemplateKind, from: number } | null {
+  const before = source.slice(0, position)
+  const match = /(?:^|[^A-Za-z0-9_$])((?:soutv|serrv|sout|serr))$/.exec(before)
+  if (!match || !isJavaPrintTemplateKind(match[1])) {
+    return null
+  }
+  return { kind: match[1], from: position - match[1].length }
+}
+
+/** Expand a Java print live-template abbreviation at the current cursor. */
+export function expandJavaPrintTemplate(view: EditorView): boolean {
+  const { state } = view
+  if (state.selection.ranges.length !== 1 || !state.selection.main.empty) {
+    return false
+  }
+  const position = state.selection.main.head
+  const source = state.doc.toString()
+  const abbreviation = javaPrintAbbreviation(source, position)
+  if (!abbreviation) {
+    return false
+  }
+
+  // Keep abbreviations in comments and literals inert. Masking preserves
+  // source offsets, which lets the same range be passed to the snippet API.
+  const masked = maskJavaCommentsAndLiterals(source)
+  if (masked.slice(abbreviation.from, position) !== source.slice(abbreviation.from, position)) {
+    return false
+  }
+  if (/[A-Za-z0-9_$]/.test(source[position] ?? '')) {
+    return false
+  }
+
+  // Live templates produce a statement. Requiring the abbreviation to be the
+  // only code on its line prevents accidental expansion of `return sout` or a
+  // property-like expression while retaining normal indentation.
+  const lineStart = source.lastIndexOf('\n', abbreviation.from - 1) + 1
+  const linePrefix = source.slice(lineStart, abbreviation.from)
+  if (!/^[\t ]*$/.test(linePrefix)) {
+    return false
+  }
+
+  applyJavaPrintTemplate(view, abbreviation.kind, abbreviation.from, position, null)
+  return true
+}
+
 const JAVA_COMPLETIONS: Completion[] = [
   ...JAVA_KEYWORDS.map((label) => ({ label, type: 'keyword' as const })),
   ...JAVA_TYPES.map((label) => ({
@@ -226,8 +343,10 @@ const JAVA_COMPLETIONS: Completion[] = [
   snippetCompletion('List.of(...)', 'List', 'List.of(${items})'),
   snippetCompletion('Map.of(...)', 'Map', 'Map.of(${entries})'),
   snippetCompletion('Set.of(...)', 'Set', 'Set.of(${items})'),
-  snippetCompletion('sout', 'PrintStream', 'System.out.println(${})'),
-  snippetCompletion('serr', 'PrintStream', 'System.err.println(${})'),
+  javaPrintCompletion('sout'),
+  javaPrintCompletion('soutv'),
+  javaPrintCompletion('serr'),
+  javaPrintCompletion('serrv'),
   snippetCompletion('new ArrayList<>()', 'ArrayList', 'new ArrayList<>()'),
   snippetCompletion('new HashMap<>()', 'HashMap', 'new HashMap<>()'),
   snippetCompletion('for (int i = 0; i < ...; i++)', 'loop', 'for (int ${i} = 0; ${i} < ${length}; ${i}++) {\n    ${}\n}'),

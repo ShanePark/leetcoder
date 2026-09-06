@@ -3,7 +3,13 @@ import { EditorState } from '@codemirror/state'
 import type { CompletionContext } from '@codemirror/autocomplete'
 import type { EditorView } from '@codemirror/view'
 
-import { collectJavaMethods, collectJavaSymbols, javaCompletions, resolveJavaDefinition } from '../../src/completions'
+import {
+  collectJavaMethods,
+  collectJavaSymbols,
+  expandJavaPrintTemplate,
+  javaCompletions,
+  resolveJavaDefinition,
+} from '../../src/completions'
 
 function complete(source: string, explicit = false) {
   const marker = source.indexOf('|')
@@ -52,6 +58,28 @@ function applyCompletion(source: string, label: string): string {
     state = state.update({ changes: { from: result.from, to: marker, insert } }).state
   }
   return state.doc.toString()
+}
+
+function expandPrintTemplateState(source: string): { expanded: boolean, state: EditorState } {
+  const marker = source.indexOf('|')
+  if (marker < 0) throw new Error('Expansion source must include a | cursor marker')
+  let state = EditorState.create({
+    doc: `${source.slice(0, marker)}${source.slice(marker + 1)}`,
+    extensions: EditorState.allowMultipleSelections.of(true),
+    selection: { anchor: marker },
+  })
+  const view = {
+    get state() { return state },
+    dispatch(spec: Parameters<EditorState['update']>[0]) {
+      state = state.update(spec).state
+    },
+  } as unknown as EditorView
+  return { expanded: expandJavaPrintTemplate(view), state }
+}
+
+function expandPrintTemplate(source: string): { expanded: boolean, source: string } {
+  const result = expandPrintTemplateState(source)
+  return { expanded: result.expanded, source: result.state.doc.toString() }
 }
 
 describe('lightweight Java completions', () => {
@@ -207,6 +235,105 @@ describe('lightweight Java completions', () => {
     const topLevel = labels('class Solution { void test() { sout| } }')
     expect(topLevel).toContain('sout')
     expect(topLevel).toContain('serr')
+  })
+
+  it('offers the IntelliJ-style print live-template abbreviations', () => {
+    const options = labels('class Solution { void test() { sout| } }')
+    expect(options).toEqual(expect.arrayContaining(['sout', 'soutv']))
+    expect(labels('class Solution { void test() { serr| } }')).toEqual(
+      expect.arrayContaining(['serr', 'serrv']),
+    )
+  })
+
+  it('expands print templates with a nearby variable and keeps linked fields', () => {
+    const source = `class Solution {
+  void test(int[] nums) {
+    int last = nums.length - 1;
+    soutv|
+  }
+}`
+    expect(applyCompletion(source, 'soutv')).toBe(`class Solution {
+  void test(int[] nums) {
+    int last = nums.length - 1;
+    System.out.println("last = " + last);
+  }
+}`)
+    expect(applyCompletion(source, 'serrv')).toBe(`class Solution {
+  void test(int[] nums) {
+    int last = nums.length - 1;
+    System.err.println("last = " + last);
+  }
+}`)
+    expect(applyCompletion(source, 'sout')).toBe(`class Solution {
+  void test(int[] nums) {
+    int last = nums.length - 1;
+    System.out.println();
+  }
+}`)
+    expect(applyCompletion(source, 'serr')).toBe(`class Solution {
+  void test(int[] nums) {
+    int last = nums.length - 1;
+    System.err.println();
+  }
+}`)
+  })
+
+  it('uses an editable value placeholder when no variable is in scope', () => {
+    expect(applyCompletion('class Solution { void test() { soutv| } }', 'soutv')).toBe(
+      'class Solution { void test() { System.out.println("value = " + value); } }',
+    )
+  })
+
+  it('does not duplicate a semicolon already following the abbreviation', () => {
+    expect(applyCompletion('class Solution { void test() { sout|; } }', 'sout')).toBe(
+      'class Solution { void test() { System.out.println(); } }',
+    )
+  })
+
+  it('expands an indented abbreviation directly on Tab', () => {
+    const result = expandPrintTemplate(`class Solution {
+  void test(int[] nums) {
+    soutv|
+  }
+}`)
+    expect(result.expanded).toBe(true)
+    expect(result.source).toBe(`class Solution {
+  void test(int[] nums) {
+    System.out.println("nums = " + nums);
+  }
+}`)
+  })
+
+  it('keeps the variable name and expression linked while editing the snippet field', () => {
+    const result = expandPrintTemplateState(`class Solution {
+  void test(int[] nums) {
+    soutv|
+  }
+}`)
+    expect(result.expanded).toBe(true)
+    const field = result.state.selection.main
+    expect(result.state.sliceDoc(field.from, field.to)).toBe('nums')
+    expect(result.state.selection.ranges).toHaveLength(2)
+    const updated = result.state.update(result.state.replaceSelection('values')).state
+    expect(updated.doc.toString()).toContain('System.out.println("values = " + values);')
+  })
+
+  it('does not expand inside a larger identifier', () => {
+    const result = expandPrintTemplate('class Solution { void test() { sout|t } }')
+    expect(result.expanded).toBe(false)
+    expect(result.source).toBe('class Solution { void test() { soutt } }')
+  })
+
+  it('keeps direct expansion out of comments, literals, and property expressions', () => {
+    for (const source of [
+      'class Solution { void test() { // sout|\n } }',
+      'class Solution { void test() { String value = "sout|"; } }',
+      'class Solution { void test() { object.sout| } }',
+    ]) {
+      const result = expandPrintTemplate(source)
+      expect(result.expanded).toBe(false)
+      expect(result.source).toBe(source.replace('|', ''))
+    }
   })
 
   it('does not expand unknown dotted chains into collection methods', () => {
