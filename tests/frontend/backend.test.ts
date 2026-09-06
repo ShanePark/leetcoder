@@ -543,6 +543,48 @@ describe('backend client', () => {
     expect(result.tests[0].name).toBe('test2()')
   })
 
+  it('checks an editor snapshot without saving it or starting a test run', async () => {
+    const invoke: Invoke = async (command, args) => {
+      expect(command).toBe('check_problem_diagnostics')
+      expect(args).toEqual({
+        repoPath: '/repo',
+        fullyQualifiedClassName: 'shane.Q1',
+        source: 'class Q1 { void test() { missing(); } }',
+      })
+      return {
+        diagnostics: [{
+          severity: 'error',
+          file: 'src/main/java/shane/Q1.java',
+          line: 1,
+          column: 30,
+          message: 'cannot find symbol',
+          source: 'class Q1 { void test() { missing(); } }',
+          caret: '                             ^',
+        }],
+      }
+    }
+
+    await expect(createBackendClient(invoke).checkProblemDiagnostics?.(
+      '/repo',
+      'shane.Q1',
+      'class Q1 { void test() { missing(); } }',
+    )).resolves.toMatchObject([{
+      severity: 'error',
+      file: 'src/main/java/shane/Q1.java',
+      line: 1,
+      column: 30,
+      message: 'cannot find symbol',
+      origin: 'javac',
+      sourceLine: 'class Q1 { void test() { missing(); } }',
+    }])
+  })
+
+  it('rejects a malformed diagnostics response instead of treating it as no errors', async () => {
+    const invoke: Invoke = async () => ({ unexpected: true })
+    await expect(createBackendClient(invoke).checkProblemDiagnostics?.('/repo', 'shane.Q1', 'class Q1 {}'))
+      .rejects.toThrow('problem diagnostics response was invalid')
+  })
+
   it('preserves runtime errors and exposes them as failures to the existing UI summary', () => {
     const result = normalizeTestResult({
       phase: 'test',

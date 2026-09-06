@@ -838,17 +838,48 @@ export function handleJavaIdentifierCallInput(
     return false
   }
   const selection = view.state.selection.main
-  if (view.state.selection.ranges.length !== 1
-    || selection.empty
-    || selection.from !== from
-    || selection.to !== to) {
+  if (view.state.selection.ranges.length !== 1) {
+    return false
+  }
+  const source = view.state.doc.toString()
+
+  // A completion can update CodeMirror's selection before WebView updates its
+  // native selection. If that stale range still points at the completed
+  // identifier, insert the call at the current cursor instead of letting the
+  // browser's input change use the old position.
+  if (selection.empty) {
+    if (view.compositionStarted) {
+      return false
+    }
+    const identifier = javaIdentifierAt(source, selection.head)
+    const staleRange = identifier
+      && identifier.to === selection.head
+      && ((from === identifier.from && to === identifier.from)
+        || (from === identifier.from && to === identifier.to))
+    if (!staleRange) {
+      return false
+    }
+    const next = view.state.sliceDoc(selection.head, selection.head + 1)
+    if (next && !/[\s)\]}:;>]/.test(next)) {
+      return false
+    }
+    view.dispatch({
+      changes: { from: selection.head, insert: '()' },
+      selection: { anchor: selection.head + 1 },
+      scrollIntoView: true,
+      userEvent: 'input.type',
+    })
+    return true
+  }
+
+  if (selection.from !== from || selection.to !== to) {
     return false
   }
   const selected = view.state.sliceDoc(selection.from, selection.to)
   if (!isJavaIdentifier(selected)) {
     return false
   }
-  const identifier = javaIdentifierAt(view.state.doc.toString(), selection.from)
+  const identifier = javaIdentifierAt(source, selection.from)
   if (!identifier || identifier.from !== selection.from || identifier.to !== selection.to) {
     return false
   }
@@ -886,10 +917,11 @@ export function handleJavaIdentifierCallKey(view: EditorView): boolean {
   return handleJavaIdentifierCallInput(view, selection.from, selection.to, '(')
 }
 
-/** Key names for both an unshifted layout and the usual Shift+9 `(` input. */
+/** Key names for both an unshifted layout and browsers reporting Shift+9 as `9`. */
 const javaIdentifierCallKeyBindings = [
   { key: '(', run: handleJavaIdentifierCallKey },
   { key: 'Shift-(', run: handleJavaIdentifierCallKey },
+  { key: 'Shift-9', run: handleJavaIdentifierCallKey },
 ]
 
 /** High-precedence keymap used by the editor and its keyboard regression tests. */
@@ -2150,10 +2182,10 @@ export class JavaEditor {
   }
 
   /** Replace source issues shown in the line gutter and editor background. */
-  setIssues(issues: readonly EditorIssue[]): void {
+  setIssues(issues: readonly EditorIssue[], options: { reveal?: boolean } = {}): void {
     this.view.dispatch({ effects: setEditorIssues.of(issues) })
     const first = issues[0]
-    if (first) {
+    if (first && options.reveal !== false) {
       this.revealLine(first.line, first.column)
     }
   }

@@ -71,6 +71,19 @@ pub struct RunProblemTestArgs {
     pub test_method: Option<String>,
 }
 
+/// Source snapshot and problem identity used for an editor-only Java compile.
+/// The source is supplied by the editor so diagnostics never require writing
+/// unsaved text back to the selected repository file.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckProblemDiagnosticsArgs {
+    pub project_root: String,
+    pub fully_qualified_class_name: String,
+    #[serde(default)]
+    pub test_method: Option<String>,
+    pub source: String,
+}
+
 /// A path with changes in the selected repository.
 ///
 /// `index_status` and `worktree_status` retain Git's two-column porcelain
@@ -113,6 +126,13 @@ pub struct ProblemTestResult {
     pub diagnostics: Vec<ProblemDiagnostic>,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Diagnostics produced by compiling the current editor snapshot.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProblemDiagnosticsResult {
+    pub diagnostics: Vec<ProblemDiagnostic>,
 }
 
 /// An incremental update emitted while a problem test is running.

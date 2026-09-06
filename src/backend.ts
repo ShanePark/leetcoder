@@ -109,6 +109,9 @@ export interface TestDiagnostic {
   caret?: string | null
 }
 
+/** A compiler diagnostic for the current editor source snapshot. */
+export type ProblemDiagnostic = TestDiagnostic
+
 export interface TestResult {
   success: boolean
   phase: TestPhase
@@ -152,6 +155,12 @@ export interface BackendClient {
     onProgress?: TestRunProgressHandler,
     testMethod?: string,
   ): Promise<TestResult>
+  /** Compile an editor snapshot without saving it or running tests. */
+  checkProblemDiagnostics?(
+    repoPath: string,
+    fullyQualifiedClassName: string,
+    source: string,
+  ): Promise<ProblemDiagnostic[]>
   /** Start reporting external changes to the given repository's source tree. */
   watchRepository(repoPath: string): Promise<void>
   stopWatchingRepository(): Promise<void>
@@ -303,6 +312,15 @@ export function createBackendClient(
       }
       const response = await invoke<unknown>('run_problem_test', args)
       return normalizeTestResult(response)
+    },
+
+    async checkProblemDiagnostics(repoPath, fullyQualifiedClassName, source) {
+      const response = await invoke<unknown>('check_problem_diagnostics', {
+        repoPath,
+        fullyQualifiedClassName,
+        source,
+      })
+      return normalizeProblemDiagnostics(response)
     },
 
     async watchRepository(repoPath) {
@@ -915,6 +933,17 @@ function normalizeDiagnostics(value: unknown): TestDiagnostic[] {
       caret: sentinel === undefined ? stringValue(diagnostic.caret) ?? null : null,
     }
   })
+}
+
+/** Normalize the dedicated editor diagnostics response without hiding a bad payload. */
+export function normalizeProblemDiagnostics(value: unknown): ProblemDiagnostic[] {
+  if (Array.isArray(value)) {
+    return normalizeDiagnostics(value)
+  }
+  if (!isRecord(value) || !Array.isArray(value.diagnostics)) {
+    throw new Error('The problem diagnostics response was invalid.')
+  }
+  return normalizeDiagnostics(value.diagnostics)
 }
 
 function deriveCounts(tests: TestCaseResult[]): Pick<TestSummary, 'total' | 'passed' | 'failed' | 'skipped' | 'errors'> {

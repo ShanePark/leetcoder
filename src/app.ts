@@ -9,6 +9,7 @@ import {
   type DailyProblem,
   type GitCommitResult,
   type GitPushResult,
+  type ProblemDiagnostic,
   type ProblemFileEntry,
   type TestResult,
   type TestCaseResult,
@@ -41,6 +42,10 @@ import {
   createUpdateProgressView,
   listenForUpdateProgress,
 } from './update-progress'
+import {
+  LiveDiagnosticsScheduler,
+  type LiveDiagnosticsSnapshot,
+} from './live-diagnostics'
 
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
 const THEME_MODE_KEY = 'leetcoder.theme-mode'
@@ -290,6 +295,14 @@ interface TestRunnerBackend {
     onProgress?: (progress: TestRunProgress) => void,
     testMethod?: string,
   ) => Promise<TestResult>
+}
+
+interface LiveDiagnosticsBackend {
+  checkProblemDiagnostics?: (
+    projectRoot: string,
+    fullyQualifiedClassName: string,
+    source: string,
+  ) => Promise<readonly ProblemDiagnostic[]>
 }
 
 interface FileManagementBackend {
@@ -1072,6 +1085,19 @@ export function collectEditorIssues(
   result: TestResult,
   selectedPath: string | null,
 ): EditorIssue[] {
+  return collectDiagnosticEditorIssues(
+    result.diagnostics,
+    selectedPath,
+    result.tests,
+  )
+}
+
+/** Collect compiler markers without constructing a synthetic test result. */
+export function collectDiagnosticEditorIssues(
+  diagnostics: readonly ProblemDiagnostic[],
+  selectedPath: string | null,
+  tests: readonly TestCaseResult[] = [],
+): EditorIssue[] {
   if (!selectedPath) {
     return []
   }
@@ -1096,13 +1122,13 @@ export function collectEditorIssues(
     })
   }
 
-  for (const test of result.tests) {
+  for (const test of tests) {
     if (test.status !== 'failed' && test.status !== 'error') {
       continue
     }
     add(test.file, test.line, test.column, test.message ?? test.details ?? `${test.name} failed`)
   }
-  for (const diagnostic of result.diagnostics) {
+  for (const diagnostic of diagnostics) {
     if (diagnostic.severity.trim().toLowerCase() !== 'error') {
       continue
     }
@@ -1459,6 +1485,7 @@ interface AppState {
   dailyLoading: boolean
   testResult: TestResult | null
   testRun: TestRunSnapshot | null
+  liveDiagnosticsError: string | null
   /** Stable key of the testcase whose details are shown in the run panel. */
   selectedTestKey: string | null
   busy: boolean
@@ -1511,6 +1538,7 @@ export class LeetcoderApp {
     dailyLoading: false,
     testResult: null,
     testRun: null,
+    liveDiagnosticsError: null,
     selectedTestKey: null,
     busy: false,
     fileSearch: '',
@@ -1537,6 +1565,7 @@ export class LeetcoderApp {
   }
   private editor: JavaEditor
   private readonly autosave: AutosaveCoordinator
+  private readonly liveDiagnostics: LiveDiagnosticsScheduler
   private suppressEditorChange = false
   private repositoryGeneration = 0
   private refreshRequestId = 0
@@ -1550,6 +1579,7 @@ export class LeetcoderApp {
   private closePreparation: Promise<void> | null = null
   private destroyed = false
   private renderedTestResult: TestResult | null = null
+  private testResultSource: TestRunSourceSnapshot | null = null
   private liveRenderFrame: number | null = null
   private liveRenderToken = 0
   private bottomPanelHeight: number
@@ -2018,6 +2048,11 @@ export class LeetcoderApp {
         onError: (error) => this.handleSaveError(error),
       },
     )
+    this.liveDiagnostics = new LiveDiagnosticsScheduler({
+      check: (snapshot) => this.checkLiveDiagnostics(snapshot),
+      onResult: (snapshot, diagnostics) => this.applyLiveDiagnostics(snapshot, diagnostics),
+      onError: (snapshot, error) => this.handleLiveDiagnosticsError(snapshot, error),
+    })
     this.editor = new JavaEditor(this.element('#editor'), {
       onChange: (source) => this.onEditorChange(source),
       onSave: () => {
@@ -2104,6 +2139,7 @@ export class LeetcoderApp {
     }
     await this.prepareToClose()
     this.cancelScheduledLiveRender()
+    this.liveDiagnostics.dispose()
     this.clearScheduledGitRefresh()
     this.editor.destroy()
     this.autosave.dispose()
@@ -3041,6 +3077,78 @@ export class LeetcoderApp {
     }
   }
 
+  private liveDiagnosticsSnapshot(): LiveDiagnosticsSnapshot | null {
+    if (!this.state.repoPath || !this.state.projectValid
+      || !this.state.selectedPath || !this.state.selectedFqcn) {
+      return null
+    }
+    return {
+      repoPath: this.state.repoPath,
+      relativePath: this.state.selectedPath,
+      fullyQualifiedClassName: this.state.selectedFqcn,
+      source: this.state.selectedSource,
+    }
+  }
+
+  private scheduleLiveDiagnostics(): void {
+    const snapshot = this.liveDiagnosticsSnapshot()
+    if (!snapshot) {
+      this.liveDiagnostics.cancel()
+      this.state.liveDiagnosticsError = null
+      return
+    }
+    const hadError = Boolean(this.state.liveDiagnosticsError)
+    this.state.liveDiagnosticsError = null
+    this.liveDiagnostics.schedule(snapshot)
+    if (hadError) {
+      this.renderResult()
+    }
+  }
+
+  private checkLiveDiagnostics(snapshot: LiveDiagnosticsSnapshot): Promise<readonly ProblemDiagnostic[]> {
+    const method = (this.backend as unknown as LiveDiagnosticsBackend).checkProblemDiagnostics
+    if (!method) {
+      return Promise.reject(new Error('Live diagnostics are not available in this build.'))
+    }
+    return method(snapshot.repoPath, snapshot.fullyQualifiedClassName, snapshot.source)
+  }
+
+  private isCurrentLiveDiagnosticsSnapshot(snapshot: LiveDiagnosticsSnapshot): boolean {
+    return snapshot.repoPath === this.state.repoPath
+      && snapshot.relativePath === this.state.selectedPath
+      && snapshot.fullyQualifiedClassName === this.state.selectedFqcn
+      && snapshot.source === this.state.selectedSource
+  }
+
+  private applyLiveDiagnostics(
+    snapshot: LiveDiagnosticsSnapshot,
+    diagnostics: readonly ProblemDiagnostic[],
+  ): void {
+    if (this.destroyed || !this.isCurrentLiveDiagnosticsSnapshot(snapshot)) {
+      return
+    }
+    this.state.liveDiagnosticsError = null
+    const testIssues = this.testResultSource && this.state.testResult
+      && this.isTestRunSourceCurrent(this.testResultSource)
+      ? collectEditorIssues(this.state.testResult, snapshot.relativePath)
+      : []
+    this.editor.setIssues(
+      [...testIssues, ...collectDiagnosticEditorIssues(diagnostics, snapshot.relativePath)],
+      { reveal: false },
+    )
+    this.renderResult()
+  }
+
+  private handleLiveDiagnosticsError(snapshot: LiveDiagnosticsSnapshot, error: unknown): void {
+    if (this.destroyed || !this.isCurrentLiveDiagnosticsSnapshot(snapshot)) {
+      return
+    }
+    // Keep this in the quiet status row rather than a toast: a compiler
+    // service failure should be visible without interrupting typing.
+    this.state.liveDiagnosticsError = errorMessage(error)
+    this.renderResult()
+  }
+
   private resetTestState(): void {
     this.state.testResult = null
     this.state.testRun = null
@@ -3048,6 +3156,9 @@ export class LeetcoderApp {
     this.testSelectionExplicit = false
     this.testRunGeneration += 1
     this.editor.setIssues([])
+    this.liveDiagnostics.cancel()
+    this.state.liveDiagnosticsError = null
+    this.testResultSource = null
   }
 
   private async openFile(file: ProblemFileEntry): Promise<void> {
@@ -3116,6 +3227,7 @@ export class LeetcoderApp {
       }
       this.updateEditorVisibility()
       this.editor.focus()
+      this.scheduleLiveDiagnostics()
     } catch (error) {
       this.setMessage(`Could not open ${file.name}: ${errorMessage(error)}`, 'error')
     } finally {
@@ -3218,6 +3330,7 @@ export class LeetcoderApp {
       : null
     this.editor.setIssues([])
     this.state.selectedSource = source
+    this.testResultSource = null
     this.state.dirty = source !== this.state.savedSource
     this.state.saveError = null
     this.clearSavedFlash()
@@ -3234,6 +3347,7 @@ export class LeetcoderApp {
     }
     this.renderFileHeading()
     this.updateFileTabState()
+    this.scheduleLiveDiagnostics()
   }
 
   private resetCurrentFile(): void {
@@ -3353,8 +3467,10 @@ export class LeetcoderApp {
     }
     this.state.testRun = run
     this.state.testResult = null
+    this.testResultSource = null
     this.state.selectedTestKey = null
     this.testSelectionExplicit = false
+    this.liveDiagnostics.setBlocked(true)
     this.editor.setIssues([])
     // A starting run always brings the Tests tab forward so progress is visible.
     this.selectBottomPanelTab('tests')
@@ -3373,6 +3489,7 @@ export class LeetcoderApp {
           run.status = 'error'
           run.error = testFailureMessage(failure)
           this.state.testResult = failure
+          this.testResultSource = runSnapshot
           this.autoSelectFailedTest(failure)
         }
         return
@@ -3390,6 +3507,7 @@ export class LeetcoderApp {
         return
       }
       this.state.testResult = result
+      this.testResultSource = runSnapshot
       this.autoSelectFailedTest(result)
       this.editor.setIssues(collectEditorIssues(result, runFilePath))
       run.status = 'completed'
@@ -3415,9 +3533,11 @@ export class LeetcoderApp {
         run.error = testFailureMessage(failure)
         run.activeTest = null
         this.state.testResult = failure
+        this.testResultSource = runSnapshot
         this.autoSelectFailedTest(failure)
       }
     } finally {
+      this.liveDiagnostics.setBlocked(false)
       this.state.busy = false
       this.renderAll()
     }
@@ -3442,6 +3562,7 @@ export class LeetcoderApp {
     }
     this.state.testRun = null
     this.state.testResult = null
+    this.testResultSource = null
     this.state.selectedTestKey = null
     this.testSelectionExplicit = false
     this.renderedTestResult = null
@@ -3857,7 +3978,9 @@ export class LeetcoderApp {
         this.suppressEditorChange = false
       }
       this.editor.setIssues([])
+      this.testResultSource = null
       this.markGitStale()
+      this.scheduleLiveDiagnostics()
       this.renderFileHeading()
       this.updateFileTabState()
     } catch {
@@ -6006,6 +6129,19 @@ export class LeetcoderApp {
     this.element<HTMLElement>('#editor-host').dataset.savedSource = this.state.savedSource
   }
 
+  private appendLiveDiagnosticsStatus(statusRow: HTMLElement): void {
+    const error = this.state.liveDiagnosticsError
+    if (!error) {
+      return
+    }
+    const status = document.createElement('span')
+    status.className = 'test-facts live-diagnostics-status'
+    status.textContent = 'Live checks unavailable'
+    status.title = error
+    status.setAttribute('aria-label', `Live checks unavailable: ${error}`)
+    statusRow.append(status)
+  }
+
   private renderResult(): void {
     const panel = this.element<HTMLElement>('#tests-panel')
     const statusRow = this.element<HTMLElement>('#test-status-row')
@@ -6035,6 +6171,7 @@ export class LeetcoderApp {
         document.createTextNode(' for the selected test'),
       )
       statusRow.append(idle)
+      this.appendLiveDiagnosticsStatus(statusRow)
       this.renderedTestResult = null
       return
     }
@@ -6119,6 +6256,7 @@ export class LeetcoderApp {
       target.textContent = `Only ${targetedMethod}()`
       statusRow.append(target)
     }
+    this.appendLiveDiagnosticsStatus(statusRow)
 
     // Diagnostic cards: errors inline (compile and runner failures alike —
     // the runner message carries JDK guidance), warnings behind a disclosure.

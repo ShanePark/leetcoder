@@ -254,6 +254,66 @@ describe('Java method-call parentheses', () => {
     expect(state.selection.main.head).toBe(to + 1)
   })
 
+  it('handles Shift+9 when the browser reports the digit instead of `(`', () => {
+    const source = 'assertThat(firstStableIndex)'
+    const from = source.indexOf('firstStableIndex')
+    const to = from + 'firstStableIndex'.length
+    let state = EditorState.create({
+      doc: source,
+      selection: { anchor: from, head: to },
+      extensions: [java(), closeBrackets(), javaIdentifierCallKeymap],
+    })
+    const view = {
+      get state() {
+        return state
+      },
+      dispatch: (spec: TransactionSpec) => {
+        state = state.update(spec).state
+      },
+    } as unknown as EditorView
+
+    const handled = runScopeHandlers(view, {
+      key: '9',
+      keyCode: 57,
+      shiftKey: true,
+      altKey: false,
+      metaKey: false,
+      ctrlKey: false,
+    } as KeyboardEvent, 'editor')
+
+    expect(handled).toBe(true)
+    expect(state.doc.toString()).toBe('assertThat(firstStableIndex())')
+    expect(state.selection.main.empty).toBe(true)
+    expect(state.selection.main.head).toBe(to + 1)
+  })
+
+  it('uses the current cursor when completion leaves a stale native input range', () => {
+    const source = 'assertThat(firstStableIndex)'
+    const from = source.indexOf('firstStableIndex')
+    const to = from + 'firstStableIndex'.length
+    let state = EditorState.create({
+      doc: source,
+      selection: { anchor: to },
+    })
+    const view = {
+      get state() {
+        return state
+      },
+      dispatch: (spec: TransactionSpec) => {
+        state = state.update(spec).state
+      },
+    } as unknown as EditorView
+
+    // This is the native range observed in the failure: the editor cursor is
+    // after the method name, while the browser still reports its start.
+    expect(state.update({ changes: { from, to: from, insert: '(' } }).state.doc.toString())
+      .toBe('assertThat((firstStableIndex)')
+    expect(handleJavaIdentifierCallInput(view, from, from, '(')).toBe(true)
+    expect(state.doc.toString()).toBe('assertThat(firstStableIndex())')
+    expect(state.selection.main.empty).toBe(true)
+    expect(state.selection.main.head).toBe(to + 1)
+  })
+
   it('handles the real opening-parenthesis input callback for a selected identifier', () => {
     const source = 'assertThat(firstStableIndex)'
     const from = source.indexOf('firstStableIndex')

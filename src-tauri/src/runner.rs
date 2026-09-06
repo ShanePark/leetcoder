@@ -18,13 +18,13 @@ use serde::Deserialize;
 use tempfile::{Builder, TempDir};
 
 use crate::models::{
-    ProblemDiagnostic, ProblemDiagnosticSeverity, ProblemTestCase, ProblemTestEvent,
-    ProblemTestOutputStream, ProblemTestPhase, ProblemTestProgressCase, ProblemTestProgressPhase,
-    ProblemTestProgressStatus, ProblemTestResult, ProblemTestStatus, ProblemTestSummary,
-    RunProblemTestArgs,
+    CheckProblemDiagnosticsArgs, ProblemDiagnostic, ProblemDiagnosticSeverity,
+    ProblemDiagnosticsResult, ProblemTestCase, ProblemTestEvent, ProblemTestOutputStream,
+    ProblemTestPhase, ProblemTestProgressCase, ProblemTestProgressPhase, ProblemTestProgressStatus,
+    ProblemTestResult, ProblemTestStatus, ProblemTestSummary, RunProblemTestArgs,
 };
 use crate::repository;
-use crate::security::{canonical_project_root, is_within};
+use crate::security::{canonical_project_root, is_within, resolve_existing_source_file};
 
 const INIT_SCRIPT_PREFIX: &str = "leetcoder-init";
 const TEST_EVENT_MARKER: &str = "LEETCODER_TEST_EVENT_V1:";
@@ -32,10 +32,114 @@ const MAX_JUNIT_XML_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_SUPPORTED_JAVA_MAJOR: u32 = 11;
 const TARGET_JAVA_MAJOR: u32 = 17;
 const COMPILE_CACHE_SCHEMA: &str = "v1";
+const DIAGNOSTICS_TEMP_PREFIX: &str = "leetcoder-diagnostics";
 
 #[allow(dead_code)]
 pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestResult, String> {
     run_problem_test_with_sink(args, None)
+}
+
+/// Compile the current editor snapshot and return javac diagnostics without
+/// running any tests. The selected repository source file is used only to
+/// establish the package/class identity; the source text itself is compiled
+/// from a private temporary file so unsaved edits never touch the worktree.
+pub(crate) fn check_problem_diagnostics(
+    args: CheckProblemDiagnosticsArgs,
+) -> Result<ProblemDiagnosticsResult, String> {
+    validate_fully_qualified_class_name(&args.fully_qualified_class_name)?;
+    validate_test_method(args.test_method.as_deref())?;
+
+    let root = canonical_project_root(&args.project_root)?;
+    let wrapper = gradle_wrapper(&root);
+    validate_gradle_wrapper(&wrapper)?;
+    let validation = repository::validate_project(&args.project_root);
+    if !validation.valid {
+        return Err(format!(
+            "Selected directory is not a valid ps repository: {}",
+            validation
+                .message
+                .unwrap_or_else(|| "required repository files are missing".to_string())
+        ));
+    }
+
+    let java = discover_compatible_java()?;
+    let source_relative = java_source_relative_path(&args.fully_qualified_class_name);
+    let source_relative_text = source_relative.to_string_lossy().into_owned();
+    let (source_path, _) = resolve_existing_source_file(&root, &source_relative_text)?;
+    let source_name = source_path
+        .file_name()
+        .ok_or_else(|| format!("Unable to determine source file name: {source_relative_text}"))?;
+
+    let workspace = create_diagnostics_workspace()?;
+    let snapshot_path = workspace.path().join(source_name);
+    write_diagnostics_snapshot(&snapshot_path, &args.source)?;
+    let classes_dir = workspace.path().join("classes");
+    fs::create_dir(&classes_dir).map_err(|error| {
+        format!(
+            "Unable to create temporary diagnostics classes directory '{}': {error}",
+            classes_dir.display()
+        )
+    })?;
+    secure_temp_path(&classes_dir, "diagnostics classes directory")?;
+
+    let compile_cache = create_compile_cache(&root, &java, &args.fully_qualified_class_name)?;
+    let diagnostic_cache = CompileCache {
+        classes_dir,
+        shared_classes_dir: compile_cache.shared_classes_dir,
+    };
+    let run_temp = create_init_script(&diagnostic_cache)?;
+    let mut command = Command::new(&wrapper);
+    command
+        .current_dir(&root)
+        .env("JAVA_HOME", &java.home)
+        .env("PATH", path_with_java_home(&java.home))
+        .arg("--console=plain")
+        .arg("--init-script")
+        .arg(&run_temp.path)
+        .arg(format!(
+            "-DleetcoderResultDir={}",
+            run_temp.result_dir.display()
+        ))
+        .arg(format!(
+            "-DleetcoderClassesDir={}",
+            run_temp.classes_dir.display()
+        ))
+        .arg(format!(
+            "-DleetcoderSharedClassesDir={}",
+            run_temp.shared_classes_dir.display()
+        ))
+        .arg(format!(
+            "-DleetcoderProblemClass={}",
+            args.fully_qualified_class_name
+        ))
+        .arg(format!("-DleetcoderSourceFile={}", snapshot_path.display()))
+        .arg("leetcoderProblemCompile")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = command.spawn().map_err(|error| {
+        format!(
+            "Unable to run Gradle diagnostics compile '{}': {error}",
+            wrapper.display()
+        )
+    })?;
+    let capture = capture_child_output(child, None);
+    let mut diagnostics = parse_compilation_diagnostics(&capture.stdout);
+    diagnostics.extend(parse_compilation_diagnostics(&capture.stderr));
+    deduplicate_diagnostics(&mut diagnostics);
+    remap_snapshot_diagnostics(&mut diagnostics, &snapshot_path, &source_relative_text);
+
+    let has_error_diagnostic = diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == ProblemDiagnosticSeverity::Error);
+    if !capture.process_success && !has_error_diagnostic {
+        let message = first_output_line(&capture.stderr)
+            .or_else(|| first_output_line(&capture.stdout))
+            .unwrap_or_else(|| "Gradle diagnostics compile failed.".to_string());
+        return Err(message);
+    }
+
+    Ok(ProblemDiagnosticsResult { diagnostics })
 }
 
 pub(crate) type ProblemTestEventSink = Arc<dyn Fn(ProblemTestEvent) + Send + Sync + 'static>;
@@ -821,9 +925,12 @@ allprojects {
             exclude 'shane/leetcode/problems/medium/**'
             exclude 'shane/leetcode/problems/xhard/**'
         }
-        def selectedSourceFiles = files(sourceSets.main.java.srcDirs).asFileTree.matching {
-            include selectedSourcePath
-        }
+        def sourceOverride = System.getProperty('leetcoderSourceFile')
+        def selectedSourceFiles = sourceOverride != null && !sourceOverride.trim().isEmpty()
+            ? files(project.file(sourceOverride))
+            : files(sourceSets.main.java.srcDirs).asFileTree.matching {
+                include selectedSourcePath
+            }
         if (selectedSourceFiles.isEmpty()) {
             throw new GradleException("Selected problem source was not found: ${selectedSourcePath}")
         }
@@ -991,6 +1098,94 @@ fn create_init_script(compile_cache: &CompileCache) -> Result<InitScript, String
     })
 }
 
+fn create_diagnostics_workspace() -> Result<TempDir, String> {
+    let directory = Builder::new()
+        .prefix(DIAGNOSTICS_TEMP_PREFIX)
+        .tempdir_in(std::env::temp_dir())
+        .map_err(|error| format!("Unable to create private diagnostics workspace: {error}"))?;
+    secure_temp_path(directory.path(), "diagnostics workspace")?;
+    Ok(directory)
+}
+
+fn write_diagnostics_snapshot(path: &Path, source: &str) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "Unable to create temporary diagnostics source '{}': {error}",
+                path.display()
+            )
+        })?;
+    file.write_all(source.as_bytes())
+        .and_then(|_| file.flush())
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            format!(
+                "Unable to write temporary diagnostics source '{}': {error}",
+                path.display()
+            )
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            format!(
+                "Unable to secure temporary diagnostics source '{}': {error}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn secure_temp_path(path: &Path, description: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "Unable to inspect {description} '{}': {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "{description} is not a regular directory: {}",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!(
+                "Unable to secure {description} '{}': {error}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn remap_snapshot_diagnostics(
+    diagnostics: &mut [ProblemDiagnostic],
+    snapshot_path: &Path,
+    source_relative: &str,
+) {
+    let canonical_snapshot = fs::canonicalize(snapshot_path).ok();
+    for diagnostic in diagnostics {
+        let Some(file) = diagnostic.file.as_deref() else {
+            continue;
+        };
+        let exact_match = Path::new(file) == snapshot_path;
+        let canonical_match = canonical_snapshot
+            .as_ref()
+            .is_some_and(|canonical| fs::canonicalize(file).ok().as_ref() == Some(canonical));
+        if exact_match || canonical_match {
+            diagnostic.file = Some(source_relative.to_string());
+        }
+    }
+}
+
 fn validate_fully_qualified_class_name(class_name: &str) -> Result<(), String> {
     let name = class_name.trim();
     if name.is_empty() {
@@ -1011,6 +1206,15 @@ fn validate_fully_qualified_class_name(class_name: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn java_source_relative_path(class_name: &str) -> PathBuf {
+    let mut path = PathBuf::from("src/main/java");
+    for segment in class_name.split('.') {
+        path.push(segment);
+    }
+    path.set_extension("java");
+    path
 }
 
 fn validate_test_method(test_method: Option<&str>) -> Result<(), String> {
@@ -1854,6 +2058,8 @@ expected: <5>
         assert!(script.contains("leetcoderClassesDir"));
         assert!(script.contains("leetcoderSharedClassesDir"));
         assert!(script.contains("leetcoderSharedCompile"));
+        assert!(script.contains("leetcoderSourceFile"));
+        assert!(script.contains("project.file(sourceOverride)"));
         assert!(script.contains("dependsOn sharedCompileTask"));
         assert!(!script.contains("options.sourcepath"));
         assert!(script.contains("sourceSets.main.resources.srcDirs"));
@@ -2293,6 +2499,79 @@ at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method
         assert!(value["diagnostics"].is_array());
         assert!(value.get("stdout").is_some());
         assert!(value.get("stderr").is_some());
+    }
+
+    #[test]
+    fn serializes_diagnostics_result_with_only_diagnostics() {
+        let result = ProblemDiagnosticsResult {
+            diagnostics: vec![ProblemDiagnostic {
+                severity: ProblemDiagnosticSeverity::Error,
+                file: Some("src/main/java/Q1.java".to_string()),
+                line: Some(4),
+                column: Some(9),
+                message: "bad arguments".to_string(),
+                source: Some("call(1, 2)".to_string()),
+                caret: Some("        ^".to_string()),
+            }],
+        };
+        let value: Value = serde_json::to_value(result).expect("diagnostics result serializes");
+        assert!(value["diagnostics"].is_array());
+        assert_eq!(value["diagnostics"][0]["line"], Value::from(4));
+        assert_eq!(value["diagnostics"][0]["column"], Value::from(9));
+        assert!(value.get("tests").is_none());
+        assert!(value.get("stdout").is_none());
+    }
+
+    #[test]
+    fn remaps_only_the_temporary_snapshot_file() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let snapshot = workspace.path().join("Q1.java");
+        fs::write(&snapshot, "class Q1 {}").expect("snapshot");
+        let mut diagnostics = vec![
+            ProblemDiagnostic {
+                severity: ProblemDiagnosticSeverity::Error,
+                file: Some(snapshot.to_string_lossy().into_owned()),
+                line: Some(1),
+                column: Some(1),
+                message: "bad".to_string(),
+                source: None,
+                caret: None,
+            },
+            ProblemDiagnostic {
+                severity: ProblemDiagnosticSeverity::Error,
+                file: Some("src/main/java/Other.java".to_string()),
+                line: Some(2),
+                column: Some(1),
+                message: "other".to_string(),
+                source: None,
+                caret: None,
+            },
+        ];
+
+        remap_snapshot_diagnostics(
+            &mut diagnostics,
+            &snapshot,
+            "src/main/java/shane/leetcode/problems/easy/Q1.java",
+        );
+
+        assert_eq!(
+            diagnostics[0].file.as_deref(),
+            Some("src/main/java/shane/leetcode/problems/easy/Q1.java")
+        );
+        assert_eq!(
+            diagnostics[1].file.as_deref(),
+            Some("src/main/java/Other.java")
+        );
+    }
+
+    #[test]
+    fn derives_the_java_source_path_from_a_fully_qualified_class_name() {
+        assert_eq!(
+            java_source_relative_path("shane.leetcode.problems.medium.Q3904SmallestStableIndexII"),
+            PathBuf::from(
+                "src/main/java/shane/leetcode/problems/medium/Q3904SmallestStableIndexII.java"
+            )
+        );
     }
 
     #[test]

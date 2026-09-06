@@ -91,6 +91,67 @@ describe('whitespace normalization', () => {
     )
   })
 
+  it('normalizes comma and delimiter spacing without touching comments or literals', () => {
+    const source = [
+      'class Q1 {',
+      '    int value = a( 1,2  );',
+      '    // a( 1,2  )',
+      '    String text = "a( 1,2  )";',
+      '}',
+      '',
+    ].join('\n')
+    expect(normalizeJavaWhitespace(source)).toBe([
+      'class Q1 {',
+      '    int value = a(1, 2);',
+      '    // a( 1,2  )',
+      '    String text = "a( 1,2  )";',
+      '}',
+      '',
+    ].join('\n'))
+  })
+
+  it('is idempotent and keeps indentation before multiline closing delimiters', () => {
+    const source = 'class Q1 {\n    int value = a(1,  2  );\n    int[] values = new int[\n        2\n    ];\n}\n'
+    const formatted = normalizeJavaWhitespace(source)
+    expect(formatted).toBe('class Q1 {\n    int value = a(1, 2);\n    int[] values = new int[\n        2\n    ];\n}\n')
+    expect(normalizeJavaWhitespace(formatted)).toBe(formatted)
+  })
+
+  it('does not rewrite punctuation in comments or literals adjacent to delimiters', () => {
+    const source = [
+      'class Q1 {',
+      '    int value = a(1, /* 2,  3 */ 4  );',
+      '    int commented = a( /* 2,  3 */ 4  );',
+      '    // a(1,  2  )',
+      '    String text = "a(1,  2  )";',
+      '}',
+      '',
+    ].join('\n')
+    expect(normalizeJavaWhitespace(source)).toBe([
+      'class Q1 {',
+      '    int value = a(1, /* 2,  3 */ 4);',
+      '    int commented = a( /* 2,  3 */ 4);',
+      '    // a(1,  2  )',
+      '    String text = "a(1,  2  )";',
+      '}',
+      '',
+    ].join('\n'))
+  })
+
+  it('keeps escaped triple quotes and following text-block contents unchanged', () => {
+    const source = [
+      'class Q1 {',
+      '    String text = """',
+      'a( 1,2  )',
+      'escaped \\"""',
+      'b( 3,4  )',
+      '""";',
+      '}',
+      '',
+    ].join('\n')
+    expect(normalizeJavaWhitespace(source)).toBe(source)
+  })
+
   it('keeps CRLF documents on CRLF', () => {
     expect(normalizeJavaWhitespace('class Q1 {\r\n}\r\n')).toBe('class Q1 {\r\n}\r\n')
   })

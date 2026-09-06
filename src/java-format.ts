@@ -130,12 +130,70 @@ export function organizeJavaImports(source: string): string {
   return source.slice(0, block.from) + text + source.slice(block.to)
 }
 
-/** Trim trailing spaces, cap blank-line runs, and end with one line break. */
+/**
+ * Normalize whitespace around Java's comma and grouping delimiters.
+ *
+ * CodeMirror's Java indentation service only changes leading indentation. A
+ * small text pass fills the gap for the common spacing errors that can be
+ * fixed without reprinting the whole syntax tree. The masked source keeps
+ * punctuation inside comments and literals invisible to this pass.
+ */
+function normalizeJavaTokenWhitespace(source: string): string {
+  const masked = maskJavaCommentsAndLiterals(source)
+  let normalized = ''
+  let index = 0
+
+  while (index < source.length) {
+    const current = source[index]
+    if (current === ' ' || current === '\t') {
+      let end = index + 1
+      while (end < source.length && (source[end] === ' ' || source[end] === '\t')) {
+        end += 1
+      }
+
+      const previous = index > 0 ? masked[index - 1] : ''
+      const next = end < source.length ? masked[end] : ''
+      const lineStart = Math.max(source.lastIndexOf('\n', index - 1) + 1, source.lastIndexOf('\r', index - 1) + 1)
+      const onlyIndentation = source.slice(lineStart, index).trim() === ''
+      const followsComment = source[end] === '/'
+        && (source[end + 1] === '/' || source[end + 1] === '*')
+
+      if (previous === ',' && next !== '\r' && next !== '\n' && next !== ')' && next !== ']') {
+        normalized += ' '
+      } else if (next === ',' || ((next === ')' || next === ']') && !onlyIndentation)) {
+        // Java style has no space before a comma or a closing delimiter.
+      } else if ((previous === '(' || previous === '[') && !onlyIndentation && !followsComment) {
+        // Java style has no space just inside an opening delimiter.
+      } else {
+        normalized += source.slice(index, end)
+      }
+      index = end
+      continue
+    }
+
+    normalized += current
+    if (masked[index] === ',') {
+      const next = source[index + 1]
+      const startsComment = next === '/' && (source[index + 2] === '/' || source[index + 2] === '*')
+      if (next
+        && next !== ' ' && next !== '\t'
+        && next !== '\r' && next !== '\n'
+        && next !== ')' && next !== ']'
+        && !startsComment) {
+        normalized += ' '
+      }
+    }
+    index += 1
+  }
+  return normalized
+}
+
+/** Trim trailing spaces, normalize token spacing, cap blank-line runs, and end with one line break. */
 export function normalizeJavaWhitespace(source: string): string {
   const newline = lineBreakOf(source)
   const kept: string[] = []
   let blanks = 0
-  for (const raw of source.split(/\r?\n/)) {
+  for (const raw of normalizeJavaTokenWhitespace(source).split(/\r?\n/)) {
     const line = raw.replace(/[\t ]+$/, '')
     if (line === '') {
       blanks += 1

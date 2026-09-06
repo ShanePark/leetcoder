@@ -766,7 +766,13 @@ export function maskJavaCommentsAndLiterals(source: string): string {
       continue
     }
     if (state === 'textBlock') {
-      if (current === '"' && next === '"' && chars[index + 2] === '"') {
+      if (current === '\\') {
+        chars[index] = ' '
+        if (index + 1 < chars.length && chars[index + 1] !== '\n' && chars[index + 1] !== '\r') {
+          chars[index + 1] = ' '
+          index += 1
+        }
+      } else if (current === '"' && next === '"' && chars[index + 2] === '"') {
         chars[index] = ' '
         chars[index + 1] = ' '
         chars[index + 2] = ' '

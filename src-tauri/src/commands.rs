@@ -1,9 +1,10 @@
 use crate::git;
 use crate::leetcode;
 use crate::models::{
-    CreateProblemFileArgs, DailyProblem, GitCommitResult, GitFileChange, GitPushResult,
-    ProblemFileArgs, ProblemFileContent, ProblemFileList, ProblemTestEvent, ProblemTestResult,
-    ProjectValidation, RenameProblemFileArgs, RunProblemTestArgs,
+    CheckProblemDiagnosticsArgs, CreateProblemFileArgs, DailyProblem, GitCommitResult,
+    GitFileChange, GitPushResult, ProblemDiagnosticsResult, ProblemFileArgs, ProblemFileContent,
+    ProblemFileList, ProblemTestEvent, ProblemTestResult, ProjectValidation, RenameProblemFileArgs,
+    RunProblemTestArgs,
 };
 use crate::repository;
 use crate::runner;
@@ -185,6 +186,25 @@ pub async fn run_problem_test(
     })
     .await
     .map_err(|error| format!("Problem test worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn check_problem_diagnostics(
+    repo_path: String,
+    fully_qualified_class_name: String,
+    test_method: Option<String>,
+    source: String,
+) -> Result<ProblemDiagnosticsResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        runner::check_problem_diagnostics(CheckProblemDiagnosticsArgs {
+            project_root: repo_path,
+            fully_qualified_class_name,
+            test_method,
+            source,
+        })
+    })
+    .await
+    .map_err(|error| format!("Problem diagnostics worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

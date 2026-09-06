@@ -46,6 +46,7 @@ pub fn run() {
             commands::commit_git,
             commands::push_git,
             commands::run_problem_test,
+            commands::check_problem_diagnostics,
             commands::watch_repository,
             commands::unwatch_repository,
             update::check_for_update,
