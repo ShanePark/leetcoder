@@ -2,7 +2,7 @@ import { Channel, invoke as tauriInvoke } from '@tauri-apps/api/core'
 
 import type { ProblemFilePlan } from './domain'
 
-/** The metadata returned by the daily-problem command. */
+/** LeetCode problem metadata returned by the daily or numeric lookup command. */
 export interface DailyProblem {
   date: string
   frontendId: string
@@ -132,6 +132,7 @@ export type TestRunProgressHandler = (progress: TestRunProgress) => void
 export interface BackendClient {
   validateProject(repoPath: string): Promise<ProjectValidation>
   fetchDailyProblem(): Promise<DailyProblem>
+  fetchProblemByNumber(frontendId: string): Promise<DailyProblem>
   listProblemFiles(repoPath: string): Promise<ProblemFileEntry[]>
   readProblemFile(repoPath: string, path: string): Promise<string>
   createProblemFile(repoPath: string, plan: ProblemFilePlan): Promise<void>
@@ -191,6 +192,11 @@ export function createBackendClient(
 
     async fetchDailyProblem() {
       const response = await invoke<unknown>('fetch_daily_problem')
+      return normalizeDailyProblem(response)
+    },
+
+    async fetchProblemByNumber(frontendId) {
+      const response = await invoke<unknown>('fetch_problem_by_number', { frontendId })
       return normalizeDailyProblem(response)
     },
 

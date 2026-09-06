@@ -52,6 +52,11 @@ pub async fn fetch_daily_problem() -> Result<DailyProblem, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn fetch_problem_by_number(frontend_id: String) -> Result<DailyProblem, String> {
+    leetcode::fetch_problem_by_number(&frontend_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn list_problem_files(repo_path: String) -> Result<ProblemFileList, String> {
     repository::list_problem_files(&repo_path)
 }

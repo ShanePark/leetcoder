@@ -1,5 +1,7 @@
 import {
+  ArrowRight,
   BookOpen,
+  CalendarDays,
   Check,
   ChevronDown,
   ChevronRight,
@@ -35,7 +37,9 @@ import {
  */
 export const appIcons = {
   alert: CircleAlert,
+  arrowRight: ArrowRight,
   bookOpen: BookOpen,
+  calendarDays: CalendarDays,
   check: Check,
   chevronDown: ChevronDown,
   chevronRight: ChevronRight,

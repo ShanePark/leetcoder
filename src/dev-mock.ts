@@ -84,6 +84,21 @@ Explanation: digit sum = 18, digit product = 81.
 `,
 }
 
+const MANUAL_PROBLEM: DailyProblem = {
+  date: '',
+  frontendId: '1',
+  title: 'Two Sum',
+  titleSlug: 'two-sum',
+  difficulty: 'Easy',
+  url: 'https://leetcode.com/problems/two-sum/',
+  javaSnippet: `class Solution {
+    public int[] twoSum(int[] nums, int target) {
+
+    }
+}`,
+  content: '<p>Given an array of integers <code>nums</code> and an integer <code>target</code>, return indices of the two numbers such that they add up to <code>target</code>.</p>',
+}
+
 function javaSourceFor(className: string): string {
   return `package shane.leetcode.problems.easy;
 
@@ -238,6 +253,17 @@ export function createDevMockBackend(): BackendClient & {
     async fetchDailyProblem(): Promise<DailyProblem> {
       await delay(350)
       return DAILY_PROBLEM
+    },
+
+    async fetchProblemByNumber(frontendId: string): Promise<DailyProblem> {
+      await delay(350)
+      if (frontendId.trim() === MANUAL_PROBLEM.frontendId) {
+        return MANUAL_PROBLEM
+      }
+      if (frontendId.trim() === DAILY_PROBLEM.frontendId) {
+        return { ...DAILY_PROBLEM, date: '' }
+      }
+      throw new Error(`Problem #${frontendId} was not found in the preview.`)
     },
 
     async listProblemFiles(): Promise<ProblemFileEntry[]> {

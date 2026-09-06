@@ -1428,6 +1428,18 @@ export function normalizeDailyProblemDateKey(value: unknown): string | null {
   return value
 }
 
+/** Accept a positive LeetCode frontend id from the problem lookup field. */
+export function normalizeProblemNumber(value: string): string | null {
+  const normalized = value.trim()
+  if (!/^\d+$/.test(normalized)) {
+    return null
+  }
+  const withoutLeadingZeroes = normalized.replace(/^0+/, '')
+  return withoutLeadingZeroes.length > 0 ? withoutLeadingZeroes : null
+}
+
+type ProblemSelection = 'daily' | 'manual'
+
 interface AppState {
   repoPath: string | null
   projectValid: boolean
@@ -1440,6 +1452,7 @@ interface AppState {
   selectedFqcn: string | null
   dirty: boolean
   dailyProblem: DailyProblem | null
+  problemSelection: ProblemSelection
   dailyProblemDateKey: string | null
   dailyRetryPending: boolean
   dailyError: string | null
@@ -1491,6 +1504,7 @@ export class LeetcoderApp {
     selectedFqcn: null,
     dirty: false,
     dailyProblem: null,
+    problemSelection: 'daily',
     dailyProblemDateKey: null,
     dailyRetryPending: false,
     dailyError: null,
@@ -1558,6 +1572,10 @@ export class LeetcoderApp {
   private gitRefreshTimer: ReturnType<typeof setTimeout> | null = null
   private dailyRefreshTimer: ReturnType<typeof setTimeout> | null = null
   private dailyRequestId = 0
+  private problemNumberDraft: string | null = null
+  private lastProblemRequest: ProblemSelection = 'daily'
+  /** Remember the current daily id while a manual problem is being viewed. */
+  private latestDailyProblem: { frontendId: string; dateKey: string } | null = null
   private pendingGitDiffPath: string | null = null
   private saveWriteInFlight = false
   private savedFlash = false
@@ -2816,11 +2834,12 @@ export class LeetcoderApp {
     }
   }
 
-  private async loadDailyProblem(): Promise<void> {
+  private async loadDailyProblem(notifyOnError = false): Promise<void> {
     if (this.state.dailyLoading) {
       return
     }
     const requestId = ++this.dailyRequestId
+    this.lastProblemRequest = 'daily'
     this.state.dailyLoading = true
     this.state.dailyError = null
     this.renderAll()
@@ -2834,14 +2853,26 @@ export class LeetcoderApp {
       if (!problemDateKey) {
         this.state.dailyRetryPending = true
         this.state.dailyError = 'The daily problem returned an invalid date.'
+        if (notifyOnError) {
+          this.setMessage(`Could not load today’s problem: ${this.state.dailyError}`, 'error')
+        }
       } else if (problemDateKey !== currentDateKey) {
         // The provider still serves yesterday's problem. Not an error: the
         // card shows a waiting state and the retry timer keeps polling.
         this.state.dailyRetryPending = true
         this.state.dailyProblemDateKey = problemDateKey
         this.state.dailyError = null
+        if (notifyOnError) {
+          this.setMessage('Today’s problem is not available yet. Try again shortly.', 'info')
+        }
       } else {
         this.state.dailyProblem = problem
+        this.state.problemSelection = 'daily'
+        this.problemNumberDraft = problem.frontendId
+        this.latestDailyProblem = {
+          frontendId: problem.frontendId,
+          dateKey: problemDateKey,
+        }
         this.state.dailyProblemDateKey = problemDateKey
         this.state.dailyRetryPending = false
         this.state.dailyError = null
@@ -2852,6 +2883,9 @@ export class LeetcoderApp {
       }
       this.state.dailyRetryPending = true
       this.state.dailyError = errorMessage(error)
+      if (notifyOnError) {
+        this.setMessage(`Could not load today’s problem: ${errorMessage(error)}`, 'error')
+      }
     } finally {
       if (!this.destroyed && requestId === this.dailyRequestId) {
         this.state.dailyLoading = false
@@ -2859,6 +2893,69 @@ export class LeetcoderApp {
         this.renderAll()
       }
     }
+  }
+
+  private async loadProblemByNumber(value: string): Promise<void> {
+    const problemNumber = normalizeProblemNumber(value)
+    if (!problemNumber) {
+      this.setMessage('Enter a valid LeetCode problem number.', 'error')
+      return
+    }
+    if (this.state.dailyLoading) {
+      return
+    }
+
+    const requestId = ++this.dailyRequestId
+    this.lastProblemRequest = 'manual'
+    this.problemNumberDraft = problemNumber
+    this.state.dailyLoading = true
+    this.state.dailyError = null
+    this.renderAll()
+    try {
+      const problem = await this.backend.fetchProblemByNumber(problemNumber)
+      if (this.destroyed || requestId !== this.dailyRequestId) {
+        return
+      }
+      this.state.dailyProblem = problem
+      this.state.problemSelection = 'manual'
+      this.state.dailyProblemDateKey = null
+      this.state.dailyRetryPending = false
+      this.state.dailyError = null
+    } catch (error) {
+      if (this.destroyed || requestId !== this.dailyRequestId) {
+        return
+      }
+      // Keep the currently displayed problem intact when a lookup fails.
+      if (this.state.dailyProblem && this.problemNumberDraft === problemNumber) {
+        this.problemNumberDraft = this.state.dailyProblem.frontendId
+      }
+      this.state.dailyRetryPending = false
+      this.state.dailyError = errorMessage(error)
+      this.setMessage(`Could not load problem #${problemNumber}: ${errorMessage(error)}`, 'error')
+    } finally {
+      if (!this.destroyed && requestId === this.dailyRequestId) {
+        this.state.dailyLoading = false
+        this.scheduleDailyProblemRefresh()
+        this.renderAll()
+      }
+    }
+  }
+
+  private refreshSelectedProblem(): void {
+    if (this.state.problemSelection === 'manual' && this.state.dailyProblem) {
+      void this.loadProblemByNumber(this.state.dailyProblem.frontendId)
+      return
+    }
+    void this.loadDailyProblem(true)
+  }
+
+  private isViewingTodayProblem(problem: DailyProblem): boolean {
+    const currentDateKey = utcDateKey()
+    if (this.state.problemSelection === 'daily') {
+      return this.state.dailyProblemDateKey === currentDateKey
+    }
+    return this.latestDailyProblem?.frontendId === problem.frontendId
+      && this.latestDailyProblem.dateKey === currentDateKey
   }
 
   private async refreshFiles(): Promise<boolean> {
@@ -3078,7 +3175,8 @@ export class LeetcoderApp {
     if (this.state.busy) {
       return
     }
-    if (!this.state.repoPath || !this.state.projectValid || !this.state.dailyProblem) {
+    const problem = this.state.dailyProblem
+    if (!this.state.repoPath || !this.state.projectValid || !problem) {
       this.setMessage('Choose a repository first', 'error')
       return
     }
@@ -3088,7 +3186,6 @@ export class LeetcoderApp {
       if (!(await this.flushPendingSave())) {
         return
       }
-      const problem = this.state.dailyProblem
       const plan = await createProblemWithRetry(this.backend, this.state.repoPath, {
         number: problem.frontendId,
         title: problem.title,
@@ -3671,7 +3768,10 @@ export class LeetcoderApp {
 
   private scheduleDailyProblemRefresh(delayMs = nextUtcMidnightDelayMs()): void {
     this.clearScheduledDailyRefresh()
-    if (this.destroyed || this.state.dailyLoading || !this.isWindowVisible()) {
+    if (this.destroyed
+      || this.state.dailyLoading
+      || this.state.problemSelection !== 'daily'
+      || !this.isWindowVisible()) {
       return
     }
     this.dailyRefreshTimer = setTimeout(() => {
@@ -3685,7 +3785,7 @@ export class LeetcoderApp {
 
   private refreshDailyProblemIfStale(): void {
     const currentDateKey = utcDateKey()
-    if (this.state.dailyLoading) {
+    if (this.state.dailyLoading || this.state.problemSelection !== 'daily') {
       return
     }
     if (this.state.dailyRetryPending
@@ -4224,6 +4324,12 @@ export class LeetcoderApp {
     if (dailyPrimary) {
       dailyPrimary.disabled = busy || !this.state.projectValid
     }
+    this.root.querySelectorAll<HTMLButtonElement>('.daily-today, .problem-lookup-submit').forEach((button) => {
+      button.disabled = busy || this.state.dailyLoading
+    })
+    this.root.querySelectorAll<HTMLInputElement>('.problem-lookup-input').forEach((input) => {
+      input.disabled = busy || this.state.dailyLoading
+    })
     this.root.querySelectorAll<HTMLInputElement>('.git-file-checkbox').forEach((checkbox) => {
       checkbox.disabled = busy || this.state.git.busy || this.state.git.loading
     })
@@ -4387,8 +4493,26 @@ export class LeetcoderApp {
     const header = this.element<HTMLElement>('#daily-header')
     const description = this.element<HTMLElement>('#daily-description')
     const resizeHandle = this.element<HTMLElement>('#daily-description-resize-handle')
+    const activeElement = document.activeElement
+    const focusedLookup = activeElement instanceof HTMLInputElement
+      && activeElement.classList.contains('problem-lookup-input')
+      && header.contains(activeElement)
+    const lookupInput = focusedLookup ? activeElement : null
+    const lookupSelectionStart = lookupInput?.selectionStart ?? null
+    const lookupSelectionEnd = lookupInput?.selectionEnd ?? null
     header.innerHTML = ''
     const problem = this.state.dailyProblem
+
+    header.append(this.renderProblemLookup(problem))
+    if (focusedLookup) {
+      const input = header.querySelector<HTMLInputElement>('.problem-lookup-input')
+      if (input) {
+        input.focus()
+        if (lookupSelectionStart !== null && lookupSelectionEnd !== null) {
+          input.setSelectionRange(lookupSelectionStart, lookupSelectionEnd)
+        }
+      }
+    }
 
     if (!problem) {
       description.hidden = true
@@ -4407,12 +4531,6 @@ export class LeetcoderApp {
       return
     }
 
-    const micro = document.createElement('span')
-    micro.className = 'micro-label'
-    micro.textContent = 'Today'
-    const number = document.createElement('span')
-    number.className = 'problem-number'
-    number.textContent = `#${problem.frontendId}`
     const title = document.createElement('strong')
     title.className = 'problem-title'
     title.textContent = problem.title
@@ -4420,21 +4538,44 @@ export class LeetcoderApp {
     const difficulty = document.createElement('span')
     difficulty.className = `difficulty difficulty-${problem.difficulty.toLowerCase()}`
     difficulty.textContent = problem.difficulty
-    header.append(micro, number, title, difficulty)
-
+    const viewingToday = this.isViewingTodayProblem(problem)
+    const today = document.createElement(viewingToday ? 'span' : 'button')
+    today.className = viewingToday ? 'daily-today-status' : 'secondary-button daily-today'
+    if (viewingToday) {
+      today.setAttribute('aria-label', 'Today’s problem')
+      today.append(iconFor('calendarDays', 'button-icon'))
+      today.append(document.createTextNode('Today’s problem'))
+    } else {
+      const todayButton = today as HTMLButtonElement
+      todayButton.type = 'button'
+      todayButton.title = 'Show today’s problem'
+      todayButton.setAttribute('aria-label', 'Back to today')
+      todayButton.disabled = this.state.busy || this.state.dailyLoading
+      todayButton.append(iconFor('calendarDays', 'button-icon'))
+      todayButton.append(document.createTextNode('Back to today'))
+      todayButton.addEventListener('click', () => {
+        this.problemNumberDraft = null
+        this.state.problemSelection = 'daily'
+        this.state.dailyProblemDateKey = null
+        void this.loadDailyProblem(true)
+      })
+    }
     const actions = document.createElement('div')
     actions.className = 'daily-actions'
 
     const refresh = document.createElement('button')
     refresh.type = 'button'
     refresh.className = 'icon-button'
-    refresh.setAttribute('aria-label', 'Refresh today’s problem')
-    refresh.title = 'Refresh'
+    const refreshLabel = this.state.problemSelection === 'manual'
+      ? 'Refresh selected problem'
+      : 'Refresh today’s problem'
+    refresh.setAttribute('aria-label', refreshLabel)
+    refresh.title = refreshLabel
     refresh.append(iconFor('refresh', 'button-icon'))
     refresh.disabled = this.state.busy || this.state.dailyLoading
     refresh.classList.toggle('is-spinning', this.state.dailyLoading)
     refresh.addEventListener('click', () => {
-      void this.loadDailyProblem()
+      this.refreshSelectedProblem()
     })
     actions.append(refresh)
 
@@ -4486,7 +4627,7 @@ export class LeetcoderApp {
       }
     })
     actions.append(primary)
-    header.append(actions)
+    header.append(title, difficulty, today, actions)
 
     if (hasContent && this.dailyDescriptionOpen) {
       description.hidden = false
@@ -4498,6 +4639,52 @@ export class LeetcoderApp {
       resizeHandle.hidden = true
       this.applyDailyDescriptionHeight()
     }
+  }
+
+  private renderProblemLookup(problem: DailyProblem | null): HTMLElement {
+    const form = document.createElement('form')
+    form.className = 'problem-lookup'
+    form.setAttribute('aria-label', 'Load a LeetCode problem by number')
+
+    const field = document.createElement('label')
+    field.className = 'problem-lookup-field'
+    field.title = 'Load a LeetCode problem by number'
+    const prefix = document.createElement('span')
+    prefix.className = 'problem-lookup-prefix'
+    prefix.textContent = '#'
+    prefix.setAttribute('aria-hidden', 'true')
+    const input = document.createElement('input')
+    input.className = 'problem-lookup-input'
+    input.type = 'text'
+    input.inputMode = 'numeric'
+    input.pattern = '[0-9]*'
+    input.placeholder = 'number'
+    input.autocomplete = 'off'
+    input.spellcheck = false
+    input.value = this.problemNumberDraft ?? problem?.frontendId ?? ''
+    input.setAttribute('aria-label', 'LeetCode problem number')
+    input.addEventListener('input', () => {
+      this.problemNumberDraft = input.value
+    })
+    input.addEventListener('focus', () => {
+      input.select()
+    })
+    field.append(prefix, input)
+
+    const submit = document.createElement('button')
+    submit.type = 'submit'
+    submit.className = 'icon-button problem-lookup-submit'
+    submit.setAttribute('aria-label', 'Load problem')
+    submit.title = 'Load problem'
+    submit.append(iconFor('arrowRight', 'button-icon'))
+    submit.disabled = this.state.busy || this.state.dailyLoading
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      void this.loadProblemByNumber(input.value)
+    })
+
+    form.append(field, submit)
+    return form
   }
 
   private renderDailySkeleton(): HTMLElement {
@@ -4520,7 +4707,7 @@ export class LeetcoderApp {
     wrapper.className = 'daily-error'
     const message = document.createElement('span')
     message.className = 'daily-error-copy'
-    message.textContent = 'Couldn’t load today’s problem'
+    message.textContent = 'Couldn’t load this problem'
     if (this.state.dailyError) {
       message.title = this.state.dailyError
     }
@@ -4530,7 +4717,11 @@ export class LeetcoderApp {
     retry.textContent = 'Retry'
     retry.disabled = this.state.dailyLoading
     retry.addEventListener('click', () => {
-      void this.loadDailyProblem()
+      if (this.lastProblemRequest === 'manual') {
+        void this.loadProblemByNumber(this.problemNumberDraft ?? '')
+      } else {
+        void this.loadDailyProblem(true)
+      }
     })
     wrapper.append(message, retry)
     return wrapper

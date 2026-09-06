@@ -31,6 +31,7 @@ pub fn run() {
             commands::choose_repository,
             commands::validate_project,
             commands::fetch_daily_problem,
+            commands::fetch_problem_by_number,
             commands::list_problem_files,
             commands::read_problem_file,
             commands::create_problem_file,

@@ -203,6 +203,34 @@ describe('backend client', () => {
     })
   })
 
+  it('invokes a numeric problem lookup and keeps manual results date-less', async () => {
+    const invoke: Invoke = async (command, args) => {
+      expect(command).toBe('fetch_problem_by_number')
+      expect(args).toEqual({ frontendId: '1' })
+      return {
+        date: '',
+        frontend_id: '1',
+        title: 'Two Sum',
+        title_slug: 'two-sum',
+        difficulty: 'Easy',
+        url: 'https://leetcode.com/problems/two-sum/',
+        content: '<p>Find two numbers.</p>',
+        java_snippet: 'class Solution {}',
+      }
+    }
+
+    await expect(createBackendClient(invoke).fetchProblemByNumber('1')).resolves.toEqual({
+      date: '',
+      frontendId: '1',
+      title: 'Two Sum',
+      titleSlug: 'two-sum',
+      difficulty: 'Easy',
+      url: 'https://leetcode.com/problems/two-sum/',
+      content: '<p>Find two numbers.</p>',
+      javaSnippet: 'class Solution {}',
+    })
+  })
+
   it('always resolves the daily problem description content to a string or null', async () => {
     const fetchDaily = (extra: Record<string, unknown>) => {
       const invoke: Invoke = async (command) => {

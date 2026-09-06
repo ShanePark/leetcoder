@@ -11,7 +11,7 @@ pub struct ProjectValidation {
     pub message: Option<String>,
 }
 
-/// Problem metadata returned by LeetCode's daily challenge query.
+/// Problem metadata returned by one of LeetCode's problem queries.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyProblem {
