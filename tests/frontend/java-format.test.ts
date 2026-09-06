@@ -117,6 +117,56 @@ describe('whitespace normalization', () => {
     expect(normalizeJavaWhitespace(formatted)).toBe(formatted)
   })
 
+  it('spaces control parentheses, binary operators, and opening braces', () => {
+    const source = [
+      'public int firstStableIndex(int[] nums, int k) {',
+      '    int[] min = new int[nums.length];',
+      '    for(int i=nums.length-1; i>=0; i--){',
+      '',
+      '    }',
+      '    return -1;',
+      '}',
+      '',
+    ].join('\n')
+    const formatted = normalizeJavaWhitespace(source)
+    expect(formatted).toBe([
+      'public int firstStableIndex(int[] nums, int k) {',
+      '    int[] min = new int[nums.length];',
+      '    for (int i = nums.length - 1; i >= 0; i--) {',
+      '',
+      '    }',
+      '    return -1;',
+      '}',
+      '',
+    ].join('\n'))
+    expect(normalizeJavaWhitespace(formatted)).toBe(formatted)
+  })
+
+  it('keeps generic type brackets and unary or update expressions intact', () => {
+    const source = [
+      'class Q1 {',
+      '    List<List<Integer>> values = new ArrayList<>();',
+      '    int shifted = values.size()>>1;',
+      '    int negative = - 1;',
+      '    int doubleNegative = - -x;',
+      '    double scientific = 1e-3;',
+      '    shifted ++;',
+      '}',
+      '',
+    ].join('\n')
+    expect(normalizeJavaWhitespace(source)).toBe([
+      'class Q1 {',
+      '    List<List<Integer>> values = new ArrayList<>();',
+      '    int shifted = values.size() >> 1;',
+      '    int negative = - 1;',
+      '    int doubleNegative = - -x;',
+      '    double scientific = 1e-3;',
+      '    shifted ++;',
+      '}',
+      '',
+    ].join('\n'))
+  })
+
   it('does not rewrite punctuation in comments or literals adjacent to delimiters', () => {
     const source = [
       'class Q1 {',

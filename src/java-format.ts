@@ -4,6 +4,7 @@ import {
   maskJavaCommentsAndLiterals,
   type ImportLine,
 } from './completions'
+import { javaLanguage } from '@codemirror/lang-java'
 
 /** A run of import statements separated only by blank lines. */
 export interface ImportBlock {
@@ -130,13 +131,165 @@ export function organizeJavaImports(source: string): string {
   return source.slice(0, block.from) + text + source.slice(block.to)
 }
 
+type JavaSyntaxNode = ReturnType<typeof javaLanguage.parser.parse>['topNode']
+
+interface JavaSyntaxToken {
+  name: string
+  from: number
+  to: number
+}
+
+interface JavaWhitespaceEdit {
+  from: number
+  to: number
+  insert: string
+}
+
+const CONTROL_KEYWORDS_REQUIRING_SPACE = new Set([
+  'if', 'for', 'while', 'switch', 'catch', 'synchronized',
+])
+
+const BINARY_OPERATOR_NODES = new Set([
+  'AssignOp', 'ArithOp', 'CompareOp', 'LogicOp', 'BitOp',
+])
+
+const UNARY_OPERATOR_NODES = new Set(['ArithOp', 'LogicOp', 'BitOp'])
+
+function isInlineWhitespace(source: string, from: number, to: number): boolean {
+  return /^[ \t]*$/.test(source.slice(from, to))
+}
+
+function collectJavaSyntaxTokens(node: JavaSyntaxNode, tokens: JavaSyntaxToken[]): void {
+  if (node.firstChild === null) {
+    if (node.to > node.from) {
+      tokens.push({ name: node.type.name, from: node.from, to: node.to })
+    }
+    return
+  }
+  let child: JavaSyntaxNode | null = node.firstChild
+  while (child !== null) {
+    const next: JavaSyntaxNode | null = child.nextSibling
+    collectJavaSyntaxTokens(child, tokens)
+    child = next
+  }
+}
+
+function previousToken(tokens: readonly JavaSyntaxToken[], index: number): JavaSyntaxToken | null {
+  return index > 0 ? tokens[index - 1] : null
+}
+
+function nextToken(tokens: readonly JavaSyntaxToken[], index: number): JavaSyntaxToken | null {
+  return index + 1 < tokens.length ? tokens[index + 1] : null
+}
+
 /**
- * Normalize whitespace around Java's comma and grouping delimiters.
+ * Add a single inline space to a token boundary while leaving comments and
+ * multiline layout untouched. Parser token ranges let this pass distinguish
+ * operators from generic type brackets and unary/update operators.
+ */
+function ensureInlineSpace(
+  source: string,
+  from: number,
+  to: number,
+  edits: JavaWhitespaceEdit[],
+): void {
+  if (!isInlineWhitespace(source, from, to)) {
+    return
+  }
+  edits.push({ from, to, insert: ' ' })
+}
+
+function collectJavaTokenWhitespaceEdits(source: string): JavaWhitespaceEdit[] {
+  const tree = javaLanguage.parser.parse(source).topNode
+  const tokens: JavaSyntaxToken[] = []
+  collectJavaSyntaxTokens(tree, tokens)
+  tokens.sort((left, right) => left.from - right.from || left.to - right.to)
+  const tokenIndexByRange = new Map<string, number>()
+  tokens.forEach((token, index) => tokenIndexByRange.set(`${token.from}:${token.to}`, index))
+
+  const edits: JavaWhitespaceEdit[] = []
+
+  const addOperatorSpacing = (node: JavaSyntaxNode, parentName: string | null): void => {
+    const index = tokenIndexByRange.get(`${node.from}:${node.to}`) ?? -1
+    if (index < 0) {
+      return
+    }
+    const previous = previousToken(tokens, index)
+    const next = nextToken(tokens, index)
+    if (!previous || !next) {
+      return
+    }
+
+    const operator = source.slice(node.from, node.to)
+    if (UNARY_OPERATOR_NODES.has(node.type.name) && parentName === 'UnaryExpression') {
+      return
+    }
+
+    const isBinary = node.type.name === 'AssignOp'
+      || (BINARY_OPERATOR_NODES.has(node.type.name)
+        && (parentName === 'BinaryExpression' || parentName === 'TernaryExpression'))
+    if (!isBinary) {
+      return
+    }
+    // `?` is represented as LogicOp in a ternary expression. It follows the
+    // same inline spacing rule as the other binary operators.
+    if (operator === '!' || operator === '~' || operator === '++' || operator === '--') {
+      return
+    }
+    ensureInlineSpace(source, previous.to, node.from, edits)
+    ensureInlineSpace(source, node.to, next.from, edits)
+  }
+
+  const visit = (node: JavaSyntaxNode, parentName: string | null): void => {
+    if (BINARY_OPERATOR_NODES.has(node.type.name)) {
+      addOperatorSpacing(node, parentName)
+    }
+    if (node.firstChild !== null) {
+      let child: JavaSyntaxNode | null = node.firstChild
+      while (child !== null) {
+        const next: JavaSyntaxNode | null = child.nextSibling
+        visit(child, node.type.name)
+        child = next
+      }
+    }
+  }
+  visit(tree, null)
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    const previous = previousToken(tokens, index)
+    const next = nextToken(tokens, index)
+
+    if (CONTROL_KEYWORDS_REQUIRING_SPACE.has(token.name) && next?.name === '(') {
+      ensureInlineSpace(source, token.to, next.from, edits)
+    }
+
+    if (token.name === '{' && previous) {
+      if (previous.name !== '(' && previous.name !== '[' && previous.name !== '{') {
+        ensureInlineSpace(source, previous.to, token.from, edits)
+      }
+    } else if (token.name === '}' && next && ['else', 'catch', 'finally', 'while'].includes(next.name)) {
+      ensureInlineSpace(source, token.to, next.from, edits)
+    }
+  }
+
+  // Multiple rules can address the same boundary, such as `={`. Keep one
+  // deterministic edit for it before applying changes from right to left.
+  const unique = new Map<string, JavaWhitespaceEdit>()
+  for (const edit of edits) {
+    unique.set(`${edit.from}:${edit.to}`, edit)
+  }
+  return [...unique.values()].sort((left, right) => right.from - left.from)
+}
+
+/**
+ * Normalize whitespace around Java tokens.
  *
  * CodeMirror's Java indentation service only changes leading indentation. A
- * small text pass fills the gap for the common spacing errors that can be
- * fixed without reprinting the whole syntax tree. The masked source keeps
- * punctuation inside comments and literals invisible to this pass.
+ * small text pass fills the gap for common spacing errors that can be fixed
+ * without reprinting the whole syntax tree. The masked source keeps
+ * punctuation inside comments and literals invisible to the delimiter pass;
+ * parser token ranges provide the same protection for operators.
  */
 function normalizeJavaTokenWhitespace(source: string): string {
   const masked = maskJavaCommentsAndLiterals(source)
@@ -184,6 +337,10 @@ function normalizeJavaTokenWhitespace(source: string): string {
       }
     }
     index += 1
+  }
+  const edits = collectJavaTokenWhitespaceEdits(normalized)
+  for (const edit of edits) {
+    normalized = `${normalized.slice(0, edit.from)}${edit.insert}${normalized.slice(edit.to)}`
   }
   return normalized
 }
