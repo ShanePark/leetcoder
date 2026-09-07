@@ -3,27 +3,20 @@ import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 import {
   createBackendClient,
   errorMessage,
-  normalizeGitCommitResult,
-  normalizeGitPushResult,
   type BackendClient,
   type DailyProblem,
-  type GitCommitResult,
   type GitPushResult,
   type ProblemDiagnostic,
   type ProblemFileEntry,
-  type TestResult,
   type TestCaseResult,
-  type TestDiagnostic,
-  type TestPhase,
+  type TestResult,
   type TestRunProgress,
   type RepositoryFilesChanged,
 } from './backend'
-import { classNameFromProblem } from './domain'
 import {
   findJavaTestMethodAt,
   JavaEditor,
   isShortcutHelpAltShortcut,
-  type EditorIssue,
 } from './editor'
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
@@ -47,34 +40,123 @@ import {
   type LiveDiagnosticsSnapshot,
 } from './live-diagnostics'
 
+import { AutosaveCoordinator } from './app/autosave'
+import {
+  accordionGroupKeys,
+  isCloseAllTabsShortcut,
+  isCloseTabShortcut,
+  isCurrentRepositoryRefresh,
+  isFileTabsShiftWheel,
+  RepositoryPickerCoordinator,
+  replacementTabIndex,
+} from './app/navigation'
+import {
+  autoSelectedTestKey,
+  collectDiagnosticEditorIssues,
+  collectEditorIssues,
+  isTestRunSourceCurrent,
+  liveSnapshotResult,
+  runnerFailureResult,
+  testFailureMessage,
+  testResultBannerMessage,
+  sameTest,
+} from './app/test-results'
+import {
+  asGitCommitResult,
+  asGitPushResult,
+  defaultGitCommitMessage,
+  gitFileName,
+  gitResultToastMessage,
+  gitStatusGlyph,
+  isGitNewFile,
+  normalizeGitDiff,
+  normalizeGitStatus,
+  normalizeGitStatusLabel,
+  parseUnifiedDiffLines,
+} from './app/git-helpers'
+import {
+  discardGitChangesWarningMessage,
+  findFileAfterDuplicate,
+  findFileAfterRename,
+  findRestoredFileAfterGitRename,
+  findTodayProblemFile,
+  filterProblemFiles,
+  filterProblemFilesByGroup,
+  joinFilePath,
+  fileMutationResultPath,
+  normalizeJavaFileName,
+} from './app/file-helpers'
+import {
+  fqcnFromJavaPath,
+  gitDirectoryPath,
+  sameFilePath,
+} from './app/path-helpers'
+import {
+  applyTheme,
+  clampBottomPanelHeight,
+  clampContextMenuPosition,
+  clampDailyDescriptionHeight,
+  clampGitFileListWidth,
+  clampSidebarWidth,
+  BOTTOM_PANEL_HEIGHT_KEY,
+  DAILY_DESCRIPTION_HEIGHT_KEY,
+  DAILY_DESCRIPTION_LAYOUT_OVERHEAD,
+  DEFAULT_GIT_FILE_LIST_WIDTH,
+  GIT_FILE_LIST_WIDTH_KEY,
+  MAX_BOTTOM_PANEL_HEIGHT,
+  MAX_DAILY_DESCRIPTION_HEIGHT,
+  MAX_SIDEBAR_WIDTH,
+  MIN_BOTTOM_PANEL_HEIGHT,
+  MIN_DAILY_DESCRIPTION_HEIGHT,
+  MIN_GIT_DIFF_WIDTH,
+  MIN_GIT_FILE_LIST_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  MIN_CODE_CARD_HEIGHT,
+  SIDEBAR_WIDTH_KEY,
+  THEME_MODE_KEY,
+  VIEWPORT_MARGIN,
+  maxBottomPanelHeight,
+  maxDailyDescriptionHeight,
+  maxGitFileListWidth,
+  maxSidebarWidth,
+  macShortcutDialogLabel,
+  normalizeDailyProblemDateKey,
+  normalizeProblemNumber,
+  normalizeThemeMode,
+  nextUtcMidnightDelayMs,
+  readBottomPanelHeight,
+  readDailyDescriptionHeight,
+  readGitFileListWidth,
+  readSidebarWidth,
+  readThemeMode,
+  windowHeight,
+  defaultShortcutPlatform,
+  isMacPlatform,
+  utcDateKey,
+} from './app/layout'
+import { renderShellView } from './app/shell-view'
+import { renderTestResults, TEST_RUN_ROOT_KEY } from './app/results-view'
+import type {
+  AppOptions,
+  AppState,
+  AutosaveSnapshot,
+  DirectoryPicker,
+  FileManagementBackend,
+  GitBackendClient,
+  GitChangedFile,
+  LiveDiagnosticsBackend,
+  OpenFileTab,
+  ProblemSelection,
+  SettingsSection,
+  ShortcutPlatform,
+  TestRunSnapshot,
+  TestRunSourceSnapshot,
+  TestRunnerBackend,
+  ThemeMode,
+} from './app/types'
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
-const THEME_MODE_KEY = 'leetcoder.theme-mode'
 const APP_VERSION = '0.1.0'
-const BOTTOM_PANEL_HEIGHT_KEY = 'leetcoder.bottom-panel-height'
-const GIT_FILE_LIST_WIDTH_KEY = 'leetcoder.git-file-list-width'
-const SIDEBAR_WIDTH_KEY = 'leetcoder.sidebar-width'
 const DAILY_DESCRIPTION_KEY = 'leetcoder.daily-description'
-const DAILY_DESCRIPTION_HEIGHT_KEY = 'leetcoder.daily-description-height'
-const DEFAULT_BOTTOM_PANEL_HEIGHT = 280
-const MIN_BOTTOM_PANEL_HEIGHT = 180
-const MAX_BOTTOM_PANEL_HEIGHT = 640
-const DEFAULT_GIT_FILE_LIST_WIDTH = 300
-const MIN_GIT_FILE_LIST_WIDTH = 180
-const MIN_GIT_DIFF_WIDTH = 260
-const GIT_SPLITTER_WIDTH = 7
-const GIT_WORKSPACE_GAP = 16
-const DEFAULT_SIDEBAR_WIDTH = 248
-const MIN_SIDEBAR_WIDTH = 180
-const MAX_SIDEBAR_WIDTH = 520
-const MIN_EDITOR_WIDTH = 360
-const SIDEBAR_SPLITTER_WIDTH = 7
-const DEFAULT_DAILY_DESCRIPTION_HEIGHT = 220
-const MIN_DAILY_DESCRIPTION_HEIGHT = 120
-const MAX_DAILY_DESCRIPTION_HEIGHT = 560
-const MIN_CODE_CARD_HEIGHT = 180
-const DAILY_DESCRIPTION_LAYOUT_OVERHEAD = 86
-const DAILY_DESCRIPTION_SPLITTER_HEIGHT = 7
-const TEST_RUN_ROOT_KEY = '__leetcoder_test_run__'
 const GIT_REFRESH_DEBOUNCE_MS = 250
 const GIT_POLL_INTERVAL_MS = 4000
 const DAILY_RETRY_INTERVAL_MS = 60_000
@@ -82,14 +164,10 @@ const FILE_CONTEXT_MENU_WIDTH = 156
 const FILE_CONTEXT_MENU_HEIGHT = 108
 const GIT_CONTEXT_MENU_WIDTH = 190
 const GIT_CONTEXT_MENU_HEIGHT = 76
-const VIEWPORT_MARGIN = 8
 const SAVED_FLASH_MS = 1500
 const TOAST_DISMISS_MS = 3000
 const MAX_VISIBLE_TOASTS = 3
 
-export type ThemeMode = 'system' | 'dark' | 'light'
-export type ShortcutPlatform = 'linux' | 'macos'
-export type SettingsSection = 'appearance' | 'keymap'
 const FILE_GROUPS: Array<{ key: ProblemFileEntry['packageSegment']; label: string }> = [
   { key: 'easy', label: 'Easy' },
   { key: 'medium', label: 'Medium' },
@@ -99,1402 +177,6 @@ const FILE_GROUPS: Array<{ key: ProblemFileEntry['packageSegment']; label: strin
 const OTHER_GROUP: { key: ProblemFileEntry['packageSegment']; label: string } = {
   key: 'other',
   label: 'Other',
-}
-
-/**
- * Return the only group allowed to stay open in the file explorer accordion.
- * Keeping this transition pure makes the one-open-group rule easy to reuse
- * when the UI is rendered after a file open or refresh.
- */
-export function accordionGroupKeys(
-  group: ProblemFileEntry['packageSegment'],
-  expanded: boolean,
-): ProblemFileEntry['packageSegment'][] {
-  return expanded ? [group] : []
-}
-
-/**
- * Pick the tab that should replace a closed tab. The index is from the tab
- * list before removal; after removal that index points at the tab on the
- * right, or the final remaining tab on the left when the closed tab was last.
- */
-export function replacementTabIndex(remainingCount: number, closedIndex: number): number | null {
-  if (remainingCount <= 0 || closedIndex < 0 || closedIndex > remainingCount) {
-    return null
-  }
-  return closedIndex < remainingCount ? closedIndex : remainingCount - 1
-}
-
-/** The keyboard fields needed to recognize the platform-specific tab-close shortcut. */
-export interface TabCloseShortcutEvent {
-  key: string
-  shiftKey: boolean
-  altKey: boolean
-  metaKey: boolean
-  ctrlKey: boolean
-}
-
-/**
- * Match only Cmd+W on Apple platforms and Alt+W everywhere else. Keeping the
- * platform and event data as arguments makes the shortcut behavior testable
- * without depending on the host browser's navigator or KeyboardEvent.
- */
-export function isCloseTabShortcut(
-  event: TabCloseShortcutEvent,
-  macPlatform: boolean,
-): boolean {
-  if (event.key.toLowerCase() !== 'w' || event.shiftKey) {
-    return false
-  }
-  return macPlatform
-    ? event.metaKey && !event.altKey && !event.ctrlKey
-    : event.altKey && !event.metaKey && !event.ctrlKey
-}
-
-/** Match the platform-specific close-all-tabs shortcut without reading browser globals. */
-export function isCloseAllTabsShortcut(
-  event: TabCloseShortcutEvent,
-  macPlatform: boolean,
-): boolean {
-  if (event.key.toLowerCase() !== 'w' || !event.shiftKey) {
-    return false
-  }
-  return macPlatform
-    ? event.metaKey && !event.altKey && !event.ctrlKey
-    : event.altKey && !event.metaKey && !event.ctrlKey
-}
-
-/** Whether a wheel event should move the open-file tab strip horizontally. */
-export function isFileTabsShiftWheel(
-  event: Pick<WheelEvent, 'deltaY' | 'shiftKey'>,
-): boolean {
-  return event.shiftKey && event.deltaY !== 0
-}
-
-export type DirectoryPicker = () => Promise<string | null>
-
-/**
- * Allows only one native repository picker at a time. Native pickers can be
- * hidden by another window on some Linux desktops, so repeated clicks must
- * not create an unbounded stack of dialogs while the first request is open.
- */
-export class RepositoryPickerCoordinator {
-  private pending = false
-
-  get isOpen(): boolean {
-    return this.pending
-  }
-
-  open(picker: DirectoryPicker): Promise<string | null> | null {
-    if (this.pending) {
-      return null
-    }
-    this.pending = true
-    return (async (): Promise<string | null> => {
-      try {
-        return await picker()
-      } finally {
-        this.pending = false
-      }
-    })()
-  }
-}
-
-export interface AppOptions {
-  backend?: BackendClient
-  directoryPicker?: DirectoryPicker
-  storage?: Storage
-  /** Request a native window close through the close-safety handler. */
-  requestClose?: () => Promise<void>
-}
-
-export interface AutosaveSnapshot {
-  repoPath: string
-  filePath: string
-  source: string
-}
-
-export type AutosaveStatus = 'idle' | 'saving' | 'error'
-
-export interface AutosaveCoordinatorOptions {
-  delayMs?: number
-  onStatusChange?: (status: AutosaveStatus) => void
-  onError?: (error: unknown) => void
-}
-
-export interface TestResultPresentation {
-  phaseLabel: string
-  statusLabel: string
-  failureMessage: string | null
-  rawLogsOpen: boolean
-}
-
-export type TestRunStatus = 'running' | 'completed' | 'error'
-
-export interface TestRunSnapshot {
-  id: number
-  status: TestRunStatus
-  phase: TestPhase
-  startedAt: number
-  tests: TestCaseResult[]
-  stdout: string
-  stderr: string
-  activeTest: TestCaseResult | null
-  error: string | null
-  testMethod: string | null
-}
-
-export interface TestRunSourceSnapshot {
-  repoPath: string
-  filePath: string
-  source: string
-}
-
-export interface CurrentTestSource {
-  repoPath: string | null
-  filePath: string | null
-  source: string
-}
-
-/** A normalized working-tree entry used by the Git tab. */
-export interface GitChangedFile {
-  path: string
-  status: string
-  staged: boolean
-  additions: number | null
-  deletions: number | null
-  originalPath?: string | null
-}
-
-export interface GitStatusSnapshot {
-  branch: string | null
-  files: GitChangedFile[]
-}
-
-/**
- * Git is intentionally kept optional here so the web preview and older
- * desktop binaries can still boot while the Rust command bridge is updated.
- * The backend implementation can expose richer DTOs; the normalizers below
- * accept the common object/array/string variants.
- */
-interface GitBackendClient {
-  getGitStatus?: (projectRoot: string) => Promise<unknown>
-  listGitChanges?: (projectRoot: string) => Promise<unknown>
-  getGitDiff?: (projectRoot: string, paths: string[]) => Promise<unknown>
-  discardGitChanges?: (projectRoot: string, path: string) => Promise<void>
-  showInFileManager?: (projectRoot: string, path: string) => Promise<void>
-  commitGitChanges?: (projectRoot: string, paths: string[], message: string) => Promise<unknown>
-  commitGit?: (projectRoot: string, paths: string[], message: string) => Promise<unknown>
-  pushGit?: (projectRoot: string) => Promise<unknown>
-}
-
-interface TestRunnerBackend {
-  runProblemTest: (
-    projectRoot: string,
-    fullyQualifiedClassName: string,
-    onProgress?: (progress: TestRunProgress) => void,
-    testMethod?: string,
-  ) => Promise<TestResult>
-}
-
-interface LiveDiagnosticsBackend {
-  checkProblemDiagnostics?: (
-    projectRoot: string,
-    fullyQualifiedClassName: string,
-    source: string,
-  ) => Promise<readonly ProblemDiagnostic[]>
-}
-
-interface FileManagementBackend {
-  deleteProblemFile?: (projectRoot: string, path: string) => Promise<unknown>
-  duplicateProblemFile?: (projectRoot: string, path: string) => Promise<unknown>
-  renameProblemFile?: (projectRoot: string, path: string, newName: string) => Promise<unknown>
-}
-
-interface GitState {
-  branch: string | null
-  files: GitChangedFile[]
-  selectedPaths: string[]
-  activePath: string | null
-  diffByPath: Record<string, string>
-  fallbackDiff: string
-  loading: boolean
-  diffLoading: boolean
-  busy: boolean
-  error: string | null
-  commitMessage: string
-  commitMessageEdited: boolean
-  loadedRepoPath: string | null
-  stale: boolean
-}
-
-interface FileContextMenuState {
-  file: ProblemFileEntry
-  x: number
-  y: number
-}
-
-interface GitContextMenuState {
-  file: GitChangedFile
-  x: number
-  y: number
-}
-
-/** Metadata for a file that is open in the editor tab strip. */
-interface OpenFileTab {
-  id: number
-  path: string
-  name: string
-  packageSegment: ProblemFileEntry['packageSegment']
-}
-
-/**
- * A backend result is only valid for the exact document that started the run.
- * Comparing the source as well as the path prevents an older run from painting
- * failures onto an edited buffer while its process is still finishing.
- */
-export function isTestRunSourceCurrent(
-  snapshot: TestRunSourceSnapshot,
-  current: CurrentTestSource,
-): boolean {
-  return snapshot.repoPath === current.repoPath
-    && snapshot.filePath === current.filePath
-    && snapshot.source === current.source
-}
-
-/**
- * Turns a structured run result into the short, actionable copy used above
- * the selectable test tree. The full process output remains available from
- * the Test run item in that tree.
- */
-export function presentTestResult(result: TestResult): TestResultPresentation {
-  const phaseLabel = testPhaseLabel(result.phase)
-  const failureMessage = result.success ? null : testFailureMessage(result)
-  return {
-    phaseLabel,
-    statusLabel: result.success
-      ? 'Passed'
-      : result.summary.errors > 0
-        ? `Error · ${phaseLabel}`
-        : `Failed · ${phaseLabel}`,
-    failureMessage,
-    rawLogsOpen: false,
-  }
-}
-
-export function testResultBannerMessage(result: TestResult): string {
-  if (result.success) {
-    return 'All tests passed'
-  }
-  const reason = testFailureMessage(result)
-  const phase = normalizeTestPhase(result.phase)
-  if (phase === 'compile') {
-    return `Compilation failed: ${reason}`
-  }
-  if (phase === 'runner') {
-    return `Test runner failed: ${reason}`
-  }
-  if (phase === 'noTests') {
-    return `No tests found: ${reason}`
-  }
-  if (phase === 'test') {
-    return `Tests failed: ${reason}`
-  }
-  return `Test failed: ${reason}`
-}
-
-function testPhaseLabel(phase: TestPhase): string {
-  const normalized = phase.trim().toLowerCase().replace(/[\s_-]/g, '')
-  if (normalized === 'starting') {
-    return 'Starting'
-  }
-  if (normalized === 'finishing') {
-    return 'Finishing'
-  }
-  switch (normalizeTestPhase(phase)) {
-    case 'compile':
-      return 'Compilation'
-    case 'runner':
-      return 'Test runner'
-    case 'noTests':
-      return 'No tests'
-    case 'test':
-      return 'Tests'
-    default:
-      return phase.trim() || 'Test run'
-  }
-}
-
-function testStatusLabel(status: string): string {
-  switch (status) {
-    case 'passed':
-      return 'passed'
-    case 'failed':
-      return 'failed'
-    case 'error':
-      return 'error'
-    case 'skipped':
-      return 'skipped'
-    case 'running':
-      return 'running'
-    default:
-      return status || 'unknown'
-  }
-}
-
-function normalizeTestPhase(phase: TestPhase): 'compile' | 'runner' | 'noTests' | 'test' | 'unknown' {
-  const normalized = phase.trim().toLowerCase().replace(/[\s_-]/g, '')
-  if (normalized === 'compile' || normalized === 'compilation') {
-    return 'compile'
-  }
-  if (normalized === 'runner' || normalized === 'run' || normalized === 'execution') {
-    return 'runner'
-  }
-  if (normalized === 'notest' || normalized === 'notests') {
-    return 'noTests'
-  }
-  if (normalized === 'test' || normalized === 'tests') {
-    return 'test'
-  }
-  if (normalized === 'compiling') {
-    return 'compile'
-  }
-  if (normalized === 'runningtests') {
-    return 'test'
-  }
-  return 'unknown'
-}
-
-export function testFailureMessage(result: TestResult): string {
-  const phase = normalizeTestPhase(result.phase)
-  const diagnostic = result.diagnostics.find(
-    (entry) => entry.message.trim().length > 0 && entry.severity.trim().toLowerCase() === 'error',
-  ) ?? result.diagnostics.find((entry) => entry.message.trim().length > 0)
-  const failedTest = result.tests.find((test) => {
-    if (test.status !== 'failed' && test.status !== 'error') {
-      return false
-    }
-    return Boolean(
-      test.message?.trim().length
-      || test.details?.trim().length
-      || test.expected !== null && test.expected !== undefined
-      || test.actual !== null && test.actual !== undefined,
-    )
-  })
-  if (phase === 'compile' && diagnostic) {
-    return shortenResultMessage(diagnostic.message)
-  }
-  if (phase === 'test' && failedTest) {
-    const conciseFailure = conciseTestFailureMessage(failedTest)
-    if (conciseFailure) {
-      return conciseFailure
-    }
-  }
-  const stderr = firstUsefulOutputLine(result.stderr)
-  if (stderr) {
-    return shortenResultMessage(stderr)
-  }
-  const stdout = firstUsefulOutputLine(result.stdout)
-  if (stdout) {
-    return shortenResultMessage(stdout)
-  }
-  if (diagnostic) {
-    return shortenResultMessage(diagnostic.message)
-  }
-  if (phase === 'compile') {
-    return 'The Java source could not be compiled.'
-  }
-  if (phase === 'runner') {
-    return 'The test runner stopped before reporting any tests.'
-  }
-  if (phase === 'noTests') {
-    return 'The test task completed without reporting any tests.'
-  }
-  return 'The test run stopped before reporting a result.'
-}
-
-export type TestOutputStream = 'stdout' | 'stderr'
-
-export interface TestOutputSegment {
-  stream: TestOutputStream
-  text: string
-}
-
-/**
- * Return the non-empty output streams in the order used by the test console.
- * ANSI-only and whitespace-only values are omitted, while meaningful output
- * stays byte-for-byte intact except for a needed separator at the stream
- * boundary.
- */
-export function testOutputSegments(
-  stdout: string | null | undefined,
-  stderr: string | null | undefined,
-): TestOutputSegment[] {
-  const segments: TestOutputSegment[] = []
-  for (const [stream, value] of [
-    ['stdout', stdout],
-    ['stderr', stderr],
-  ] as const) {
-    const text = stripAnsi(value ?? '')
-    if (text.trim().length === 0) {
-      continue
-    }
-    segments.push({ stream, text })
-  }
-  if (segments.length > 1 && !/[\r\n]$/.test(segments[0].text)) {
-    segments[0] = { ...segments[0], text: `${segments[0].text}\n` }
-  }
-  return segments
-}
-
-/** Whether a testcase has output worth showing in its detail console. */
-export function testCaseHasOutput(test: TestCaseResult): boolean {
-  return testOutputSegments(test.stdout, test.stderr).length > 0
-}
-
-/** Hide noisy JDK annotation-enum warnings while retaining actionable diagnostics. */
-export function filterTestDiagnostics(diagnostics: TestDiagnostic[]): TestDiagnostic[] {
-  return diagnostics.filter((diagnostic) => {
-    return !/unknown\s+enum\s+constant\s+[a-z_$][\w$]*(?:\.[a-z_$][\w$]*)+/i.test(diagnostic.message)
-  })
-}
-
-export function conciseTestFailureMessage(test: TestCaseResult): string | null {
-  const expected = test.expected !== null && test.expected !== undefined
-    ? test.expected.trim()
-    : null
-  const actual = test.actual !== null && test.actual !== undefined
-    ? test.actual.trim()
-    : null
-  if (expected !== null && actual !== null) {
-    return shortenResultMessage(`Expected ${expected}, but was ${actual}`)
-  }
-  const message = test.message?.trim()
-  if (message) {
-    return shortenResultMessage(stripTestFailureExceptionPrefix(message))
-  }
-  const details = test.details?.split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0 && !/^at\s+/.test(line) && !/^caused by:\s*$/i.test(line))
-  return details ? shortenResultMessage(stripTestFailureExceptionPrefix(details)) : null
-}
-
-function stripTestFailureExceptionPrefix(message: string): string {
-  const prefix = 'org.opentest4j.AssertionFailedError:'
-  return message.startsWith(prefix)
-    ? message.slice(prefix.length).trim()
-    : message.trim()
-}
-
-export type TestCaseDetailSection = 'console' | 'failure' | 'comparison' | 'location' | 'stack'
-
-/**
- * Keep the selected-test detail order testable without requiring a DOM in
- * frontend unit tests. Console output intentionally leads all failure data.
- */
-export function testCaseDetailSectionOrder(test: TestCaseResult): TestCaseDetailSection[] {
-  const sections: TestCaseDetailSection[] = []
-  if (testCaseHasOutput(test)) {
-    sections.push('console')
-  }
-  const hasExpected = test.expected !== null && test.expected !== undefined
-  const hasActual = test.actual !== null && test.actual !== undefined
-  // Expected/Actual rows already explain a structured assertion failure, so
-  // don't spend vertical space on the same message a second time.
-  if ((!hasExpected || !hasActual) && conciseTestFailureMessage(test)) {
-    sections.push('failure')
-  }
-  if (hasExpected || hasActual) {
-    sections.push('comparison')
-  }
-  if (test.file && validSourceLine(test.line) !== null) {
-    sections.push('location')
-  }
-  if (test.details) {
-    sections.push('stack')
-  }
-  return sections
-}
-
-export function relevantTestStackFrames(details: string | null | undefined): string[] {
-  if (!details) {
-    return []
-  }
-  return details
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^at\s+/.test(line) && !isInternalTestFrame(line))
-    .slice(0, 4)
-}
-
-/**
- * Every test stays visible. For a finished run the list is bucketed so the
- * actionable rows come first (failed, then errors, then passed, then
- * skipped/other) while report order is preserved within each bucket. A live
- * run keeps arrival order so rows do not jump while results stream in.
- */
-export function defaultVisibleTests(
-  tests: TestCaseResult[],
-  isRunning = false,
-): TestCaseResult[] {
-  if (isRunning) {
-    return tests
-  }
-  const bucket = (test: TestCaseResult): number => {
-    switch (test.status) {
-      case 'failed':
-        return 0
-      case 'error':
-        return 1
-      case 'skipped':
-        return 3
-      default:
-        return 2
-    }
-  }
-  return tests
-    .map((test, index) => ({ test, index }))
-    .sort((left, right) => bucket(left.test) - bucket(right.test) || left.index - right.index)
-    .map((entry) => entry.test)
-}
-
-/**
- * Character-level diff for single-line Expected/Actual values: the common
- * prefix and suffix stay plain while the differing middle of each value is
- * highlighted. Returns null when a character diff would not help (multi-line
- * values, equal strings, or values with no shared context).
- */
-export function charDiffSegments(
-  expected: string,
-  actual: string,
-): { prefix: string; expectedMid: string; actualMid: string; suffix: string } | null {
-  if (expected === actual || expected.includes('\n') || actual.includes('\n')) {
-    return null
-  }
-  let prefix = 0
-  const maxPrefix = Math.min(expected.length, actual.length)
-  while (prefix < maxPrefix && expected[prefix] === actual[prefix]) {
-    prefix += 1
-  }
-  let suffix = 0
-  while (
-    suffix < maxPrefix - prefix
-    && expected[expected.length - 1 - suffix] === actual[actual.length - 1 - suffix]
-  ) {
-    suffix += 1
-  }
-  // A full replacement such as `true` → `false` has no useful context for an
-  // inline mark. Leave both values as plain text in their Expected/Actual
-  // rows so the row-level colors carry the comparison without a redundant
-  // block around the entire value.
-  if (prefix < 2 && suffix < 2) {
-    return null
-  }
-  return {
-    prefix: expected.slice(0, prefix),
-    expectedMid: expected.slice(prefix, expected.length - suffix),
-    actualMid: actual.slice(prefix, actual.length - suffix),
-    suffix: expected.slice(expected.length - suffix),
-  }
-}
-
-/**
- * Find the sidebar entry that already solves today's problem: the class name
- * must be the problem's base class name or the base name plus a numeric
- * collision suffix (the repository convention for repeat solves).
- */
-export function findTodayProblemFile(
-  files: ProblemFileEntry[],
-  problem: Pick<DailyProblem, 'frontendId' | 'title'>,
-): ProblemFileEntry | null {
-  let base: string
-  try {
-    base = classNameFromProblem(problem.frontendId, problem.title)
-  } catch {
-    return null
-  }
-  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const pattern = new RegExp(`^${escaped}\\d*$`)
-  return files.find((file) => /\.java$/i.test(file.path)
-    && pattern.test(file.name.replace(/\.java$/i, ''))) ?? null
-}
-
-function isInternalTestFrame(line: string): boolean {
-  return /^at\s+(?:java\.|javax\.|jdk\.|sun\.|com\.sun\.|org\.junit\.|org\.gradle\.|org\.hamcrest\.|kotlin\.|worker\.)/i.test(line)
-}
-
-/**
- * Match a backend source path against the currently open repository-relative
- * path. Gradle/JUnit may report an absolute path, a repository suffix, or
- * only the Java basename depending on where the failure was discovered.
- */
-export function sourcePathsMatch(selectedPath: string, reportedPath: string): boolean {
-  const selected = normalizeSourcePath(selectedPath)
-  const reported = normalizeSourcePath(reportedPath)
-  if (!selected || !reported) {
-    return false
-  }
-  if (selected === reported || selected.endsWith(`/${reported}`) || reported.endsWith(`/${selected}`)) {
-    return true
-  }
-  // A basename-only report is common in JUnit stack traces. Once the
-  // backend gives us directory information, require the suffix match above
-  // so two unrelated files with the same name cannot mark this editor.
-  return !reported.includes('/') && sourceBasename(selected) === reported
-}
-
-function normalizeSourcePath(path: string): string {
-  return path
-    .trim()
-    .replace(/\\/g, '/')
-    .replace(/^\.\/+/, '')
-    .replace(/\/+/g, '/')
-    .replace(/^\/+/, '')
-    .toLocaleLowerCase()
-}
-
-function sameFilePath(left: string, right: string): boolean {
-  return normalizeSourcePath(left) === normalizeSourcePath(right)
-}
-
-export function gitFileName(path: string): string {
-  const normalized = path.replace(/\\/g, '/').replace(/\/$/, '')
-  return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized
-}
-
-/** Directory portion of a repo-relative path, or '' for a root-level file. */
-export function gitDirectoryPath(path: string): string {
-  const normalized = path.replace(/\\/g, '/').replace(/\/$/, '')
-  const separator = normalized.lastIndexOf('/')
-  return separator > 0 ? normalized.slice(0, separator) : ''
-}
-
-/**
- * Auto commit message chosen by change kind: brand-new files read `Add …`,
- * anything touching an existing file reads `Update …`.
- */
-export function defaultGitCommitMessage(files: Array<Pick<GitChangedFile, 'path' | 'status'>>): string {
-  const normalized = files.filter((file) => file.path.trim().length > 0)
-  if (normalized.length === 0) {
-    return 'Update files'
-  }
-  const isNew = (status: string): boolean => status === 'added' || status === 'untracked'
-  const allNew = normalized.every((file) => isNew(file.status))
-  if (normalized.length === 1) {
-    return `${allNew ? 'Add' : 'Update'} ${gitFileName(normalized[0].path)}`
-  }
-  return `${allNew ? 'Add' : 'Update'} ${normalized.length} files`
-}
-
-/** Best-effort commit-result parse; older backends may return anything. */
-function asGitCommitResult(value: unknown): GitCommitResult | null {
-  try {
-    return normalizeGitCommitResult(value)
-  } catch {
-    return null
-  }
-}
-
-/** Best-effort push-result parse; older backends may return anything. */
-function asGitPushResult(value: unknown): GitPushResult | null {
-  try {
-    return normalizeGitPushResult(value)
-  } catch {
-    return null
-  }
-}
-
-/**
- * Success toast for commit / commit-and-push, e.g. `Committed a1b2c3d · 2 files`
- * or `Committed a1b2c3d · Pushed to origin/main`. Falls back gracefully when a
- * backend response could not be parsed.
- */
-export function gitResultToastMessage(
-  fileCount: number,
-  pushed: boolean,
-  commit: GitCommitResult | null,
-  push: GitPushResult | null,
-): string {
-  const files = `${fileCount} file${fileCount === 1 ? '' : 's'}`
-  const committed = commit?.commitHash
-    ? `Committed ${commit.commitHash.slice(0, 7)}`
-    : 'Committed'
-  if (!pushed) {
-    return `${committed} · ${files}`
-  }
-  const pushedLabel = push?.branch ? `Pushed to origin/${push.branch}` : 'Pushed'
-  return `${committed} · ${pushedLabel}`
-}
-
-/** Normalize the backend's Git status payload into the fields the UI needs. */
-export function normalizeGitStatus(value: unknown): GitStatusSnapshot {
-  if (typeof value === 'string') {
-    return {
-      branch: null,
-      files: value.split(/\r?\n/).map(parseGitStatusLine).filter((file): file is GitChangedFile => file !== null),
-    }
-  }
-  const record = isRecordValue(value) ? value : null
-  const rawFiles = Array.isArray(value)
-    ? value
-    : record
-      ? record.files ?? record.changes ?? record.entries ?? record.statuses ?? record.paths
-      : undefined
-  const files = Array.isArray(rawFiles)
-    ? rawFiles.map((entry) => normalizeGitFile(entry)).filter((file): file is GitChangedFile => file !== null)
-    : []
-  const branch = record
-    ? stringValueForGit(record.branch) ?? stringValueForGit(record.currentBranch) ?? stringValueForGit(record.head)
-    : null
-  return { branch, files: dedupeGitFiles(files) }
-}
-
-/** Normalize a Git diff payload to one diff string per repository-relative path. */
-export function normalizeGitDiff(value: unknown, requestedPaths: string[] = []): Record<string, string> {
-  const diffs: Record<string, string> = {}
-  const assign = (path: string | null, diff: string): void => {
-    const text = diff.trimEnd()
-    if (!text) {
-      return
-    }
-    if (path) {
-      diffs[path] = text
-      return
-    }
-    const parsed = splitUnifiedDiff(text)
-    if (Object.keys(parsed).length > 0) {
-      Object.assign(diffs, parsed)
-      return
-    }
-    for (const requestedPath of requestedPaths) {
-      diffs[requestedPath] = text
-    }
-  }
-
-  if (typeof value === 'string') {
-    assign(null, value)
-    return diffs
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item === 'string') {
-        assign(null, item)
-        continue
-      }
-      if (!isRecordValue(item)) {
-        continue
-      }
-      const path = stringValueForGit(item.path) ?? stringValueForGit(item.relativePath) ?? stringValueForGit(item.relative_path)
-      const diff = stringValueForGit(item.diff) ?? stringValueForGit(item.patch) ?? stringValueForGit(item.content)
-      if (diff) {
-        assign(path, diff)
-      }
-    }
-    return diffs
-  }
-  if (!isRecordValue(value)) {
-    return diffs
-  }
-  const nested = value.files ?? value.diffs ?? value.changes
-  if (Array.isArray(nested)) {
-    Object.assign(diffs, normalizeGitDiff(nested, requestedPaths))
-  }
-  const rawDiff = stringValueForGit(value.diff) ?? stringValueForGit(value.patch) ?? stringValueForGit(value.content)
-  if (rawDiff) {
-    const path = stringValueForGit(value.path) ?? stringValueForGit(value.relativePath) ?? stringValueForGit(value.relative_path)
-    assign(path, rawDiff)
-  }
-  return diffs
-}
-
-function parseGitStatusLine(line: string): GitChangedFile | null {
-  const raw = line.replace(/\r$/, '')
-  if (!raw.trim()) {
-    return null
-  }
-  // Porcelain v1: XY path, with a quoted path only in unusual filenames.
-  const match = /^(?<index>.)(?<worktree>.)\s+(?<path>.+)$/.exec(raw)
-  if (!match?.groups?.path) {
-    return null
-  }
-  const index = match.groups.index ?? ' '
-  const worktree = match.groups.worktree ?? ' '
-  const status = statusFromGitCodes(index, worktree)
-  return {
-    path: unquoteGitPath(match.groups.path),
-    status,
-    staged: isGitIndexStaged(index),
-    additions: null,
-    deletions: null,
-    originalPath: null,
-  }
-}
-
-function normalizeGitFile(value: unknown): GitChangedFile | null {
-  if (typeof value === 'string') {
-    return { path: value, status: 'modified', staged: false, additions: null, deletions: null, originalPath: null }
-  }
-  if (!isRecordValue(value)) {
-    return null
-  }
-  const path = stringValueForGit(value.path)
-    ?? stringValueForGit(value.relativePath)
-    ?? stringValueForGit(value.relative_path)
-    ?? stringValueForGit(value.name)
-  if (!path) {
-    return null
-  }
-  const index = stringValueForGit(value.indexStatus) ?? stringValueForGit(value.index_status) ?? stringValueForGit(value.index)
-  const worktree = stringValueForGit(value.worktreeStatus) ?? stringValueForGit(value.worktree_status) ?? stringValueForGit(value.worktree)
-  const rawStatus = stringValueForGit(value.status) ?? stringValueForGit(value.state) ?? stringValueForGit(value.statusCode) ?? stringValueForGit(value.status_code)
-  const additions = numberValueForGit(value.additions ?? value.insertions ?? value.added)
-  const deletions = numberValueForGit(value.deletions ?? value.removals ?? value.deleted)
-  const originalPath = stringValueForGit(value.originalPath)
-    ?? stringValueForGit(value.original_path)
-  const staged = typeof value.staged === 'boolean'
-    ? value.staged
-    : isGitIndexStaged(index)
-  return {
-    path: unquoteGitPath(path),
-    status: rawStatus ? normalizeGitStatusLabel(rawStatus) : statusFromGitCodes(index ?? ' ', worktree ?? ' '),
-    staged,
-    additions,
-    deletions,
-    originalPath: originalPath ? unquoteGitPath(originalPath) : null,
-  }
-}
-
-function isGitIndexStaged(index: string | null): boolean {
-  if (!index) {
-    return false
-  }
-  const normalized = index.trim()
-  return normalized.length > 0 && normalized !== '.' && normalized !== '?'
-}
-
-function dedupeGitFiles(files: GitChangedFile[]): GitChangedFile[] {
-  const byPath = new Map<string, GitChangedFile>()
-  for (const file of files) {
-    if (!file.path) {
-      continue
-    }
-    const previous = byPath.get(file.path)
-    byPath.set(file.path, previous ? {
-      ...previous,
-      ...file,
-      additions: file.additions ?? previous.additions,
-      deletions: file.deletions ?? previous.deletions,
-      originalPath: file.originalPath ?? previous.originalPath,
-    } : file)
-  }
-  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path))
-}
-
-function splitUnifiedDiff(diff: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  const lines = diff.split(/\r?\n/)
-  let currentPath: string | null = null
-  let current: string[] = []
-  const flush = (): void => {
-    if (currentPath && current.length > 0) {
-      result[currentPath] = current.join('\n').trimEnd()
-    }
-  }
-  for (const line of lines) {
-    const match = /^diff --git a\/(.+?) b\/(.+?)$/.exec(line)
-    if (match) {
-      flush()
-      currentPath = match[2] || match[1]
-      current = [line]
-      continue
-    }
-    if (currentPath) {
-      current.push(line)
-    }
-  }
-  flush()
-  return result
-}
-
-function statusFromGitCodes(index: string, worktree: string): string {
-  const code = `${index}${worktree}`.trim()
-  if (code === '??' || index === '?' || worktree === '?') return 'untracked'
-  if (code.includes('U')) return 'conflicted'
-  if (code.includes('R')) return 'renamed'
-  if (code.includes('D')) return 'deleted'
-  if (code.includes('A')) return 'added'
-  if (code.includes('M')) return 'modified'
-  return 'modified'
-}
-
-function normalizeGitStatusLabel(status: string): string {
-  const normalized = status.trim().toLowerCase()
-  if (normalized === 'm' || normalized.includes('modif')) return 'modified'
-  if (normalized === 'a' || normalized.includes('add') || normalized.includes('new')) return 'added'
-  if (normalized === 'd' || normalized.includes('delet') || normalized.includes('remov')) return 'deleted'
-  if (normalized === 'r' || normalized.includes('renam')) return 'renamed'
-  if (normalized === 'u' || normalized.includes('conflict')) return 'conflicted'
-  if (normalized === '?' || normalized === '??' || normalized.includes('?') || normalized.includes('untrack')) return 'untracked'
-  return status.trim() || 'modified'
-}
-
-function unquoteGitPath(path: string): string {
-  const trimmed = path.trim()
-  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
-    return trimmed.slice(1, -1).replace(/\\([\\"])/g, '$1')
-  }
-  return trimmed
-}
-
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function stringValueForGit(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value : null
-}
-
-function numberValueForGit(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.trunc(value))
-  if (typeof value === 'string' && /^\d+$/.test(value.trim())) return Number(value)
-  return null
-}
-
-function sourceBasename(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1)
-}
-
-function validSourceLine(value: number | null | undefined): number | null {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
-    return null
-  }
-  const line = Math.trunc(value)
-  return line > 0 ? line : null
-}
-
-function validSourceColumn(value: number | null | undefined): number | null {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
-    return null
-  }
-  const column = Math.trunc(value)
-  return column > 0 ? column : null
-}
-
-/** Collect unique red markers that belong to the currently open source file. */
-export function collectEditorIssues(
-  result: TestResult,
-  selectedPath: string | null,
-): EditorIssue[] {
-  return collectDiagnosticEditorIssues(
-    result.diagnostics,
-    selectedPath,
-    result.tests,
-  )
-}
-
-/** Collect compiler markers without constructing a synthetic test result. */
-export function collectDiagnosticEditorIssues(
-  diagnostics: readonly ProblemDiagnostic[],
-  selectedPath: string | null,
-  tests: readonly TestCaseResult[] = [],
-): EditorIssue[] {
-  if (!selectedPath) {
-    return []
-  }
-  const issues: EditorIssue[] = []
-  const seen = new Set<string>()
-  const add = (file: string | null | undefined, lineValue: number | null | undefined, columnValue: number | null | undefined, message: string | null | undefined): void => {
-    const line = validSourceLine(lineValue)
-    if (!file || line === null || !sourcePathsMatch(selectedPath, file)) {
-      return
-    }
-    const column = validSourceColumn(columnValue)
-    const key = `${line}:${column ?? ''}`
-    if (seen.has(key)) {
-      return
-    }
-    seen.add(key)
-    issues.push({
-      file,
-      line,
-      column,
-      message: message?.trim() || null,
-    })
-  }
-
-  for (const test of tests) {
-    if (test.status !== 'failed' && test.status !== 'error') {
-      continue
-    }
-    add(test.file, test.line, test.column, test.message ?? test.details ?? `${test.name} failed`)
-  }
-  for (const diagnostic of diagnostics) {
-    if (diagnostic.severity.trim().toLowerCase() !== 'error') {
-      continue
-    }
-    add(diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message)
-  }
-  return issues
-}
-
-function firstUsefulOutputLine(output: string): string | null {
-  const lines = output
-    .replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-  if (lines.length === 0) {
-    return null
-  }
-  const useful = lines.find((line) => !/^> task .* (executed|failed)$/i.test(line))
-  return useful ?? lines[0]
-}
-
-function shortenResultMessage(message: string, limit = 220): string {
-  const compact = message.replace(/\s+/g, ' ').trim()
-  return compact.length > limit ? `${compact.slice(0, limit - 1)}…` : compact
-}
-
-export function summarizeLiveTests(
-  tests: TestCaseResult[],
-  durationMs: number | null = null,
-): TestResult['summary'] {
-  return tests.reduce((summary, test) => {
-    summary.total += 1
-    if (test.status === 'passed') summary.passed += 1
-    if (test.status === 'failed' || test.status === 'error') summary.failed += 1
-    if (test.status === 'error') summary.errors += 1
-    if (test.status === 'skipped') summary.skipped += 1
-    return summary
-  }, {
-    total: 0,
-    passed: 0,
-    failed: 0,
-    skipped: 0,
-    errors: 0,
-    durationMs,
-  })
-}
-
-export function liveSnapshotResult(run: TestRunSnapshot, now = Date.now()): TestResult {
-  return {
-    success: false,
-    phase: run.phase,
-    summary: summarizeLiveTests(run.tests, Math.max(0, now - run.startedAt)),
-    tests: run.tests,
-    diagnostics: [],
-    stdout: run.stdout,
-    stderr: run.stderr,
-    exitCode: null,
-  }
-}
-
-export function runnerFailureResult(
-  run: TestRunSnapshot,
-  message: string,
-): TestResult {
-  const detail = message.trim() || 'The test runner stopped unexpectedly.'
-  const tests = run.tests.map((test) => test.status === 'running'
-    ? { ...test, status: 'error', message: test.message ?? detail }
-    : test)
-  return {
-    success: false,
-    phase: 'runner',
-    summary: summarizeLiveTests(tests, Math.max(0, Date.now() - run.startedAt)),
-    tests,
-    diagnostics: [{ severity: 'error', message: detail }],
-    stdout: run.stdout,
-    stderr: run.stderr || detail,
-    exitCode: null,
-  }
-}
-
-function sameTest(left: TestCaseResult | null, right: TestCaseResult): boolean {
-  if (!left) {
-    return false
-  }
-  return left.name === right.name && (left.className ?? '') === (right.className ?? '')
-}
-
-/**
- * Test names are stable across the progress events and the final JUnit
- * report, so use the class/name pair as the selection identity. Keeping this
- * outside the DOM also means a live result refresh does not lose the user's
- * selected test while its output is still arriving.
- */
-function testResultKey(test: TestCaseResult): string {
-  // Encode both fields so the identity is safe to carry in a data attribute;
-  // class/name values can otherwise contain separators or control characters.
-  return `${encodeURIComponent(test.className ?? '')}:${encodeURIComponent(test.name)}`
-}
-
-/**
- * Return the first actionable test in the runner's source/order-preserved
- * result list. The result tree may sort rows for readability, but automatic
- * selection should follow the order in which the runner reported tests.
- */
-export function firstFailedTestKey(tests: TestCaseResult[]): string | null {
-  const failed = tests.find((test) => test.status === 'failed' || test.status === 'error')
-  return failed ? testResultKey(failed) : null
-}
-
-/**
- * Choose a failed test for automatic live-result selection while preserving
- * an existing selection. A root or row selected by the user is represented by
- * `selectionExplicit`; an automatically selected row is retained so later
- * failures cannot make the detail pane jump to a different test.
- */
-export function autoSelectedTestKey(
-  tests: TestCaseResult[],
-  selectedTestKey: string | null,
-  selectionExplicit: boolean,
-): string | null {
-  if (selectionExplicit || selectedTestKey !== null) {
-    return selectedTestKey
-  }
-  return firstFailedTestKey(tests)
-}
-
-/**
- * Coalesces editor changes into one debounced write and follows an in-flight
- * write with the newest snapshot when the document changes while saving.
- */
-export class AutosaveCoordinator {
-  private readonly save: (snapshot: AutosaveSnapshot) => Promise<void>
-  private readonly delayMs: number
-  private readonly onStatusChange?: (status: AutosaveStatus) => void
-  private readonly onError?: (error: unknown) => void
-  private timer: ReturnType<typeof setTimeout> | null = null
-  private pending: AutosaveSnapshot | null = null
-  private running: Promise<void> | null = null
-  private currentStatus: AutosaveStatus = 'idle'
-  private disposed = false
-
-  constructor(
-    save: (snapshot: AutosaveSnapshot) => Promise<void>,
-    options: AutosaveCoordinatorOptions = {},
-  ) {
-    this.save = save
-    this.delayMs = options.delayMs ?? 500
-    this.onStatusChange = options.onStatusChange
-    this.onError = options.onError
-  }
-
-  get status(): AutosaveStatus {
-    return this.currentStatus
-  }
-
-  get hasPendingChanges(): boolean {
-    return this.pending !== null || this.running !== null
-  }
-
-  /**
-   * Drop work that has not started yet. Callers should flush first when the
-   * pending source must be written before an external filesystem operation.
-   */
-  cancelPending(): void {
-    this.clearTimer()
-    this.pending = null
-    if (!this.running) {
-      this.setStatus('idle')
-    }
-  }
-
-  schedule(snapshot: AutosaveSnapshot): void {
-    if (this.disposed) {
-      return
-    }
-    this.pending = snapshot
-    this.clearTimer()
-    this.setStatus('saving')
-    this.timer = setTimeout(() => {
-      this.timer = null
-      void this.flush().catch((error) => this.onError?.(error))
-    }, this.delayMs)
-  }
-
-  async flush(): Promise<void> {
-    this.clearTimer()
-    if (!this.pending && !this.running) {
-      return
-    }
-    await (this.running ?? this.startRun())
-  }
-
-  dispose(): void {
-    this.disposed = true
-    this.clearTimer()
-  }
-
-  private startRun(): Promise<void> {
-    const run = this.persistPending()
-    this.running = run
-    void run.then(
-      () => {
-        if (this.running === run) {
-          this.running = null
-        }
-      },
-      () => {
-        if (this.running === run) {
-          this.running = null
-        }
-      },
-    )
-    return run
-  }
-
-  private async persistPending(): Promise<void> {
-    while (this.pending) {
-      const snapshot = this.pending
-      this.pending = null
-      this.setStatus('saving')
-      try {
-        await this.save(snapshot)
-      } catch (error) {
-        // Keep the failed snapshot available for an explicit retry. If a
-        // newer edit already arrived, that newer snapshot is sufficient.
-        this.pending ??= snapshot
-        this.setStatus('error')
-        throw error
-      }
-    }
-    this.setStatus('idle')
-  }
-
-  private clearTimer(): void {
-    if (this.timer !== null) {
-      clearTimeout(this.timer)
-      this.timer = null
-    }
-  }
-
-  private setStatus(status: AutosaveStatus): void {
-    this.currentStatus = status
-    this.onStatusChange?.(status)
-  }
-}
-
-export function filterProblemFiles(files: ProblemFileEntry[], query: string): ProblemFileEntry[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase()
-  if (!normalizedQuery) {
-    return files
-  }
-  return files.filter((file) => file.name.toLocaleLowerCase().includes(normalizedQuery))
-}
-
-export function filterProblemFilesByGroup(
-  files: ProblemFileEntry[],
-  group: ProblemFileEntry['packageSegment'],
-  query: string,
-): ProblemFileEntry[] {
-  return filterProblemFiles(files, query).filter((file) => file.packageSegment === group)
-}
-
-export interface RepositoryRefreshRequest {
-  repoPath: string
-  repositoryGeneration: number
-  requestId: number
-}
-
-export interface RepositoryRefreshState {
-  repoPath: string | null
-  projectValid: boolean
-  repositoryGeneration: number
-  refreshRequestId: number
-}
-
-export function isCurrentRepositoryRefresh(
-  request: RepositoryRefreshRequest,
-  state: RepositoryRefreshState,
-): boolean {
-  return state.projectValid
-    && state.repoPath === request.repoPath
-    && state.repositoryGeneration === request.repositoryGeneration
-    && state.refreshRequestId === request.requestId
-}
-
-/** Returns the calendar day used by the daily-problem service (UTC). */
-export function utcDateKey(value: Date | number = new Date()): string {
-  const date = typeof value === 'number' ? new Date(value) : value
-  if (!Number.isFinite(date.getTime())) {
-    return ''
-  }
-  return date.toISOString().slice(0, 10)
-}
-
-/**
- * Delay until just after the next UTC midnight. The small one-second cushion
- * avoids racing the provider while its daily cache rolls over.
- */
-export function nextUtcMidnightDelayMs(value: Date | number = new Date(), paddingMs = 1000): number {
-  const date = typeof value === 'number' ? new Date(value) : value
-  if (!Number.isFinite(date.getTime())) {
-    return 24 * 60 * 60 * 1000 + Math.max(0, paddingMs)
-  }
-  const nextMidnight = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1)
-  return Math.max(1, nextMidnight - date.getTime() + Math.max(0, paddingMs))
-}
-
-/** Accept only a real calendar date in the provider's UTC YYYY-MM-DD format. */
-export function normalizeDailyProblemDateKey(value: unknown): string | null {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return null
-  }
-  const [yearText, monthText, dayText] = value.split('-')
-  const year = Number(yearText)
-  const month = Number(monthText)
-  const day = Number(dayText)
-  const date = new Date(Date.UTC(2000, 0, 1))
-  date.setUTCFullYear(year, month - 1, day)
-  date.setUTCHours(0, 0, 0, 0)
-  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
-    return null
-  }
-  return value
-}
-
-/** Accept a positive LeetCode frontend id from the problem lookup field. */
-export function normalizeProblemNumber(value: string): string | null {
-  const normalized = value.trim()
-  if (!/^\d+$/.test(normalized)) {
-    return null
-  }
-  const withoutLeadingZeroes = normalized.replace(/^0+/, '')
-  return withoutLeadingZeroes.length > 0 ? withoutLeadingZeroes : null
-}
-
-type ProblemSelection = 'daily' | 'manual'
-
-interface AppState {
-  repoPath: string | null
-  projectValid: boolean
-  files: ProblemFileEntry[]
-  openTabs: OpenFileTab[]
-  activeTabId: number | null
-  selectedPath: string | null
-  selectedSource: string
-  savedSource: string
-  selectedFqcn: string | null
-  dirty: boolean
-  dailyProblem: DailyProblem | null
-  problemSelection: ProblemSelection
-  dailyProblemDateKey: string | null
-  dailyRetryPending: boolean
-  dailyError: string | null
-  dailyLoading: boolean
-  testResult: TestResult | null
-  testRun: TestRunSnapshot | null
-  liveDiagnosticsError: string | null
-  /** Stable key of the testcase whose details are shown in the run panel. */
-  selectedTestKey: string | null
-  busy: boolean
-  fileSearch: string
-  saveError: string | null
-  bottomPanelTab: 'tests' | 'git'
-  git: GitState
-  contextMenu: FileContextMenuState | null
-  gitContextMenu: GitContextMenuState | null
 }
 
 /** The desktop application's single-window state and DOM orchestration. */
@@ -1578,7 +260,6 @@ export class LeetcoderApp {
   private nextOpenTabId = 1
   private closePreparation: Promise<void> | null = null
   private destroyed = false
-  private renderedTestResult: TestResult | null = null
   private testResultSource: TestRunSourceSnapshot | null = null
   private liveRenderFrame: number | null = null
   private liveRenderToken = 0
@@ -2181,292 +862,18 @@ export class LeetcoderApp {
   }
 
   private renderShell(): void {
-    this.root.innerHTML = `
-      <div class="app-shell">
-        <header class="app-header">
-          <div class="app-header-leading">
-            <button id="app-menu-button" class="icon-button app-menu-button" type="button" aria-label="Open application menu" aria-haspopup="menu" aria-expanded="false" title="Application menu"></button>
-            <span class="wordmark">leetcoder</span>
-          </div>
-          <div class="app-header-actions">
-            <button id="update-button" class="icon-button update-button" type="button" aria-label="Update leetcoder" title="Update available — build and restart" hidden></button>
-            <button id="choose-repository" class="repo-chip" type="button">
-              <span id="repo-path" class="repo-chip-label">Choose repository</span>
-            </button>
-          </div>
-        </header>
-
-        <main class="workspace">
-          <aside class="sidebar" aria-label="Problem files">
-            <div class="sidebar-heading">
-              <span class="micro-label">Problems</span>
-              <span id="file-count" class="sidebar-count"></span>
-              <button id="refresh-files" class="icon-button" type="button" aria-label="Refresh problem files" title="Refresh"></button>
-            </div>
-            <div class="file-search">
-              <label class="sr-only" for="file-search">Search problems</label>
-              <div class="file-search-field">
-                <span id="file-search-icon" aria-hidden="true"></span>
-                <input id="file-search" type="search" placeholder="Search" autocomplete="off" spellcheck="false">
-              </div>
-            </div>
-            <div id="file-list" class="file-list"></div>
-          </aside>
-
-          <div
-            id="sidebar-splitter"
-            class="sidebar-splitter"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize problem files pane"
-            aria-valuemin="${MIN_SIDEBAR_WIDTH}"
-            aria-valuemax="${MAX_SIDEBAR_WIDTH}"
-            tabindex="0"
-          ><span aria-hidden="true"></span></div>
-
-          <section class="editor-column" aria-label="Code editor">
-            <section class="daily-card" aria-label="Today's problem">
-              <div id="daily-header" class="daily-header"></div>
-              <div id="daily-description" class="daily-description" hidden></div>
-              <div
-                id="daily-description-resize-handle"
-                class="daily-description-resize-handle"
-                role="separator"
-                aria-orientation="horizontal"
-                aria-label="Resize problem description"
-                aria-valuemin="${MIN_DAILY_DESCRIPTION_HEIGHT}"
-                aria-valuemax="${MAX_DAILY_DESCRIPTION_HEIGHT}"
-                tabindex="0"
-                hidden
-              ><span aria-hidden="true"></span></div>
-            </section>
-
-            <section class="code-card">
-              <div class="file-tabs-shell">
-                <nav id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files"></nav>
-              </div>
-              <div class="code-toolbar">
-                <div class="file-heading">
-                  <span id="selected-file" class="selected-file"></span>
-                  <span id="save-status" class="save-status" aria-live="polite"></span>
-                </div>
-              </div>
-              <div class="editor-host" id="editor-host" aria-label="Java source editor">
-                <div id="editor" class="editor"></div>
-                <div id="editor-empty" class="editor-empty"></div>
-              </div>
-            </section>
-          </section>
-        </main>
-
-        <section id="bottom-panel" class="bottom-panel" aria-label="Run results and Git">
-          <div
-            id="bottom-panel-resize-handle"
-            class="bottom-panel-resize-handle"
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label="Resize bottom panel"
-            aria-valuemin="${MIN_BOTTOM_PANEL_HEIGHT}"
-            aria-valuemax="${MAX_BOTTOM_PANEL_HEIGHT}"
-            tabindex="0"
-          ><span aria-hidden="true"></span></div>
-          <div class="bottom-panel-tabs">
-            <div class="bottom-panel-tab-list" role="tablist" aria-label="Bottom panel">
-              <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests</button>
-              <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git</button>
-            </div>
-            <div class="bottom-panel-actions" role="group" aria-label="Test actions">
-              <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">${shortcutLabel('run-test-at-cursor', currentIsMacPlatform())}</kbd></span>
-              <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">${shortcutLabel('run-test', currentIsMacPlatform())}</kbd></button>
-            </div>
-          </div>
-          <section id="tests-panel" class="tests-panel" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">
-            <div id="test-status-row" class="test-status-row"></div>
-            <div id="test-body" class="test-body"></div>
-          </section>
-          <section id="git-panel" class="git-panel" role="tabpanel" aria-labelledby="git-tab" hidden>
-            <div class="git-toolbar">
-              <div class="git-heading">
-                <span id="git-branch-icon" class="git-branch-icon" aria-hidden="true"></span>
-                <span class="git-heading-label">Changes</span>
-                <span id="git-file-count" class="git-count"></span>
-                <span id="git-branch" class="git-branch-name"></span>
-              </div>
-              <div class="git-actions">
-                <button id="git-select-all" class="text-button" type="button">Select all</button>
-                <button id="git-select-none" class="text-button" type="button">Clear</button>
-              </div>
-            </div>
-            <div id="git-status" class="git-status" role="status" aria-live="polite" hidden></div>
-            <div class="git-workspace">
-              <div id="git-file-list" class="git-file-list" aria-label="Changed files"></div>
-              <div
-                id="git-splitter"
-                class="git-splitter"
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize changed files pane"
-                aria-valuemin="${MIN_GIT_FILE_LIST_WIDTH}"
-                aria-valuemax="${DEFAULT_GIT_FILE_LIST_WIDTH + MIN_GIT_DIFF_WIDTH}"
-                tabindex="0"
-              ><span aria-hidden="true"></span></div>
-              <div class="git-diff-pane">
-                <div class="git-diff-heading">
-                  <span id="git-diff-file" class="git-diff-file">Select a file</span>
-                  <span id="git-diff-state" class="git-diff-state"></span>
-                </div>
-                <div id="git-diff" class="git-diff" aria-label="Unified diff"></div>
-              </div>
-            </div>
-            <div class="git-commit-bar">
-              <label class="sr-only" for="git-commit-message">Commit message</label>
-              <input id="git-commit-message" type="text" autocomplete="off" spellcheck="false">
-              <button id="git-commit" class="secondary-button" type="button">Commit</button>
-              <button id="git-commit-push" class="primary-button" type="button">Commit &amp; Push</button>
-            </div>
-          </section>
-        </section>
-        <div id="toast-stack" class="toast-stack" role="status" aria-live="polite"></div>
-        <div id="app-menu" class="app-menu" role="menu" aria-label="Application menu" hidden>
-          <button id="update-menu-action" class="app-menu-item app-menu-item-update" type="button" role="menuitem" hidden>
-            <span id="update-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
-            <span class="app-menu-item-label">Update leetcoder</span>
-            <span class="app-menu-item-detail">Build and restart</span>
-          </button>
-          <button id="settings-menu-action" class="app-menu-item" type="button" role="menuitem">
-            <span id="settings-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
-            <span class="app-menu-item-label">Settings</span>
-            <span id="settings-menu-shortcut" class="app-menu-item-detail" aria-hidden="true"></span>
-          </button>
-          <button id="about-menu-action" class="app-menu-item" type="button" role="menuitem">
-            <span id="about-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
-            <span class="app-menu-item-label">About leetcoder</span>
-          </button>
-          <div class="app-menu-divider" role="separator"></div>
-          <button id="exit-menu-action" class="app-menu-item app-menu-item-danger" type="button" role="menuitem">
-            <span id="exit-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
-            <span class="app-menu-item-label">Exit</span>
-          </button>
-        </div>
-        <div id="file-context-menu" class="file-context-menu" role="menu" aria-label="File actions" hidden>
-          <button id="duplicate-file-action" class="file-context-menu-item file-context-menu-item-neutral" type="button" role="menuitem">
-            <span id="duplicate-file-label">Duplicate</span>
-          </button>
-          <button id="rename-file-action" class="file-context-menu-item file-context-menu-item-neutral" type="button" role="menuitem">
-            <span id="rename-file-label">Rename</span>
-          </button>
-          <button id="delete-file-action" class="file-context-menu-item" type="button" role="menuitem">
-            <span id="delete-file-label">Delete</span>
-          </button>
-        </div>
-        <div id="git-context-menu" class="file-context-menu git-context-menu" role="menu" aria-label="Git file actions" hidden>
-          <button id="git-discard-action" class="file-context-menu-item" type="button" role="menuitem">
-            Discard Changes
-          </button>
-          <button id="git-show-file-action" class="file-context-menu-item file-context-menu-item-neutral" type="button" role="menuitem">
-            Show in File Manager
-          </button>
-        </div>
-        <div id="rename-file-dialog" class="dialog-backdrop" hidden>
-          <form id="rename-file-form" class="rename-file-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-file-title">
-            <h2 id="rename-file-title" class="rename-file-title">Rename file</h2>
-            <label class="rename-file-label" for="rename-file-input">New filename</label>
-            <input id="rename-file-input" class="rename-file-input" type="text" autocomplete="off" spellcheck="false">
-            <div class="rename-file-actions">
-              <button id="cancel-rename-file" class="text-button" type="button">Cancel</button>
-              <button id="confirm-rename-file" class="primary-button" type="submit">Rename</button>
-            </div>
-          </form>
-        </div>
-        <div id="settings-dialog" class="dialog-backdrop" hidden>
-          <form id="settings-form" class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-            <div class="settings-header">
-              <div>
-                <h2 id="settings-title" class="settings-title">Settings</h2>
-                <p class="settings-subtitle">Configure your editor workspace.</p>
-              </div>
-            </div>
-            <div class="settings-layout">
-              <nav class="settings-nav" aria-label="Settings sections" role="tablist" aria-orientation="vertical">
-                <button id="settings-appearance-nav" class="settings-nav-item" type="button" role="tab" aria-controls="settings-appearance-panel">Appearance</button>
-                <button id="settings-keymap-nav" class="settings-nav-item" type="button" role="tab" aria-controls="settings-keymap-panel">Keymap</button>
-              </nav>
-              <div class="settings-content">
-                <section id="settings-appearance-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-appearance-nav">
-                  <fieldset class="settings-theme-fieldset">
-                    <legend class="settings-section-title">Appearance</legend>
-                    <p class="settings-description">Choose how leetcoder follows your display theme.</p>
-                    <div class="settings-theme-options">
-                      <label class="settings-theme-option">
-                        <input type="radio" name="theme-mode" value="system">
-                        <span class="settings-theme-option-copy"><strong>System</strong><small>Follow your device</small></span>
-                      </label>
-                      <label class="settings-theme-option">
-                        <input type="radio" name="theme-mode" value="dark">
-                        <span class="settings-theme-option-copy"><strong>Dark</strong><small>Easy on the eyes</small></span>
-                      </label>
-                      <label class="settings-theme-option">
-                        <input type="radio" name="theme-mode" value="light">
-                        <span class="settings-theme-option-copy"><strong>Light</strong><small>Bright and clear</small></span>
-                      </label>
-                    </div>
-                  </fieldset>
-                </section>
-                <section id="settings-keymap-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-keymap-nav" hidden>
-                  <div class="settings-panel-heading">
-                    <h3 class="settings-panel-title">Keyboard shortcuts</h3>
-                    <p class="settings-description">Reference for the shortcuts available in leetcoder.</p>
-                  </div>
-                  <div class="shortcuts-platform-tabs" role="tablist" aria-label="Operating system">
-                    <button id="shortcuts-linux-tab" class="shortcuts-platform-tab" type="button" role="tab" aria-controls="shortcuts-body">Linux</button>
-                    <button id="shortcuts-macos-tab" class="shortcuts-platform-tab" type="button" role="tab" aria-controls="shortcuts-body">macOS</button>
-                  </div>
-                  <div id="shortcuts-body" class="shortcuts-body" role="tabpanel"></div>
-                  <p class="shortcuts-note">App commands use Alt on Linux and Cmd on macOS. Standard editor shortcuts such as Ctrl+C, Ctrl+V, and Ctrl+Z remain available on Linux.</p>
-                </section>
-              </div>
-            </div>
-            <div class="settings-actions">
-              <button id="close-settings" class="text-button" type="button">Close</button>
-            </div>
-          </form>
-        </div>
-        <div id="about-dialog" class="dialog-backdrop" hidden>
-          <div class="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title">
-            <h2 id="about-title" class="about-title">About leetcoder</h2>
-            <p class="about-name">leetcoder <span class="about-version">${APP_VERSION}</span></p>
-            <p class="about-description">A focused LeetCode Java practice editor.</p>
-            <p class="about-note">Built for the daily problem-solving workflow.</p>
-            <div class="about-actions">
-              <button id="close-about" class="text-button" type="button">Close</button>
-            </div>
-          </div>
-        </div>
-        <div id="discard-git-dialog" class="dialog-backdrop" hidden>
-          <form id="discard-git-form" class="discard-git-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-git-title" aria-describedby="discard-git-message">
-            <h2 id="discard-git-title" class="discard-git-title">Discard changes?</h2>
-            <code id="discard-git-path" class="discard-git-path"></code>
-            <p id="discard-git-message" class="discard-git-message"></p>
-            <div class="discard-git-actions">
-              <button id="cancel-discard-git" class="text-button" type="button">Cancel</button>
-              <button id="confirm-discard-git" class="primary-button discard-git-confirm" type="submit">Discard Changes</button>
-            </div>
-          </form>
-        </div>
-        <div id="delete-file-dialog" class="dialog-backdrop" hidden>
-          <form id="delete-file-form" class="discard-git-dialog delete-file-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-file-title" aria-describedby="delete-file-message">
-            <h2 id="delete-file-title" class="discard-git-title">Delete file?</h2>
-            <code id="delete-file-name" class="discard-git-path"></code>
-            <p id="delete-file-message" class="discard-git-message">This permanently deletes this file. This cannot be undone.</p>
-            <div class="discard-git-actions">
-              <button id="cancel-delete-file" class="text-button" type="button">Cancel</button>
-              <button id="confirm-delete-file" class="primary-button discard-git-confirm" type="submit">Delete</button>
-            </div>
-          </form>
-        </div>
-      </div>
-      <div id="modal-root"></div>
-    `
+    renderShellView(this.root, {
+      appVersion: APP_VERSION,
+      macPlatform: currentIsMacPlatform(),
+      minSidebarWidth: MIN_SIDEBAR_WIDTH,
+      maxSidebarWidth: MAX_SIDEBAR_WIDTH,
+      minDailyDescriptionHeight: MIN_DAILY_DESCRIPTION_HEIGHT,
+      maxDailyDescriptionHeight: MAX_DAILY_DESCRIPTION_HEIGHT,
+      minBottomPanelHeight: MIN_BOTTOM_PANEL_HEIGHT,
+      maxBottomPanelHeight: MAX_BOTTOM_PANEL_HEIGHT,
+      minGitFileListWidth: MIN_GIT_FILE_LIST_WIDTH,
+      maxGitFileListWidth: DEFAULT_GIT_FILE_LIST_WIDTH + MIN_GIT_DIFF_WIDTH,
+    })
     this.installStaticIcons()
     this.renderEditorEmptyState()
   }
@@ -3566,7 +1973,6 @@ export class LeetcoderApp {
     this.testResultSource = null
     this.state.selectedTestKey = null
     this.testSelectionExplicit = false
-    this.renderedTestResult = null
     this.editor.setIssues([])
     this.setMessage('Run cancelled — file changed', 'info')
   }
@@ -6130,322 +4536,28 @@ export class LeetcoderApp {
     this.element<HTMLElement>('#editor-host').dataset.savedSource = this.state.savedSource
   }
 
-  private appendLiveDiagnosticsStatus(statusRow: HTMLElement): void {
-    const error = this.state.liveDiagnosticsError
-    if (!error) {
-      return
-    }
-    const status = document.createElement('span')
-    status.className = 'test-facts live-diagnostics-status'
-    status.textContent = 'Live checks unavailable'
-    status.title = error
-    status.setAttribute('aria-label', `Live checks unavailable: ${error}`)
-    statusRow.append(status)
-  }
-
   private renderResult(): void {
-    const panel = this.element<HTMLElement>('#tests-panel')
-    const statusRow = this.element<HTMLElement>('#test-status-row')
-    const body = this.element<HTMLElement>('#test-body')
     const liveRun = this.state.testRun?.status === 'running' ? this.state.testRun : null
-    const result = this.state.testResult ?? (liveRun ? liveSnapshotResult(liveRun) : null)
-    statusRow.className = 'test-status-row'
-    statusRow.removeAttribute('title')
-    statusRow.innerHTML = ''
-    body.innerHTML = ''
-    panel.setAttribute('aria-busy', liveRun ? 'true' : 'false')
-
-    if (!result) {
-      statusRow.classList.add('is-idle')
-      const idle = document.createElement('span')
-      idle.className = 'test-idle-copy'
-      const kbd = document.createElement('kbd')
-      const selectedKbd = document.createElement('kbd')
-      const mac = currentIsMacPlatform()
-      kbd.textContent = shortcutLabel('run-test', mac)
-      selectedKbd.textContent = shortcutLabel('run-test-at-cursor', mac)
-      idle.append(
-        document.createTextNode('Run '),
-        kbd,
-        document.createTextNode(' to test the current file · '),
-        selectedKbd,
-        document.createTextNode(' for the selected test'),
-      )
-      statusRow.append(idle)
-      this.appendLiveDiagnosticsStatus(statusRow)
-      this.renderedTestResult = null
-      return
-    }
-
-    const presentation = presentTestResult(result)
-    const isRunning = liveRun !== null
-    const phase = normalizeTestPhase(result.phase)
-    const isRunnerError = this.state.testRun?.status === 'error' || phase === 'runner'
-    const hasFailure = !result.success || isRunnerError
-    const diagnostics = filterTestDiagnostics(result.diagnostics)
-    const errorDiagnostics = diagnostics.filter((entry) => entry.severity.trim().toLowerCase() === 'error')
-    const warningDiagnostics = diagnostics.filter((entry) => entry.severity.trim().toLowerCase() === 'warning')
-    this.renderedTestResult = result
-
-    if (isRunning) {
-      statusRow.classList.add('is-running')
-      statusRow.append(iconFor('loader', 'test-status-svg is-spinning'))
-      const label = document.createElement('span')
-      label.className = 'test-verdict'
-      label.textContent = liveRunPhaseLabel(result.phase)
-      statusRow.append(label)
-      const factParts = testRunFacts(result.summary)
-      if (factParts.length > 0) {
-        const facts = document.createElement('span')
-        facts.className = 'test-facts'
-        facts.textContent = factParts.join(' · ')
-        statusRow.append(facts)
-      }
-    } else {
-      const verdict = document.createElement('span')
-      verdict.className = 'test-verdict'
-      const factParts: string[] = []
-      if (!hasFailure) {
-        statusRow.classList.add('is-success')
-        statusRow.append(iconFor('check', 'test-status-svg'))
-        verdict.textContent = 'Passed'
-        if (result.summary.total > 0) {
-          factParts.push(`${result.summary.total} test${result.summary.total === 1 ? '' : 's'}`)
-        }
-      } else if (phase === 'compile') {
-        statusRow.classList.add('is-failure')
-        statusRow.append(iconFor('close', 'test-status-svg'))
-        verdict.textContent = 'Compile error'
-        if (errorDiagnostics.length > 0) {
-          factParts.push(`${errorDiagnostics.length} error${errorDiagnostics.length === 1 ? '' : 's'}`)
-        }
-      } else if (phase === 'noTests') {
-        statusRow.classList.add('is-warning')
-        statusRow.append(iconFor('alert', 'test-status-svg'))
-        verdict.textContent = 'No tests ran'
-      } else if (isRunnerError) {
-        statusRow.classList.add('is-error')
-        statusRow.append(iconFor('alert', 'test-status-svg'))
-        verdict.textContent = 'Runner error'
-      } else {
-        statusRow.classList.add('is-failure')
-        statusRow.append(iconFor('close', 'test-status-svg'))
-        verdict.textContent = 'Failed'
-        const failedCount = result.summary.failed + result.summary.errors
-        if (failedCount > 0 && result.summary.total > 0) {
-          factParts.push(`${failedCount} of ${result.summary.total} failed`)
-        }
-      }
-      statusRow.append(verdict)
-      if (result.summary.durationMs !== null && result.summary.durationMs !== undefined && phase !== 'compile') {
-        factParts.push(formatDuration(result.summary.durationMs))
-      }
-      if (factParts.length > 0) {
-        const facts = document.createElement('span')
-        facts.className = 'test-facts'
-        facts.textContent = factParts.join(' · ')
-        statusRow.append(facts)
-      }
-      if (hasFailure && presentation.failureMessage) {
-        statusRow.title = presentation.failureMessage
-      }
-    }
-    const targetedMethod = this.state.testRun?.testMethod
-    if (targetedMethod) {
-      const target = document.createElement('span')
-      target.className = 'test-run-target'
-      target.textContent = `Only ${targetedMethod}()`
-      statusRow.append(target)
-    }
-    this.appendLiveDiagnosticsStatus(statusRow)
-
-    // Diagnostic cards: errors inline (compile and runner failures alike —
-    // the runner message carries JDK guidance), warnings behind a disclosure.
-    if (!isRunning) {
-      for (const diagnostic of errorDiagnostics) {
-        body.append(this.renderDiagnostic(diagnostic))
-      }
-      if (warningDiagnostics.length > 0) {
-        const details = document.createElement('details')
-        details.className = 'diagnostics-warnings'
-        const heading = document.createElement('summary')
-        heading.textContent = `${warningDiagnostics.length} warning${warningDiagnostics.length === 1 ? '' : 's'}`
-        details.append(heading)
-        for (const diagnostic of warningDiagnostics) {
-          details.append(this.renderDiagnostic(diagnostic))
-        }
-        body.append(details)
-      }
-    }
-
-    // A phase without per-test rows explains itself in a full-width note.
-    const hasFailedTestRows = result.tests.some((test) => test.status === 'failed' || test.status === 'error')
-    if (!isRunning && hasFailure) {
-      if (phase === 'noTests') {
-        const note = document.createElement('div')
-        note.className = 'run-note run-note-no-tests'
-        const hint = document.createElement('p')
-        hint.className = 'run-note-message'
-        hint.textContent = 'No tests were found in this class. Add an @Test method with an assertion.'
-        note.append(hint)
-        body.append(note)
-      } else if (
-        phase !== 'compile'
-        && errorDiagnostics.length === 0
-        && (phase !== 'test' || !hasFailedTestRows)
-        && presentation.failureMessage
-      ) {
-        const note = document.createElement('div')
-        note.className = 'run-note run-note-runner'
-        const message = document.createElement('p')
-        message.className = 'run-note-message'
-        message.textContent = presentation.failureMessage
-        note.append(message)
-        body.append(note)
-      }
-    }
-
-    const visibleTests = defaultVisibleTests(result.tests, isRunning)
-    const selectedTest = visibleTests.find((test) => testResultKey(test) === this.state.selectedTestKey) ?? null
-    // A refreshed JUnit report can legitimately omit a test that was visible
-    // during live progress. Fall back to the run item rather than leaving an
-    // option marked selected with an empty detail pane.
-    if (this.state.selectedTestKey !== null && selectedTest === null) {
-      this.state.selectedTestKey = null
+    const output = renderTestResults(
+      this.root,
+      {
+        result: this.state.testResult,
+        liveRun,
+        testMethod: this.state.testRun?.testMethod ?? null,
+        selectedTestKey: this.state.selectedTestKey,
+        selectedPath: this.state.selectedPath,
+        liveDiagnosticsError: this.state.liveDiagnosticsError,
+        macPlatform: currentIsMacPlatform(),
+      },
+      {
+        onSelectTest: (key, focus) => this.selectTestResult(key, focus),
+        onRevealLocation: (line, column) => this.editor.revealLine(line, column),
+      },
+    )
+    if (output.selectedTestKey !== this.state.selectedTestKey) {
+      this.state.selectedTestKey = output.selectedTestKey
       this.testSelectionExplicit = false
     }
-
-    const workspace = document.createElement('div')
-    workspace.className = 'test-results-workspace'
-
-    const list = document.createElement('div')
-    list.className = 'test-list test-results-tree'
-    list.setAttribute('role', 'listbox')
-    list.setAttribute('aria-label', 'Tests')
-    list.setAttribute('aria-controls', 'test-detail-pane')
-    list.append(this.renderTestTreeItem(null, result, isRunning))
-    for (const test of visibleTests) {
-      list.append(this.renderTestTreeItem(test, result, isRunning))
-    }
-    if (isRunning && result.tests.length === 0) {
-      const empty = document.createElement('div')
-      empty.className = 'test-empty test-empty-running'
-      empty.textContent = liveRunPhaseLabel(result.phase)
-      list.append(empty)
-    } else if (!isRunning && result.tests.length === 0 && phase !== 'compile' && phase !== 'noTests' && !isRunnerError) {
-      const empty = document.createElement('div')
-      empty.className = 'test-empty'
-      empty.textContent = 'No tests were reported.'
-      list.append(empty)
-    }
-
-    const detailPane = document.createElement('section')
-    detailPane.id = 'test-detail-pane'
-    detailPane.className = 'test-detail-pane'
-    detailPane.setAttribute('role', 'region')
-    detailPane.setAttribute('aria-live', 'polite')
-    if (selectedTest) {
-      detailPane.setAttribute('aria-label', `Details for ${selectedTest.displayName || selectedTest.name}`)
-      detailPane.append(this.renderTestCase(selectedTest))
-    } else {
-      detailPane.setAttribute('aria-label', 'Test run output')
-      const heading = document.createElement('div')
-      heading.className = 'test-detail-heading'
-      const rootStatus = isRunning ? 'running' : result.success ? 'passed' : phase === 'noTests' ? 'skipped' : 'failed'
-      heading.append(this.statusIcon(rootStatus))
-      const title = document.createElement('h3')
-      title.className = 'test-detail-title'
-      title.textContent = isRunning ? 'Test run' : 'Test run output'
-      heading.append(title)
-      detailPane.append(heading)
-      const summary = document.createElement('p')
-      summary.className = 'test-detail-class'
-      summary.textContent = testRunFacts(result.summary).join(' · ') || liveRunPhaseLabel(result.phase)
-      detailPane.append(summary)
-      const output = this.renderOutputConsole(result.stdout, result.stderr)
-      if (output) {
-        detailPane.append(output)
-      }
-    }
-    workspace.append(list, detailPane)
-    body.append(workspace)
-  }
-
-  /** Render one selectable row in the left-hand IntelliJ-style test tree. */
-  private renderTestTreeItem(
-    test: TestCaseResult | null,
-    result: TestResult,
-    isRunning: boolean,
-  ): HTMLButtonElement {
-    const item = document.createElement('button')
-    item.type = 'button'
-    item.className = test
-      ? `test-tree-item test-row-${test.status}`
-      : 'test-tree-item test-tree-root'
-    item.setAttribute('role', 'option')
-    const key = test ? testResultKey(test) : TEST_RUN_ROOT_KEY
-    const selected = test
-      ? this.state.selectedTestKey === key
-      : this.state.selectedTestKey === null
-    item.dataset.testKey = key
-    item.setAttribute('aria-selected', String(selected))
-    // Roving tab stop keeps keyboard navigation inside the test list while
-    // allowing arrow keys to move through every result.
-    item.tabIndex = selected ? 0 : -1
-    const status = test
-      ? test.status
-      : isRunning
-        ? 'running'
-        : result.success
-          ? 'passed'
-          : normalizeTestPhase(result.phase) === 'noTests'
-            ? 'skipped'
-            : 'failed'
-    item.append(this.statusIcon(status))
-    const name = document.createElement('span')
-    name.className = 'test-name'
-    name.textContent = test ? (test.displayName || test.name) : 'Test run'
-    item.append(name)
-    const facts = document.createElement('span')
-    facts.className = 'test-tree-facts'
-    if (test) {
-      if (test.durationMs !== null && test.durationMs !== undefined) {
-        facts.textContent = formatDuration(test.durationMs)
-      }
-      item.setAttribute('aria-label', `${test.displayName || test.name}, ${testStatusLabel(test.status)}${facts.textContent ? `, ${facts.textContent}` : ''}`)
-      if (test.className) {
-        item.title = test.className
-      }
-    } else {
-      facts.textContent = testRunFacts(result.summary).join(' · ')
-      item.setAttribute('aria-label', `Test run, ${testStatusLabel(status)}${facts.textContent ? `, ${facts.textContent}` : ''}`)
-    }
-    item.append(facts)
-    item.addEventListener('click', () => {
-      this.selectTestResult(key, true)
-    })
-    item.addEventListener('keydown', (event) => {
-      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-        return
-      }
-      const options = Array.from(item.parentElement?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])
-      const currentIndex = options.indexOf(item)
-      if (currentIndex < 0 || options.length === 0) {
-        return
-      }
-      const nextIndex = event.key === 'Home'
-        ? 0
-        : event.key === 'End'
-          ? options.length - 1
-          : Math.max(0, Math.min(
-            options.length - 1,
-            currentIndex + (event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1),
-          ))
-      event.preventDefault()
-      const nextKey = options[nextIndex].dataset.testKey ?? TEST_RUN_ROOT_KEY
-      this.selectTestResult(nextKey, true)
-    })
-    return item
   }
 
   private selectTestResult(key: string, focus = false): void {
@@ -6469,163 +4581,6 @@ export class LeetcoderApp {
       this.state.selectedTestKey,
       this.testSelectionExplicit,
     )
-  }
-
-  /** Render assertion metadata, stack details, and the selected test console. */
-  private renderTestCase(test: TestCaseResult): HTMLElement {
-    const failed = test.status === 'failed' || test.status === 'error'
-    const detail = document.createElement('div')
-    detail.className = `test-detail-content test-row-${test.status}`
-    const output = this.renderOutputConsole(test.stdout, test.stderr)
-    if (output) {
-      detail.append(output)
-    }
-    const hasExpected = test.expected !== null && test.expected !== undefined
-    const hasActual = test.actual !== null && test.actual !== undefined
-    const failureSummary = hasExpected && hasActual ? null : conciseTestFailureMessage(test)
-    if (failureSummary) {
-      const message = document.createElement('p')
-      message.className = 'failure-message'
-      message.textContent = failureSummary
-      detail.append(message)
-    }
-    const diff = hasExpected && hasActual ? charDiffSegments(test.expected!, test.actual!) : null
-    if (hasExpected) {
-      detail.append(renderComparisonValue(
-        'Expected',
-        test.expected!,
-        'expected-value',
-        diff ? { prefix: diff.prefix, mid: diff.expectedMid, suffix: diff.suffix } : null,
-      ))
-    }
-    if (hasActual) {
-      detail.append(renderComparisonValue(
-        'Actual',
-        test.actual!,
-        'actual-value',
-        diff ? { prefix: diff.prefix, mid: diff.actualMid, suffix: diff.suffix } : null,
-      ))
-    }
-    if (test.file && validSourceLine(test.line) !== null) {
-      detail.append(this.renderLocation(test.file, validSourceLine(test.line)!, test.column))
-    }
-    if (test.details) {
-      const stack = document.createElement('details')
-      stack.className = 'test-full-stack'
-      stack.open = failed
-      const stackSummary = document.createElement('summary')
-      stackSummary.textContent = 'Stack trace'
-      stack.append(stackSummary)
-      const relevantFrames = relevantTestStackFrames(test.details)
-      if (relevantFrames.length > 0) {
-        const userFrames = document.createElement('pre')
-        userFrames.className = 'test-user-frames'
-        userFrames.textContent = relevantFrames.join('\n')
-        stack.append(userFrames)
-      }
-      const stacktrace = document.createElement('pre')
-      stacktrace.className = 'test-stacktrace'
-      stacktrace.textContent = test.details
-      stack.append(stacktrace)
-      detail.append(stack)
-    }
-    return detail
-  }
-
-  private renderOutputConsole(
-    stdout: string | null | undefined,
-    stderr: string | null | undefined,
-  ): HTMLElement | null {
-    const segments = testOutputSegments(stdout, stderr)
-    if (segments.length === 0) {
-      return null
-    }
-
-    const output = document.createElement('section')
-    output.className = 'test-console'
-    output.setAttribute('aria-label', 'Console output')
-    const content = document.createElement('pre')
-    content.className = 'test-output-content'
-    for (const segment of segments) {
-      const stream = document.createElement('span')
-      stream.className = `test-output-stream test-output-${segment.stream}`
-      stream.textContent = segment.text
-      content.append(stream)
-    }
-    output.append(content)
-    return output
-  }
-
-  private renderDiagnostic(diagnostic: TestDiagnostic): HTMLElement {
-    const card = document.createElement('div')
-    card.className = `diagnostic diagnostic-${diagnostic.severity}`
-    const header = document.createElement('div')
-    header.className = 'diagnostic-header'
-    header.append(iconFor(diagnostic.severity === 'warning' ? 'alert' : 'close', 'diagnostic-icon'))
-    const message = document.createElement('span')
-    message.className = 'diagnostic-message'
-    message.textContent = diagnostic.message
-    header.append(message)
-    card.append(header)
-    if (diagnostic.sourceLine) {
-      const snippet = document.createElement('pre')
-      snippet.className = 'diagnostic-snippet'
-      snippet.textContent = diagnostic.caret
-        ? `${diagnostic.sourceLine}\n${diagnostic.caret}`
-        : diagnostic.sourceLine
-      card.append(snippet)
-    }
-    if (diagnostic.file && validSourceLine(diagnostic.line) !== null) {
-      card.append(this.renderLocation(diagnostic.file, validSourceLine(diagnostic.line)!, diagnostic.column))
-    }
-    return card
-  }
-
-  private renderLocation(file: string, line: number, column?: number | null): HTMLElement {
-    const location = document.createElement('button')
-    location.type = 'button'
-    location.className = 'result-location'
-    const matchesCurrentFile = Boolean(this.state.selectedPath && sourcePathsMatch(this.state.selectedPath, file))
-    location.append(
-      iconFor('locate', 'result-location-icon'),
-      document.createTextNode(`${sourceBasename(file)}:${line}${column ? `:${column}` : ''}`),
-    )
-    if (matchesCurrentFile) {
-      location.title = 'Reveal this line in the editor'
-      location.addEventListener('click', () => {
-        this.editor.revealLine(line, column)
-      })
-    } else {
-      location.disabled = true
-      location.title = `${file} — this location belongs to another source file`
-    }
-    return location
-  }
-
-  private statusIcon(status: string): HTMLElement {
-    const icon = document.createElement('span')
-    icon.className = `test-status-icon test-status-${status}`
-    icon.setAttribute('aria-label', status)
-    switch (status) {
-      case 'passed':
-        icon.append(iconFor('check', 'test-status-svg'))
-        break
-      case 'failed':
-        icon.append(iconFor('close', 'test-status-svg'))
-        break
-      case 'error':
-        icon.append(iconFor('alert', 'test-status-svg'))
-        break
-      case 'running':
-        icon.append(iconFor('loader', 'test-status-svg is-spinning'))
-        break
-      case 'skipped':
-        icon.textContent = '–'
-        break
-      default:
-        icon.textContent = '·'
-    }
-    return icon
   }
 
   private setMessage(message: string, tone: 'info' | 'success' | 'error'): void {
@@ -6689,20 +4644,6 @@ export class LeetcoderApp {
   }
 }
 
-function fqcnFromJavaPath(path: string): string | null {
-  const normalized = path.replace(/\\/g, '/')
-  const root = 'src/main/java/'
-  const rootIndex = normalized.indexOf(root)
-  if (rootIndex < 0 || !normalized.toLowerCase().endsWith('.java')) {
-    return null
-  }
-  return normalized
-    .slice(rootIndex + root.length, -'.java'.length)
-    .split('/')
-    .filter(Boolean)
-    .join('.')
-}
-
 async function defaultDirectoryPicker(): Promise<string | null> {
   return tauriInvoke<string | null>('choose_repository')
 }
@@ -6715,74 +4656,12 @@ function safeStorage(): Storage | undefined {
   }
 }
 
-/** Accept only the persisted appearance modes supported by the settings UI. */
-export function normalizeThemeMode(value: unknown): ThemeMode {
-  return value === 'system' || value === 'light' || value === 'dark' ? value : 'dark'
-}
-
-export function readThemeMode(storage: Storage | undefined): ThemeMode {
-  return normalizeThemeMode(storage?.getItem(THEME_MODE_KEY))
-}
-
-/** Apply an appearance immediately while leaving the selected mode persisted separately. */
-export function applyTheme(mode: ThemeMode): void {
-  if (typeof document === 'undefined') {
-    return
-  }
-  document.documentElement.dataset.theme = mode
-  document.documentElement.style.colorScheme = mode === 'system' ? 'dark light' : mode
-}
-
 /** The 6px colored difficulty dot in a sidebar group heading. */
 function createGroupDot(groupKey: ProblemFileEntry['packageSegment']): HTMLElement {
   const dot = document.createElement('span')
-  dot.className = `group-dot group-dot-${groupKey}`
+  dot.className = 'group-dot group-dot-' + groupKey
   dot.setAttribute('aria-hidden', 'true')
   return dot
-}
-
-/** Detect Apple platforms from explicit navigator values without reading globals. */
-export function isMacPlatform(platform: string, userAgent = ''): boolean {
-  return /Mac|iPhone|iPad|iPod/i.test(`${platform} ${userAgent}`)
-}
-
-/** The first shortcut tab follows the operating system running the app. */
-export function defaultShortcutPlatform(macPlatform: boolean): ShortcutPlatform {
-  return macPlatform ? 'macos' : 'linux'
-}
-
-/**
- * Use readable modifier names in the macOS shortcut dialog while keeping the
- * formatter output available to the hover tooltip. The binding remains the
- * source of truth; these are display aliases only.
- */
-export function macShortcutDialogLabel(binding: string, formatted: string): string {
-  const parts = binding.split('-')
-  const key = parts.at(-1)
-  const modifiers = parts.slice(0, -1)
-  const modifierNames: Readonly<Record<string, string>> = {
-    Shift: 'Shift',
-    Mod: 'Cmd',
-    Cmd: 'Cmd',
-    Alt: 'Opt',
-    Ctrl: 'Ctrl',
-  }
-  const keyNames: Readonly<Record<string, string>> = {
-    ArrowUp: 'Arrow Up',
-    ArrowDown: 'Arrow Down',
-    ArrowLeft: 'Arrow Left',
-    ArrowRight: 'Arrow Right',
-    Backspace: 'Backspace',
-    Enter: 'Enter',
-    Escape: 'Esc',
-    Space: 'Space',
-  }
-  if (!key) {
-    return formatted
-  }
-  const keyLabel = keyNames[key] ?? (key.length === 1 ? key.toUpperCase() : key)
-  const modifierLabels = modifiers.map((modifier) => modifierNames[modifier] ?? modifier)
-  return [...modifierLabels, keyLabel].join(' + ')
 }
 
 function currentIsMacPlatform(): boolean {
@@ -6790,374 +4669,6 @@ function currentIsMacPlatform(): boolean {
     return false
   }
   return isMacPlatform(navigator.platform, navigator.userAgent)
-}
-
-function formatDuration(durationMs: number): string {
-  if (durationMs < 1000) {
-    return `${Math.round(durationMs)}ms`
-  }
-  return `${(durationMs / 1000).toFixed(2)}s`
-}
-
-/** Live status-row copy: early phases read as compiling, later as running. */
-function liveRunPhaseLabel(phase: TestPhase): string {
-  const normalized = phase.trim().toLowerCase().replace(/[\s_-]/g, '')
-  if (
-    normalized === 'starting'
-    || normalized === 'compiling'
-    || normalized === 'compile'
-    || normalized === 'compilation'
-  ) {
-    return 'Compiling…'
-  }
-  return 'Running tests…'
-}
-
-/** Non-zero result counts for the finished status row, actionable first. */
-function testRunFacts(summary: TestResult['summary']): string[] {
-  const parts: string[] = []
-  if (summary.failed > 0) {
-    parts.push(`${summary.failed} failed`)
-  }
-  if (summary.errors > 0) {
-    parts.push(`${summary.errors} error${summary.errors === 1 ? '' : 's'}`)
-  }
-  if (summary.passed > 0) {
-    parts.push(`${summary.passed} passed`)
-  }
-  if (summary.skipped > 0) {
-    parts.push(`${summary.skipped} skipped`)
-  }
-  return parts
-}
-
-function stripAnsi(text: string): string {
-  return text.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
-}
-
-/**
- * Expected/Actual row. When a char-level diff is available the differing
- * middle is wrapped in a <mark> so the mismatch reads at a glance.
- */
-function renderComparisonValue(
-  label: string,
-  value: string,
-  className: string,
-  diff: { prefix: string; mid: string; suffix: string } | null,
-): HTMLElement {
-  const wrapper = document.createElement('div')
-  wrapper.className = `failure-value ${className}`
-  const title = document.createElement('span')
-  title.className = 'failure-value-label'
-  title.textContent = label
-  const content = document.createElement('code')
-  content.className = 'failure-value-content'
-  if (diff) {
-    content.append(document.createTextNode(diff.prefix))
-    const mark = document.createElement('mark')
-    mark.className = 'diff-mark'
-    mark.textContent = diff.mid
-    content.append(mark, document.createTextNode(diff.suffix))
-  } else {
-    content.textContent = value
-  }
-  wrapper.append(title, content)
-  return wrapper
-}
-
-export type UnifiedDiffLineKind = 'context' | 'addition' | 'deletion' | 'hunk' | 'no-newline'
-
-export interface UnifiedDiffLine {
-  kind: UnifiedDiffLineKind
-  oldLine: number | null
-  newLine: number | null
-  marker: '' | '+' | '-'
-  content: string
-}
-
-/**
- * Converts a raw Git unified diff into only the lines useful in the file
- * viewer. Git's file headers and index/mode metadata are already represented
- * by the file heading and status badge, so showing them again makes the code
- * harder to scan. The returned line numbers are the source line numbers from
- * each side of every hunk.
- */
-export function parseUnifiedDiffLines(diff: string): UnifiedDiffLine[] {
-  const lines: UnifiedDiffLine[] = []
-  let oldLine = 0
-  let newLine = 0
-  let hasHunk = false
-
-  const rawLines = diff.split(/\r\n|\n|\r/)
-  for (const [lineIndex, line] of rawLines.entries()) {
-    // A final line ending is not an additional blank source line. Actual
-    // blank context lines retain their required unified-diff space prefix.
-    if (lineIndex === rawLines.length - 1 && line.length === 0) {
-      continue
-    }
-    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line)
-    if (hunk) {
-      oldLine = Number(hunk[1])
-      newLine = Number(hunk[3])
-      hasHunk = true
-      lines.push({
-        kind: 'hunk',
-        oldLine: null,
-        newLine: null,
-        marker: '',
-        content: line,
-      })
-      continue
-    }
-
-    // Everything before the first hunk is a file header or a diff metadata
-    // line. A metadata line after a hunk can occur for binary/rename diffs;
-    // it is intentionally omitted as well.
-    if (isUnifiedDiffMetadataLine(line, hasHunk) || !hasHunk) {
-      continue
-    }
-
-    if (line === '\\ No newline at end of file') {
-      lines.push({
-        kind: 'no-newline',
-        oldLine: null,
-        newLine: null,
-        marker: '',
-        content: line,
-      })
-      continue
-    }
-
-    if (line.startsWith('+')) {
-      lines.push({
-        kind: 'addition',
-        oldLine: null,
-        newLine: newLine++,
-        marker: '+',
-        content: line.slice(1),
-      })
-      continue
-    }
-
-    if (line.startsWith('-')) {
-      lines.push({
-        kind: 'deletion',
-        oldLine: oldLine++,
-        newLine: null,
-        marker: '-',
-        content: line.slice(1),
-      })
-      continue
-    }
-
-    // A normal unified-diff context line starts with one space. Keeping the
-    // fallback makes the renderer tolerant of backend payloads that omit the
-    // prefix while still preserving an actually blank context line (" ").
-    const content = line.startsWith(' ') ? line.slice(1) : line
-    lines.push({
-      kind: 'context',
-      oldLine: oldLine++,
-      newLine: newLine++,
-      marker: '',
-      content,
-    })
-  }
-
-  return lines
-}
-
-function isUnifiedDiffMetadataLine(line: string, hasHunk = false): boolean {
-  return line.startsWith('diff --git ')
-    || /^(?:new|deleted|old) file mode\s/.test(line)
-    || /^(?:old|new) mode\s/.test(line)
-    || /^(?:similarity|dissimilarity) index\s/.test(line)
-    || /^(?:rename|copy) (?:from|to)\s/.test(line)
-    || line.startsWith('index ')
-    || (!hasHunk && /^(?:---|\+\+\+)(?:\s|$)/.test(line))
-    || line === 'GIT binary patch'
-    || /^(?:literal|delta) \d+$/.test(line)
-    || line.startsWith('Binary files ')
-}
-
-function gitStatusGlyph(status: string): string {
-  switch (normalizeGitStatusLabel(status)) {
-    case 'added':
-      return 'A'
-    case 'deleted':
-      return 'D'
-    case 'renamed':
-      return 'R'
-    case 'conflicted':
-      return 'U'
-    case 'untracked':
-      return '?'
-    default:
-      return 'M'
-  }
-}
-
-export function deleteFileConfirmationMessage(fileName: string): string {
-  return `Delete ${fileName}?\n\nThis cannot be undone.`
-}
-
-/**
- * Produces the next collision-free duplicate name used by the file explorer.
- * Numeric suffixes are appended immediately before the extension, matching
- * the repository's `Q123Problem2.java`, `Q123Problem3.java` convention.
- */
-export function duplicateFileName(fileName: string, existingNames: Iterable<string> = []): string {
-  const extensionMatch = fileName.match(/(\.[^.]+)$/)
-  const extension = extensionMatch?.[1] ?? ''
-  const stem = extension ? fileName.slice(0, -extension.length) : fileName
-  const occupied = new Set([...existingNames].map((name) => name.toLocaleLowerCase()))
-  let suffix = 2
-  let candidate = `${stem}${suffix}${extension}`
-  while (occupied.has(candidate.toLocaleLowerCase())) {
-    suffix += 1
-    candidate = `${stem}${suffix}${extension}`
-  }
-  return candidate
-}
-
-/** Return a safe Java basename, adding `.java` when the user omits it. */
-export function normalizeJavaFileName(value: string): string | null {
-  const trimmed = value.trim()
-  if (!trimmed || trimmed === '.' || trimmed === '..' || /[\\/]/.test(trimmed)) {
-    return null
-  }
-  const withExtension = /\.java$/i.test(trimmed) ? trimmed : `${trimmed}.java`
-  if (!/^[^<>:"|?*\u0000-\u001f]+\.java$/i.test(withExtension)) {
-    return null
-  }
-  return withExtension
-}
-
-function joinFilePath(directory: string, name: string): string {
-  return directory ? `${directory.replace(/[\\/]$/, '')}/${name}` : name
-}
-
-/**
- * Backends can return a path, a file DTO, or a wrapper around either. Keep the
- * UI tolerant while the native bridge rolls out the file-operation commands.
- */
-function fileMutationResultPath(value: unknown, originalPath: string): string | null {
-  const candidate = fileMutationResultString(value, ['path', 'newPath', 'new_path', 'filePath', 'file_path', 'relativePath', 'relative_path'])
-    ?? fileMutationResultString(value, ['name', 'fileName', 'file_name', 'newName', 'new_name'])
-  if (!candidate) {
-    return null
-  }
-  if (/[\\/]/.test(candidate)) {
-    return candidate.replace(/\\/g, '/').replace(/^\.\//, '')
-  }
-  return joinFilePath(gitDirectoryPath(originalPath), candidate)
-}
-
-function fileMutationResultContent(value: unknown): string | null {
-  if (!isRecordValue(value)) {
-    return null
-  }
-  for (const key of ['content', 'source']) {
-    if (typeof value[key] === 'string') {
-      return value[key]
-    }
-  }
-  for (const key of ['file', 'entry', 'result', 'renamed']) {
-    const content = fileMutationResultContent(value[key])
-    if (content !== null) {
-      return content
-    }
-  }
-  return null
-}
-
-function fileMutationResultString(value: unknown, keys: string[]): string | null {
-  if (typeof value === 'string' && value.trim().length > 0) {
-    // A duplicate response may be the source text. Only treat strings that
-    // look like paths or Java basenames as operation results.
-    return /\.java$/i.test(value.trim()) || /[\\/]/.test(value.trim()) ? value.trim() : null
-  }
-  if (!isRecordValue(value)) {
-    return null
-  }
-  for (const key of keys) {
-    const result = fileMutationResultString(value[key], keys)
-    if (result) {
-      return result
-    }
-  }
-  for (const nestedKey of ['file', 'entry', 'result', 'created', 'renamed', 'duplicate']) {
-    const result = fileMutationResultString(value[nestedKey], keys)
-    if (result) {
-      return result
-    }
-  }
-  return null
-}
-
-export function findFileAfterDuplicate(
-  files: ProblemFileEntry[],
-  existingPaths: Set<string>,
-  original: ProblemFileEntry,
-  result: unknown,
-): ProblemFileEntry | null {
-  const resultPath = fileMutationResultPath(result, original.path)
-  const exact = resultPath
-    ? files.find((file) => normalizeSourcePath(file.path) === normalizeSourcePath(resultPath))
-    : null
-  if (exact && exact.path !== original.path) {
-    return exact
-  }
-  const siblingNames = files
-    .filter((file) => gitDirectoryPath(file.path) === gitDirectoryPath(original.path))
-    .map((file) => file.name)
-  const fallbackName = duplicateFileName(original.name, siblingNames)
-  const fallbackPath = joinFilePath(gitDirectoryPath(original.path), fallbackName)
-  return files.find((file) => !existingPaths.has(file.path) && file.path === fallbackPath)
-    ?? files.find((file) => !existingPaths.has(file.path)
-      && gitDirectoryPath(file.path) === gitDirectoryPath(original.path)
-      && file.name !== original.name
-      && file.name.toLocaleLowerCase().startsWith(original.name.replace(/\.java$/i, '').toLocaleLowerCase()))
-    ?? null
-}
-
-export function findRestoredFileAfterGitRename(
-  files: ProblemFileEntry[],
-  change: Pick<GitChangedFile, 'path' | 'originalPath'>,
-): ProblemFileEntry | null {
-  const originalPath = change.originalPath?.trim()
-  if (!originalPath || sameFilePath(originalPath, change.path)) {
-    return null
-  }
-  return files.find((file) => sameFilePath(file.path, originalPath)) ?? null
-}
-
-function findFileAfterRename(
-  files: ProblemFileEntry[],
-  original: ProblemFileEntry,
-  newName: string,
-  result: unknown,
-): ProblemFileEntry | null {
-  const resultPath = fileMutationResultPath(result, original.path)
-  const requestedPath = joinFilePath(gitDirectoryPath(original.path), newName)
-  return files.find((file) => resultPath && normalizeSourcePath(file.path) === normalizeSourcePath(resultPath))
-    ?? files.find((file) => normalizeSourcePath(file.path) === normalizeSourcePath(requestedPath))
-    ?? files.find((file) => file.path !== original.path
-      && gitDirectoryPath(file.path) === gitDirectoryPath(original.path)
-      && file.name.toLocaleLowerCase() === newName.toLocaleLowerCase())
-    ?? null
-}
-
-export function discardGitChangesConfirmationMessage(filePath: string): string {
-  return `Discard changes to ${filePath}?\n\n${discardGitChangesWarningMessage()}`
-}
-
-export function discardGitChangesWarningMessage(): string {
-  return 'This permanently discards all staged and unstaged changes. Untracked/new files will be deleted. This cannot be undone.'
-}
-
-function isGitNewFile(status: string): boolean {
-  const normalized = normalizeGitStatusLabel(status)
-  return normalized === 'added' || normalized === 'untracked'
 }
 
 function renderUnifiedDiff(diff: string): HTMLElement {
@@ -7193,116 +4704,108 @@ function renderUnifiedDiff(diff: string): HTMLElement {
   return wrapper
 }
 
-export function clampBottomPanelHeight(value: number, viewportHeight = windowHeight()): number {
-  const usableViewport = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 800
-  const maximum = Math.max(MIN_BOTTOM_PANEL_HEIGHT, Math.min(MAX_BOTTOM_PANEL_HEIGHT, Math.round(usableViewport * .8)))
-  const candidate = Number.isNaN(value) ? DEFAULT_BOTTOM_PANEL_HEIGHT : value
-  return Math.round(Math.min(maximum, Math.max(MIN_BOTTOM_PANEL_HEIGHT, candidate)))
-}
-
-export function clampContextMenuPosition(
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  viewportWidth = typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 1000,
-  viewportHeight = windowHeight(),
-  margin = VIEWPORT_MARGIN,
-): { x: number; y: number } {
-  const safeX = Number.isFinite(x) ? x : margin
-  const safeY = Number.isFinite(y) ? y : margin
-  const safeWidth = Number.isFinite(width) && width > 0 ? width : 0
-  const safeHeight = Number.isFinite(height) && height > 0 ? height : 0
-  const safeViewportWidth = Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1000
-  const safeViewportHeight = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 800
-  return {
-    x: Math.max(margin, Math.min(safeX, safeViewportWidth - safeWidth - margin)),
-    y: Math.max(margin, Math.min(safeY, safeViewportHeight - safeHeight - margin)),
-  }
-}
-
-export function clampGitFileListWidth(value: number, availableWidth = 900): number {
-  const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 900
-  const maximum = maxGitFileListWidth(usableWidth)
-  const candidate = Number.isNaN(value) ? DEFAULT_GIT_FILE_LIST_WIDTH : value
-  return Math.round(Math.min(maximum, Math.max(MIN_GIT_FILE_LIST_WIDTH, candidate)))
-}
-
-/** Keep the resizable problem-file pane usable alongside the editor. */
-export function clampSidebarWidth(value: number, availableWidth = 1000): number {
-  const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 1000
-  const maximum = maxSidebarWidth(usableWidth)
-  const candidate = Number.isNaN(value) ? DEFAULT_SIDEBAR_WIDTH : value
-  return Math.round(Math.min(maximum, Math.max(MIN_SIDEBAR_WIDTH, candidate)))
-}
-
-/** Keep a visible editor area while resizing the open problem description. */
-export function clampDailyDescriptionHeight(value: number, availableHeight = 800): number {
-  const usableHeight = Number.isFinite(availableHeight) && availableHeight > 0 ? availableHeight : 800
-  const maximum = maxDailyDescriptionHeight(usableHeight)
-  const candidate = Number.isNaN(value) ? DEFAULT_DAILY_DESCRIPTION_HEIGHT : value
-  return Math.round(Math.min(maximum, Math.max(MIN_DAILY_DESCRIPTION_HEIGHT, candidate)))
-}
-
-function maxGitFileListWidth(availableWidth: number): number {
-  const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 900
-  return Math.max(MIN_GIT_FILE_LIST_WIDTH, Math.round(usableWidth - MIN_GIT_DIFF_WIDTH - GIT_SPLITTER_WIDTH - GIT_WORKSPACE_GAP))
-}
-
-function maxSidebarWidth(availableWidth: number): number {
-  const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 1000
-  return Math.max(
-    MIN_SIDEBAR_WIDTH,
-    Math.min(MAX_SIDEBAR_WIDTH, Math.round(usableWidth - MIN_EDITOR_WIDTH - SIDEBAR_SPLITTER_WIDTH)),
-  )
-}
-
-function maxDailyDescriptionHeight(availableHeight: number): number {
-  const usableHeight = Number.isFinite(availableHeight) && availableHeight > 0 ? availableHeight : 800
-  return Math.max(
-    MIN_DAILY_DESCRIPTION_HEIGHT,
-    Math.min(
-      MAX_DAILY_DESCRIPTION_HEIGHT,
-      Math.round(usableHeight - MIN_CODE_CARD_HEIGHT - DAILY_DESCRIPTION_LAYOUT_OVERHEAD),
-    ),
-  )
-}
-
-function maxBottomPanelHeight(): number {
-  return clampBottomPanelHeight(MAX_BOTTOM_PANEL_HEIGHT)
-}
-
-function readBottomPanelHeight(storage: Storage | undefined): number {
-  const value = storage?.getItem(BOTTOM_PANEL_HEIGHT_KEY)
-  const parsed = value ? Number(value) : DEFAULT_BOTTOM_PANEL_HEIGHT
-  return clampBottomPanelHeight(Number.isFinite(parsed) ? parsed : DEFAULT_BOTTOM_PANEL_HEIGHT)
-}
-
-function readGitFileListWidth(storage: Storage | undefined): number {
-  const value = storage?.getItem(GIT_FILE_LIST_WIDTH_KEY)
-  const parsed = value ? Number(value) : DEFAULT_GIT_FILE_LIST_WIDTH
-  return clampGitFileListWidth(Number.isFinite(parsed) ? parsed : DEFAULT_GIT_FILE_LIST_WIDTH)
-}
-
-function readSidebarWidth(storage: Storage | undefined): number {
-  const value = storage?.getItem(SIDEBAR_WIDTH_KEY)
-  const parsed = value ? Number(value) : DEFAULT_SIDEBAR_WIDTH
-  return clampSidebarWidth(Number.isFinite(parsed) ? parsed : DEFAULT_SIDEBAR_WIDTH)
-}
-
-function readDailyDescriptionHeight(storage: Storage | undefined): number {
-  const value = storage?.getItem(DAILY_DESCRIPTION_HEIGHT_KEY)
-  const parsed = value ? Number(value) : DEFAULT_DAILY_DESCRIPTION_HEIGHT
-  return clampDailyDescriptionHeight(
-    Number.isFinite(parsed) ? parsed : DEFAULT_DAILY_DESCRIPTION_HEIGHT,
-  )
-}
-
-function windowHeight(): number {
-  if (typeof window === 'undefined' || !Number.isFinite(window.innerHeight) || window.innerHeight <= 0) {
-    return 800
-  }
-  return window.innerHeight
-}
-
-export { fqcnFromJavaPath }
+// Keep the original app module as a compatibility barrel while feature code
+// lives under `app/`. New code can import a focused module directly; existing
+// callers and tests do not need to change their import paths.
+export {
+  accordionGroupKeys,
+  isCloseAllTabsShortcut,
+  isCloseTabShortcut,
+  isCurrentRepositoryRefresh,
+  isFileTabsShiftWheel,
+  RepositoryPickerCoordinator,
+  replacementTabIndex,
+} from './app/navigation'
+export type { TabCloseShortcutEvent } from './app/navigation'
+export { AutosaveCoordinator } from './app/autosave'
+export {
+  autoSelectedTestKey,
+  charDiffSegments,
+  conciseTestFailureMessage,
+  collectDiagnosticEditorIssues,
+  collectEditorIssues,
+  defaultVisibleTests,
+  filterTestDiagnostics,
+  firstFailedTestKey,
+  isTestRunSourceCurrent,
+  liveSnapshotResult,
+  presentTestResult,
+  relevantTestStackFrames,
+  runnerFailureResult,
+  summarizeLiveTests,
+  testCaseDetailSectionOrder,
+  testCaseHasOutput,
+  testFailureMessage,
+  testOutputSegments,
+  testResultBannerMessage,
+} from './app/test-results'
+export {
+  defaultGitCommitMessage,
+  gitFileName,
+  gitResultToastMessage,
+  normalizeGitDiff,
+  normalizeGitStatus,
+  parseUnifiedDiffLines,
+} from './app/git-helpers'
+export {
+  discardGitChangesConfirmationMessage,
+  discardGitChangesWarningMessage,
+  deleteFileConfirmationMessage,
+  duplicateFileName,
+  filterProblemFiles,
+  filterProblemFilesByGroup,
+  findFileAfterDuplicate,
+  findRestoredFileAfterGitRename,
+  findTodayProblemFile,
+  normalizeJavaFileName,
+} from './app/file-helpers'
+export {
+  gitDirectoryPath,
+  fqcnFromJavaPath,
+  sourcePathsMatch,
+} from './app/path-helpers'
+export {
+  applyTheme,
+  clampBottomPanelHeight,
+  clampContextMenuPosition,
+  clampDailyDescriptionHeight,
+  clampGitFileListWidth,
+  clampSidebarWidth,
+  defaultShortcutPlatform,
+  isMacPlatform,
+  macShortcutDialogLabel,
+  nextUtcMidnightDelayMs,
+  normalizeDailyProblemDateKey,
+  normalizeProblemNumber,
+  normalizeThemeMode,
+  readThemeMode,
+  utcDateKey,
+} from './app/layout'
+export type {
+  AppOptions,
+  AutosaveCoordinatorOptions,
+  AutosaveSnapshot,
+  AutosaveStatus,
+  CurrentTestSource,
+  DirectoryPicker,
+  GitChangedFile,
+  GitStatusSnapshot,
+  RepositoryRefreshRequest,
+  RepositoryRefreshState,
+  SettingsSection,
+  ShortcutPlatform,
+  TestResultPresentation,
+  TestRunSnapshot,
+  TestRunSourceSnapshot,
+  TestRunStatus,
+  ThemeMode,
+} from './app/types'
+export type {
+  TestCaseDetailSection,
+  TestOutputSegment,
+  TestOutputStream,
+} from './app/test-results'
+export type {
+  UnifiedDiffLine,
+  UnifiedDiffLineKind,
+} from './app/git-helpers'

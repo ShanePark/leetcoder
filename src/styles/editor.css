@@ -1,0 +1,280 @@
+/* ---------------------------------------------------------------- */
+/* Code card                                                         */
+/* ---------------------------------------------------------------- */
+
+.code-card {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 180px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--surface);
+}
+
+.file-tabs-shell {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.file-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  min-height: 36px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 8px 0;
+  background: var(--surface);
+  scrollbar-width: none;
+}
+
+.file-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.file-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 260px;
+  min-height: 31px;
+  padding: 0 8px 0 10px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.file-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.file-tab.is-active {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.file-tab-button {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+}
+
+.file-tab-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  direction: rtl;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tab-dirty {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.file-tab-close {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.file-tab-close:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.file-tab-close:disabled {
+  opacity: 0.45;
+}
+
+.code-toolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.file-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.selected-file {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.save-status.is-unsaved {
+  color: var(--text-dim);
+}
+
+.save-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.save-status.is-saving {
+  color: var(--text-faint);
+}
+
+.save-status.is-saved {
+  color: var(--green);
+}
+
+.save-status.is-error {
+  color: var(--red);
+}
+
+.editor-host {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.editor {
+  height: 100%;
+  min-height: 100%;
+}
+
+.editor .cm-editor {
+  height: 100%;
+  min-height: 100%;
+}
+
+.editor .cm-scroller {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0 20px;
+}
+
+.editor .cm-failure-gutter {
+  min-width: 17px;
+  color: var(--red);
+}
+
+.editor .cm-failure-gutter .cm-gutterElement {
+  display: grid;
+  width: 17px;
+  place-items: center;
+  padding: 0;
+}
+
+.editor .cm-failure-marker {
+  display: block;
+  color: var(--red);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.editor .cm-line.cm-failure-line {
+  box-shadow: inset 2px 0 var(--red);
+  background: var(--red-soft);
+}
+
+.editor .cm-definition-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+.editor-host.is-empty .editor {
+  display: none;
+}
+
+.editor-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--bg);
+}
+
+.editor-empty-icon {
+  width: 28px;
+  height: 28px;
+  color: var(--text-faint);
+  opacity: 0.7;
+}
+
+.editor-empty-copy {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.editor-empty-hints {
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 6px 20px;
+  margin-top: 4px;
+}
+
+.editor-empty-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+}

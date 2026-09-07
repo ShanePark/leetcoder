@@ -1,0 +1,106 @@
+/* ---------------------------------------------------------------- */
+/* Bottom panel                                                      */
+/* ---------------------------------------------------------------- */
+
+.bottom-panel {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  height: var(--bottom-panel-height, 280px);
+  min-height: 180px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.bottom-panel-resize-handle {
+  position: absolute;
+  z-index: 10;
+  top: -4px;
+  right: 0;
+  left: 0;
+  height: 8px;
+  cursor: row-resize;
+}
+
+.bottom-panel-resize-handle span {
+  display: block;
+  height: 100%;
+}
+
+.bottom-panel-resize-handle:hover span,
+.is-resizing-panel .bottom-panel-resize-handle span {
+  background: linear-gradient(to bottom, transparent 3px, var(--accent) 3px, var(--accent) 5px, transparent 5px);
+}
+
+.is-resizing-panel {
+  cursor: row-resize;
+  user-select: none;
+}
+
+.bottom-panel-tabs {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bottom-panel-tab-list {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
+.bottom-panel-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.bottom-panel-actions .primary-button {
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.selected-test-shortcut-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bottom-panel-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.bottom-panel-tab:hover {
+  color: var(--text);
+}
+
+.bottom-panel-tab.is-active {
+  color: var(--text);
+}
+
+.bottom-panel-tab.is-active::after {
+  position: absolute;
+  right: 6px;
+  bottom: -1px;
+  left: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  content: "";
+}
