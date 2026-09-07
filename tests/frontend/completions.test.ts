@@ -7,6 +7,8 @@ import {
   collectJavaMethods,
   collectJavaSymbols,
   expandJavaPrintTemplate,
+  javaIterTemplateExtension,
+  javaIterableCandidates,
   javaCompletions,
   resolveJavaDefinition,
 } from '../../src/completions'
@@ -65,7 +67,7 @@ function expandPrintTemplateState(source: string): { expanded: boolean, state: E
   if (marker < 0) throw new Error('Expansion source must include a | cursor marker')
   let state = EditorState.create({
     doc: `${source.slice(0, marker)}${source.slice(marker + 1)}`,
-    extensions: EditorState.allowMultipleSelections.of(true),
+    extensions: [EditorState.allowMultipleSelections.of(true), javaIterTemplateExtension],
     selection: { anchor: marker },
   })
   const view = {
@@ -276,6 +278,251 @@ describe('lightweight Java completions', () => {
     System.err.println();
   }
 }`)
+  })
+
+  it('expands the mod live template to the common modulo constant', () => {
+    const source = `class Solution {
+  void test() {
+    mod|
+  }
+}`
+    expect(labels(source)).toContain('mod')
+    expect(applyCompletion(source, 'mod')).toBe(`class Solution {
+  void test() {
+    final int MOD = (int) 1e9 + 7;
+  }
+}`)
+
+    const direct = expandPrintTemplate(source)
+    expect(direct.expanded).toBe(true)
+    expect(direct.source).toBe(`class Solution {
+  void test() {
+    final int MOD = (int) 1e9 + 7;
+  }
+}`)
+  })
+
+  it('expands iter with an inferred element type and singular variable name', () => {
+    const source = `class Solution {
+  void test(List<Integer> nums) {
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'nums', elementType: 'Integer', variableName: 'num' },
+    ])
+    expect(labels(source)).toContain('iter')
+    expect(applyCompletion(source, 'iter')).toBe([
+      'class Solution {',
+      '  void test(List<Integer> nums) {',
+      '    for (Integer num : nums) {',
+      ' '.repeat(8),
+      '    }',
+      '  }',
+      '}',
+    ].join('\n'))
+  })
+
+  it('selects the iterated expression first and derives char from String.toCharArray()', () => {
+    const result = expandPrintTemplateState(`class Solution {
+  void test(String s, List<Integer> list) {
+    iter|
+  }
+}`)
+    expect(result.expanded).toBe(true)
+    expect(result.state.sliceDoc(result.state.selection.main.from, result.state.selection.main.to)).toBe('list')
+
+    const updated = result.state.update(result.state.replaceSelection('s.toCharArray()')).state
+    expect(updated.doc.toString()).toContain('for (char integer : s.toCharArray())')
+    expect(updated.selection.main.head).toBe(
+      updated.doc.toString().indexOf('s.toCharArray()') + 's.toCharArray()'.length,
+    )
+  })
+
+  it('keeps the target active while typing a String.toCharArray() expression', () => {
+    const result = expandPrintTemplateState(`class Solution {
+  void test(String s, List<Integer> list) {
+    iter|
+  }
+}`)
+    let state = result.state.update(result.state.replaceSelection('s')).state
+    for (const character of '.toCharArray()') {
+      const head = state.selection.main.head
+      state = state.update({
+        changes: { from: head, insert: character },
+        selection: { anchor: head + character.length },
+        userEvent: 'input.type',
+      }).state
+    }
+
+    expect(state.doc.toString()).toContain('for (char integer : s.toCharArray())')
+    expect(state.selection.main.head).toBe(
+      state.doc.toString().indexOf('s.toCharArray()') + 's.toCharArray()'.length,
+    )
+  })
+
+  it('offers separate iter choices and recomputes type and variable defaults', () => {
+    const source = `class Solution {
+  void test(List<Integer> nums, String[] names, Map<String, Integer> counts) {
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'names', elementType: 'String', variableName: 'name' },
+      { name: 'nums', elementType: 'Integer', variableName: 'num' },
+    ])
+    expect(labels(source)).toEqual(expect.arrayContaining(['iter (names)', 'iter (nums)']))
+    expect(applyCompletion(source, 'iter (names)')).toContain('for (String name : names)')
+    expect(applyCompletion(source, 'iter (nums)')).toContain('for (Integer num : nums)')
+    expect(applyCompletion(source, 'iter (names)')).not.toContain('for (Map<String, Integer>')
+  })
+
+  it('uses an editable var fallback when no iterable is visible', () => {
+    const result = expandPrintTemplate(`class Solution {
+  void test() {
+    iter|
+  }
+}`)
+    expect(result.expanded).toBe(true)
+    expect(result.source).toBe([
+      'class Solution {',
+      '  void test() {',
+      '    for (var item : items) {',
+      ' '.repeat(8),
+      '    }',
+      '  }',
+      '}',
+    ].join('\n'))
+  })
+
+  it('keeps iter candidates scoped and honors local shadowing', () => {
+    const source = `class Solution {
+  List<Integer> values;
+  void test(List<String> values) {
+    List<Long> ids = new ArrayList<>();
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'ids', elementType: 'Long', variableName: 'id' },
+      { name: 'values', elementType: 'String', variableName: 'value' },
+    ])
+  })
+
+  it('infers collection and array element types from common Java declaration forms', () => {
+    const source = `class Solution {
+  void test(Collection<String> names, int values[], int[][] matrix) {
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'matrix', elementType: 'int[]', variableName: 'row' },
+      { name: 'values', elementType: 'int', variableName: 'value' },
+      { name: 'names', elementType: 'String', variableName: 'name' },
+    ])
+  })
+
+  it('recognizes a fully-qualified generic iterable declaration', () => {
+    const source = `class Solution {
+  void test(java.util.List<String> names) {
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'names', elementType: 'String', variableName: 'name' },
+    ])
+  })
+
+  it('keeps explicit declaration types authoritative over iterable initializers', () => {
+    const source = `class Solution {
+  void test() {
+    List values = new ArrayList<String>();
+    Object other = new ArrayList<String>();
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'values', variableName: 'value' },
+    ])
+  })
+
+  it('retains array suffixes before the loop variable name', () => {
+    const source = `class Solution {
+  void test(int[] values) {
+    for (int[] arr = values; arr != null; arr = null) {
+      iter|
+    }
+  }
+}`
+    const position = source.indexOf('|')
+    const document = source.replace('|', '')
+    expect(collectJavaSymbols(document, position).find((symbol) => symbol.name === 'arr')).toMatchObject({
+      declaredType: 'int[]',
+      elementType: 'int',
+    })
+    expect(javaIterableCandidates(document, position)).toEqual([
+      { name: 'arr', elementType: 'int', variableName: 'item' },
+      { name: 'values', elementType: 'int', variableName: 'value' },
+    ])
+  })
+
+  it('keeps spacing in nested wildcard element types', () => {
+    const source = `class Solution {
+  void test(List<List<? extends Number>> groups) {
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'groups', elementType: 'List<? extends Number>', variableName: 'group' },
+    ])
+    expect(applyCompletion(source, 'iter')).toContain('for (List<? extends Number> group : groups)')
+  })
+
+  it('ignores iterable-looking declarations inside comments and literals', () => {
+    const source = `class Solution {
+  List<Integer> values;
+  void test() {
+    String text = "List<String> values;";
+    // List<Double> values;
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'values', elementType: 'Integer', variableName: 'value' },
+    ])
+    expect(expandPrintTemplate(`class Solution {
+  void test() {
+    String text = "iter|";
+  }
+}`).expanded).toBe(false)
+  })
+
+  it('infers var initializers for generic collections and nested arrays', () => {
+    const source = `class Solution {
+  void test() {
+    var values = new ArrayList<Integer>();
+    var matrix = new int[2][3];
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'matrix', elementType: 'int[]', variableName: 'row' },
+      { name: 'values', elementType: 'Integer', variableName: 'value' },
+    ])
+  })
+
+  it('avoids an enhanced-for variable already active in the loop body', () => {
+    const source = `class Solution {
+  void test(List<Integer> nums) {
+    for (Integer num : nums) {
+      iter|
+    }
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'nums', elementType: 'Integer', variableName: 'num2' },
+    ])
+    expect(applyCompletion(source, 'iter')).toContain('for (Integer num2 : nums)')
   })
 
   it('uses an editable value placeholder when no variable is in scope', () => {

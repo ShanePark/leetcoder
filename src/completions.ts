@@ -1,4 +1,27 @@
-import { pickedCompletion, snippet, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
+import {
+  acceptCompletion,
+  clearSnippet,
+  completionStatus,
+  hasNextSnippetField,
+  hasPrevSnippetField,
+  pickedCompletion,
+  selectedCompletion,
+  snippet,
+  startCompletion,
+  type Completion,
+  type CompletionContext,
+  type CompletionResult,
+} from '@codemirror/autocomplete'
+import {
+  Annotation,
+  EditorState,
+  MapMode,
+  StateEffect,
+  StateField,
+  type Extension,
+  type Transaction,
+  type TransactionSpec,
+} from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
 
 /**
@@ -12,6 +35,10 @@ export interface JavaSymbol {
   /** All useful views of a value.  For example `List` declared with
    * `new ArrayList<>()` has both `List` and `ArrayList` here. */
   bases: string[]
+  /** The source declaration type, used to avoid treating an Object as iterable. */
+  declaredType?: string
+  /** The declared element type when this value is an array or generic iterable. */
+  elementType?: string
   kind: 'field' | 'parameter' | 'local'
   declaredAt: number
   scopeStart: number
@@ -214,10 +241,124 @@ function applyJavaType(fullyQualifiedName: string): Completion['apply'] {
 
 export type JavaPrintTemplateKind = 'sout' | 'soutv' | 'serr' | 'serrv'
 
-const JAVA_PRINT_TEMPLATE_KINDS = new Set<JavaPrintTemplateKind>(['sout', 'soutv', 'serr', 'serrv'])
+type JavaTemplateKind = JavaPrintTemplateKind | 'mod' | 'iter'
 
-function isJavaPrintTemplateKind(value: string): value is JavaPrintTemplateKind {
-  return JAVA_PRINT_TEMPLATE_KINDS.has(value as JavaPrintTemplateKind)
+const JAVA_TEMPLATE_KINDS = new Set<JavaTemplateKind>(['sout', 'soutv', 'serr', 'serrv', 'mod', 'iter'])
+
+function isJavaTemplateKind(value: string): value is JavaTemplateKind {
+  return JAVA_TEMPLATE_KINDS.has(value as JavaTemplateKind)
+}
+
+export interface JavaIterableCandidate {
+  name: string
+  elementType?: string
+  variableName: string
+}
+
+function visibleJavaSymbols(symbols: JavaSymbol[], position: number): JavaSymbol[] {
+  const visible = symbols.filter((symbol) => symbol.scopeStart <= position
+    && position <= symbol.scopeEnd
+    && (symbol.kind === 'field' || symbol.declaredAt <= position))
+  const byName = new Map<string, JavaSymbol>()
+  for (const symbol of visible) {
+    const current = byName.get(symbol.name)
+    if (!current) {
+      byName.set(symbol.name, symbol)
+      continue
+    }
+    const symbolWidth = symbol.scopeEnd - symbol.scopeStart
+    const currentWidth = current.scopeEnd - current.scopeStart
+    if (symbolWidth < currentWidth || (symbolWidth === currentWidth && symbol.declaredAt > current.declaredAt)) {
+      byName.set(symbol.name, symbol)
+    }
+  }
+  return [...byName.values()]
+}
+
+const IRREGULAR_SINGULARS: Readonly<Record<string, string>> = {
+  children: 'child',
+  feet: 'foot',
+  geese: 'goose',
+  indices: 'index',
+  matrices: 'matrix',
+  men: 'man',
+  people: 'person',
+  teeth: 'tooth',
+  vertices: 'vertex',
+  women: 'woman',
+}
+
+function singularIdentifier(name: string): string {
+  const match = /^(.*?)([A-Za-z_$][\w$]*)$/.exec(name)
+  if (!match) return name
+  const prefix = match[1]
+  const word = match[2]
+  const lower = word.toLowerCase()
+  const irregular = IRREGULAR_SINGULARS[lower]
+  if (irregular) return `${prefix}${irregular}`
+  if (lower.endsWith('ies') && word.length > 3) return `${prefix}${word.slice(0, -3)}y`
+  if (lower.endsWith('ses') && word.length > 3) return `${prefix}${word.slice(0, -2)}`
+  if (lower.endsWith('s') && !lower.endsWith('ss') && !lower.endsWith('us') && !lower.endsWith('is')) {
+    return `${prefix}${word.slice(0, -1)}`
+  }
+  return name
+}
+
+function typeVariableName(elementType: string | undefined): string {
+  if (!elementType) return 'item'
+  if (elementType.endsWith('[]')) return 'row'
+  const base = simpleTypeName(elementType.replace(/<.*>/, ''))
+  if (!base) return 'item'
+  const candidate = `${base[0].toLowerCase()}${base.slice(1)}`
+  return JAVA_KEYWORDS.includes(candidate) ? 'item' : candidate
+}
+
+function uniqueVariableName(base: string, symbols: JavaSymbol[], position: number): string {
+  if (JAVA_KEYWORDS.includes(base)) base = 'item'
+  const used = new Set(visibleJavaSymbols(symbols, position).map((symbol) => symbol.name))
+  if (!used.has(base)) return base
+  let suffix = 2
+  while (used.has(`${base}${suffix}`)) suffix += 1
+  return `${base}${suffix}`
+}
+
+function iterVariableName(target: string, elementType: string | undefined, symbols: JavaSymbol[], position: number): string {
+  const targetName = target.split('.').at(-1) ?? target
+  const singular = singularIdentifier(targetName)
+  const base = singular !== targetName ? singular : typeVariableName(elementType)
+  return uniqueVariableName(base || 'item', symbols, position)
+}
+
+function isIterableSymbol(symbol: JavaSymbol): boolean {
+  const declaredType = symbol.declaredType
+  if (declaredType && declaredType !== 'var') {
+    // The declared type controls whether enhanced-for is legal.  Initializer
+    // bases are still collected for member completion, so they must not make
+    // an `Object` or other unrelated declaration look iterable here.
+    if (declaredType.includes('[]')) return symbol.bases.includes('array')
+    if (!isIterableType(declaredType)) return false
+  }
+  return symbol.bases.includes('array') || symbol.bases.includes('Iterable')
+}
+
+/** Return iterable values visible at a Java cursor, with loop defaults inferred. */
+export function javaIterableCandidates(source: string, position = source.length): JavaIterableCandidate[] {
+  const symbols = collectJavaSymbols(source, position)
+  const masked = maskJavaCommentsAndLiterals(source)
+  const codeSymbols = symbols.filter((symbol) => masked.slice(symbol.declaredAt, symbol.declaredAt + symbol.name.length)
+    === source.slice(symbol.declaredAt, symbol.declaredAt + symbol.name.length))
+  return visibleJavaSymbols(codeSymbols, position)
+    .filter(isIterableSymbol)
+    .sort((left, right) => {
+      const leftKind = left.kind === 'field' ? 0 : 1
+      const rightKind = right.kind === 'field' ? 0 : 1
+      return rightKind - leftKind || right.declaredAt - left.declaredAt
+    })
+    .map((symbol) => ({
+      name: symbol.name,
+      ...(symbol.elementType ? { elementType: symbol.elementType } : {}),
+      variableName: iterVariableName(symbol.name, symbol.elementType, codeSymbols, position),
+    }))
 }
 
 function javaPrintVariable(source: string, position: number): string {
@@ -237,12 +378,16 @@ function javaPrintVariable(source: string, position: number): string {
 }
 
 function javaPrintTemplateBody(
-  kind: JavaPrintTemplateKind,
+  kind: JavaTemplateKind,
   variable: string,
   includeSemicolon: boolean,
 ): string {
-  const stream = kind.startsWith('sout') ? 'out' : 'err'
   const suffix = includeSemicolon ? ';' : ''
+  if (kind === 'mod') {
+    return `final int MOD = (int) 1e9 + 7${suffix}`
+  }
+
+  const stream = kind.startsWith('sout') ? 'out' : 'err'
   if (!kind.endsWith('v')) {
     return `System.${stream}.println(\${})${suffix}`
   }
@@ -254,24 +399,282 @@ function javaPrintTemplateBody(
   return `System.${stream}.println("${field} = " + ${field})${suffix}\${0}`
 }
 
+function javaIterTemplateBody(candidate: JavaIterableCandidate | null): string {
+  const elementType = candidate?.elementType ?? 'var'
+  const variableName = candidate?.variableName ?? 'item'
+  const target = candidate?.name ?? 'items'
+  // The expression being iterated is the first stop, matching IntelliJ's
+  // live template flow.  The type is updated by javaIterTemplateExtension
+  // when that expression resolves to a different iterable element type.
+  return `for (\${2:${elementType}} \${3:${variableName}} : \${1:${target}}) {\n    \${0}\n}`
+}
+
+interface JavaIterTemplateSession {
+  targetFrom: number
+  targetTo: number
+  typeFrom: number
+  typeTo: number
+  loopFrom: number
+  loopTo: number
+  bodyFrom: number
+  bodyTo: number
+  lastAutomaticType: string
+  automaticType: boolean
+}
+
+const javaIterAutomaticType = Annotation.define<boolean>()
+const setJavaIterTemplateSession = StateEffect.define<JavaIterTemplateSession | null>()
+
+function mapIterTemplateRange(
+  from: number,
+  to: number,
+  changes: Transaction['changes'],
+): { from: number, to: number } | null {
+  const mappedFrom = changes.mapPos(from, -1, MapMode.TrackDel)
+  const mappedTo = changes.mapPos(to, 1, MapMode.TrackDel)
+  return mappedFrom === null || mappedTo === null ? null : { from: mappedFrom, to: mappedTo }
+}
+
+function mapJavaIterTemplateSession(
+  session: JavaIterTemplateSession,
+  changes: Transaction['changes'],
+): JavaIterTemplateSession | null {
+  const target = mapIterTemplateRange(session.targetFrom, session.targetTo, changes)
+  const type = mapIterTemplateRange(session.typeFrom, session.typeTo, changes)
+  const loop = mapIterTemplateRange(session.loopFrom, session.loopTo, changes)
+  const body = mapIterTemplateRange(session.bodyFrom, session.bodyTo, changes)
+  if (!target || !type || !loop || !body) return null
+  return {
+    ...session,
+    targetFrom: target.from,
+    targetTo: target.to,
+    typeFrom: type.from,
+    typeTo: type.to,
+    loopFrom: loop.from,
+    loopTo: loop.to,
+    bodyFrom: body.from,
+    bodyTo: body.to,
+  }
+}
+
+function selectionInsideIterLoop(
+  selection: { ranges: readonly { from: number, to: number }[] },
+  session: JavaIterTemplateSession,
+): boolean {
+  return selection.ranges.every((range) => range.from >= session.loopFrom && range.to <= session.loopTo)
+}
+
+function iterableElementTypeForExpression(source: string, target: string, position: number): string | null {
+  const expression = target.trim()
+  if (!expression) return null
+
+  const symbols = visibleJavaSymbols(collectJavaSymbols(source, position), position)
+  const simpleTarget = /^([A-Za-z_$][\w$]*)$/.exec(expression)
+  if (simpleTarget) {
+    const symbol = symbols.find((candidate) => candidate.name === simpleTarget[1])
+    if (symbol && isIterableSymbol(symbol)) return symbol.elementType ?? 'var'
+    return null
+  }
+
+  // String#toCharArray is the one expression form that is especially useful
+  // while solving LeetCode string problems and has an unambiguous char type.
+  const chars = /^([A-Za-z_$][\w$]*)\s*\.\s*toCharArray\s*\(\s*\)$/.exec(expression)
+  if (!chars) return null
+  const symbol = symbols.find((candidate) => candidate.name === chars[1])
+  if (!symbol) return null
+  const declaredType = symbol.declaredType
+  if (declaredType && declaredType !== 'var') {
+    return !declaredType.includes('[]') && simpleTypeName(baseType(declaredType)) === 'String' ? 'char' : null
+  }
+  return declaredType === 'var' && symbol.bases.includes('String') ? 'char' : null
+}
+
+function javaIterTemplateTransactionFilter(tr: Transaction): TransactionSpec | readonly TransactionSpec[] | Transaction {
+  const session = tr.startState.field(javaIterTemplateState, false)
+  if (!session || !tr.docChanged || !tr.changes.touchesRange(session.targetFrom, session.targetTo)) {
+    return tr
+  }
+
+  // A simultaneous edit of the type field is a deliberate user choice.  The
+  // state field records that choice below and stops future automatic changes.
+  if (tr.changes.touchesRange(session.typeFrom, session.typeTo) || !session.automaticType) {
+    return tr
+  }
+
+  const mapped = mapJavaIterTemplateSession(session, tr.changes)
+  if (!mapped) return tr
+  const target = tr.newDoc.sliceString(mapped.targetFrom, mapped.targetTo)
+  const desiredType = iterableElementTypeForExpression(tr.newDoc.toString(), target, mapped.targetFrom)
+  if (!desiredType) return tr
+
+  const currentType = tr.newDoc.sliceString(mapped.typeFrom, mapped.typeTo)
+  if (currentType !== session.lastAutomaticType || currentType === desiredType) return tr
+  return [
+    tr,
+    {
+      changes: { from: mapped.typeFrom, to: mapped.typeTo, insert: desiredType },
+      sequential: true,
+      annotations: javaIterAutomaticType.of(true),
+    },
+  ]
+}
+
+const javaIterTemplateState = StateField.define<JavaIterTemplateSession | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setJavaIterTemplateSession)) return effect.value
+    }
+    if (!value) return null
+    const mapped = tr.docChanged ? mapJavaIterTemplateSession(value, tr.changes) : value
+    if (!mapped || (tr.selection && (!selectionInsideIterLoop(tr.newSelection, mapped)
+      || tr.newSelection.ranges.every((range) => range.from >= mapped.bodyFrom && range.to <= mapped.bodyTo)))) return null
+
+    if (tr.isUserEvent('undo') || tr.isUserEvent('redo')) {
+      const target = tr.newDoc.sliceString(mapped.targetFrom, mapped.targetTo)
+      const inferred = iterableElementTypeForExpression(tr.newDoc.toString(), target, mapped.targetFrom)
+      const currentType = tr.newDoc.sliceString(mapped.typeFrom, mapped.typeTo)
+      return {
+        ...mapped,
+        automaticType: inferred === null || inferred === currentType,
+        lastAutomaticType: currentType,
+      }
+    }
+
+    if (tr.docChanged && tr.changes.touchesRange(value.typeFrom, value.typeTo)
+      && tr.annotation(javaIterAutomaticType) !== true) {
+      return { ...mapped, automaticType: false }
+    }
+    if (tr.annotation(javaIterAutomaticType) === true) {
+      return {
+        ...mapped,
+        lastAutomaticType: tr.newDoc.sliceString(mapped.typeFrom, mapped.typeTo),
+      }
+    }
+    return mapped
+  },
+})
+
+/** State needed to keep an expanded iter target and element type linked. */
+export const javaIterTemplateExtension: Extension = [
+  javaIterTemplateState,
+  EditorState.transactionFilter.of(javaIterTemplateTransactionFilter),
+]
+
+/**
+ * Finish the active iter template at its body placeholder. Enter should act
+ * as live-template confirmation while the template is active, then return to
+ * ordinary editor behavior once the session is cleared.
+ */
+export function finishJavaIterTemplate(view: EditorView): boolean {
+  // Completion's own keymap normally runs first. Keep the same precedence for
+  // callers that invoke this command directly, including the short interaction
+  // delay during which acceptCompletion may decline an otherwise selected item.
+  if (acceptCompletion(view)) return true
+  // A selected completion can be temporarily unaccepted during CodeMirror's
+  // interaction delay. Keep Enter with the popup until it can be accepted;
+  // otherwise it could finish the iter template and lose the user's choice.
+  if (completionStatus(view.state) === 'active' && selectedCompletion(view.state)) return true
+
+  const session = view.state.field(javaIterTemplateState, false)
+  if (!session
+    || !selectionInsideIterLoop(view.state.selection, session)
+    // Escape is handled by CodeMirror's private snippet state. If it has
+    // already cleared that state, do not let the stale custom session turn a
+    // later ordinary Enter into a template finish.
+    || (!hasNextSnippetField(view.state) && !hasPrevSnippetField(view.state))) return false
+
+  const bodyPosition = session.bodyFrom
+  // snippetState is intentionally private to CodeMirror. clearSnippet removes
+  // its field ranges; the custom state effect below clears the reactive iter
+  // linkage in the same user-visible action without changing the document.
+  clearSnippet(view)
+  view.dispatch({
+    selection: { anchor: bodyPosition },
+    effects: setJavaIterTemplateSession.of(null),
+    scrollIntoView: true,
+  })
+  return true
+}
+
+function matchingLoopEnd(source: string, loopFrom: number): number {
+  const masked = maskJavaCommentsAndLiterals(source)
+  const open = masked.indexOf('{', loopFrom)
+  if (open < 0) return source.length
+  let depth = 0
+  for (let index = open; index < masked.length; index += 1) {
+    if (masked[index] === '{') depth += 1
+    else if (masked[index] === '}' && --depth === 0) return index + 1
+  }
+  return source.length
+}
+
+function registerJavaIterTemplateSession(view: EditorView, from: number): void {
+  const state = view.state
+  const targetSelection = state.selection.main
+  if (state.selection.ranges.length !== 1 || targetSelection.empty) return
+  const source = state.doc.toString()
+  const loopFrom = source.indexOf('for (', from)
+  if (loopFrom < 0) return
+  const lineEnd = source.indexOf('\n', loopFrom)
+  const header = source.slice(loopFrom, lineEnd < 0 ? source.length : lineEnd)
+  const headerMatch = /^for \((.+?)\s+[A-Za-z_$][\w$]*\s*:\s*(.+?)\)\s*\{/.exec(header)
+  if (!headerMatch) return
+  const parsedTypeFrom = loopFrom + 'for ('.length
+  const parsedTypeTo = parsedTypeFrom + headerMatch[1].length
+  const bodyLineStart = source.indexOf('\n', loopFrom) + 1
+  const bodyIndent = /^[\t ]*/.exec(source.slice(bodyLineStart))?.[0].length ?? 0
+  const effects: StateEffect<unknown>[] = [setJavaIterTemplateSession.of({
+    targetFrom: targetSelection.from,
+    targetTo: targetSelection.to,
+    typeFrom: parsedTypeFrom,
+    typeTo: parsedTypeTo,
+    loopFrom,
+    loopTo: matchingLoopEnd(source, loopFrom),
+    bodyFrom: bodyLineStart + bodyIndent,
+    bodyTo: bodyLineStart + bodyIndent,
+    lastAutomaticType: source.slice(parsedTypeFrom, parsedTypeTo),
+    automaticType: true,
+  })]
+  if (state.field(javaIterTemplateState, false) === undefined) {
+    effects.unshift(StateEffect.appendConfig.of(javaIterTemplateExtension))
+  }
+  view.dispatch({ effects })
+}
+
 function followingJavaSemicolon(source: string, position: number): boolean {
   return /^[\t ]*;/.test(source.slice(position))
 }
 
 function applyJavaPrintTemplate(
   view: EditorView,
-  kind: JavaPrintTemplateKind,
+  kind: JavaTemplateKind,
   from: number,
   to: number,
   completion: Completion | null,
 ): void {
   const source = view.state.doc.toString()
+  if (kind === 'iter') {
+    const candidate = javaIterableCandidates(source, to)[0] ?? null
+    snippet(javaIterTemplateBody(candidate))(view, completion, from, to)
+    registerJavaIterTemplateSession(view, from)
+    return
+  }
   const variable = javaPrintVariable(source, to)
   const body = javaPrintTemplateBody(kind, variable, !followingJavaSemicolon(source, to))
   snippet(body)(view, completion, from, to)
 }
 
-function javaPrintCompletion(kind: JavaPrintTemplateKind): Completion {
+function javaPrintCompletion(kind: JavaPrintTemplateKind | 'mod'): Completion {
+  if (kind === 'mod') {
+    return {
+      label: kind,
+      type: 'snippet',
+      detail: 'Declares the common modulo constant',
+      apply: (view, completion, from, to) => applyJavaPrintTemplate(view, kind, from, to, completion),
+    }
+  }
+
   const stream = kind.startsWith('sout') ? 'out' : 'err'
   const detail = kind.endsWith('v')
     ? `Prints a value to System.${stream}`
@@ -284,16 +687,39 @@ function javaPrintCompletion(kind: JavaPrintTemplateKind): Completion {
   }
 }
 
-function javaPrintAbbreviation(source: string, position: number): { kind: JavaPrintTemplateKind, from: number } | null {
+function javaIterCompletion(candidate: JavaIterableCandidate | null, label = 'iter'): Completion {
+  const detail = candidate
+    ? `Loops over ${candidate.name}${candidate.elementType ? ` (${candidate.elementType})` : ''}`
+    : 'Creates an enhanced for loop'
+  return {
+    label,
+    type: 'snippet',
+    detail,
+    apply: (view, completion, from, to) => {
+      snippet(javaIterTemplateBody(candidate))(view, completion, from, to)
+      registerJavaIterTemplateSession(view, from)
+    },
+  }
+}
+
+function javaIterCompletions(source: string, position: number): Completion[] {
+  const candidates = javaIterableCandidates(source, position)
+  if (candidates.length <= 1) {
+    return [javaIterCompletion(candidates[0] ?? null)]
+  }
+  return candidates.map((candidate) => javaIterCompletion(candidate, `iter (${candidate.name})`))
+}
+
+function javaPrintAbbreviation(source: string, position: number): { kind: JavaTemplateKind, from: number } | null {
   const before = source.slice(0, position)
-  const match = /(?:^|[^A-Za-z0-9_$])((?:soutv|serrv|sout|serr))$/.exec(before)
-  if (!match || !isJavaPrintTemplateKind(match[1])) {
+  const match = /(?:^|[^A-Za-z0-9_$])((?:soutv|serrv|sout|serr|mod|iter))$/.exec(before)
+  if (!match || !isJavaTemplateKind(match[1])) {
     return null
   }
   return { kind: match[1], from: position - match[1].length }
 }
 
-/** Expand a Java print live-template abbreviation at the current cursor. */
+/** Expand a Java live-template abbreviation at the current cursor. */
 export function expandJavaPrintTemplate(view: EditorView): boolean {
   const { state } = view
   if (state.selection.ranges.length !== 1 || !state.selection.main.empty) {
@@ -325,6 +751,10 @@ export function expandJavaPrintTemplate(view: EditorView): boolean {
     return false
   }
 
+  if (abbreviation.kind === 'iter' && javaIterableCandidates(source, position).length > 1 && startCompletion(view)) {
+    return true
+  }
+
   applyJavaPrintTemplate(view, abbreviation.kind, abbreviation.from, position, null)
   return true
 }
@@ -347,6 +777,7 @@ const JAVA_COMPLETIONS: Completion[] = [
   javaPrintCompletion('soutv'),
   javaPrintCompletion('serr'),
   javaPrintCompletion('serrv'),
+  javaPrintCompletion('mod'),
   snippetCompletion('new ArrayList<>()', 'ArrayList', 'new ArrayList<>()'),
   snippetCompletion('new HashMap<>()', 'HashMap', 'new HashMap<>()'),
   snippetCompletion('for (int i = 0; i < ...; i++)', 'loop', 'for (int ${i} = 0; ${i} < ${length}; ${i}++) {\n    ${}\n}'),
@@ -450,6 +881,7 @@ const CATALOG: Record<string, MethodSpec[]> = {
 }
 
 const TYPE_GROUPS: Record<string, string[]> = {
+  Collection: ['Collection', 'Iterable'], Iterable: ['Iterable'],
   ArrayList: ['ArrayList', 'List', 'Collection', 'Iterable'],
   LinkedList: ['LinkedList', 'List', 'Deque', 'Queue', 'Collection', 'Iterable'],
   Stack: ['Stack', 'List', 'Collection', 'Iterable'],
@@ -604,28 +1036,122 @@ function normalizeType(raw: string): string {
     .replace(/\.\.\./g, '[]')
 }
 
+function simpleTypeName(raw: string): string {
+  return raw.replace(/\[\]/g, '').split('.').at(-1) ?? raw
+}
+
 function baseType(raw: string): string {
   const normalized = normalizeType(raw).replace(/\[\]/g, '')
   const generic = normalized.indexOf('<')
   return (generic >= 0 ? normalized.slice(0, generic) : normalized).replace(/^\?extends/, '')
 }
 
+function genericArguments(raw: string): string[] {
+  const normalized = normalizeType(raw)
+  const opening = normalized.indexOf('<')
+  if (opening < 0) return []
+  let depth = 0
+  for (let index = opening; index < normalized.length; index += 1) {
+    if (normalized[index] === '<') {
+      depth += 1
+    } else if (normalized[index] === '>') {
+      depth -= 1
+      if (depth === 0) {
+        return splitTopLevel(normalized.slice(opening + 1, index))
+      }
+    }
+  }
+  return []
+}
+
+function isIterableType(raw: string): boolean {
+  const base = simpleTypeName(baseType(raw))
+  return base === 'Iterable' || (TYPE_GROUPS[base] ?? []).includes('Iterable')
+}
+
+function cleanElementType(raw: string): string | null {
+  const normalized = normalizeType(raw)
+  if (!normalized || normalized === '?') return 'Object'
+  if (normalized.startsWith('?extends')) return normalized.slice('?extends'.length) || 'Object'
+  if (normalized.startsWith('?super')) return 'Object'
+  return normalized
+    .replace(/\?extends(?=[A-Za-z_$])/g, '? extends ')
+    .replace(/\?super(?=[A-Za-z_$])/g, '? super ')
+}
+
+function literalElementType(raw: string): string | null {
+  const value = raw.trim()
+  if (/^"(?:[^"\\]|\\.)*"$/.test(value)) return 'String'
+  if (/^'(?:[^'\\]|\\.)*'$/.test(value)) return 'Character'
+  if (/^(?:true|false)$/.test(value)) return 'Boolean'
+  if (/^[+-]?\d+[lL]$/.test(value)) return 'Long'
+  if (/^[+-]?(?:\d+\.\d*[dD]?|\d+[dD])$/.test(value)) return 'Double'
+  if (/^[+-]?\d+$/.test(value)) return 'Integer'
+  return null
+}
+
+function initializerElementType(initializer: string): string | null {
+  const value = initializer.trim()
+  const array = /^new\s+([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*(?:\[[^\]]*\]\s*)+/.exec(value)
+  if (array) {
+    const dimensions = array[0].match(/\[[^\]]*\]/g)?.length ?? 1
+    return `${normalizeType(array[1])}${'[]'.repeat(Math.max(0, dimensions - 1))}`
+  }
+
+  const created = /\bnew\s+([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*<[^;{}()]*>)?)/.exec(value)
+  if (created) {
+    const typeArguments = genericArguments(created[1])
+    if (typeArguments.length > 0) return cleanElementType(typeArguments[0])
+  }
+
+  const factory = /\b(?:Arrays\s*\.\s*asList|List\s*\.\s*of|Set\s*\.\s*of|Collections\s*\.\s*singletonList)\s*\(([^)]*)\)/.exec(value)
+  if (factory) {
+    const first = splitTopLevel(factory[1])[0]
+    if (first) return literalElementType(first) ?? initializerElementType(first)
+  }
+  return literalElementType(value)
+}
+
+function inferElementType(typeText: string, initializer: string | undefined): string | undefined {
+  const normalized = normalizeType(typeText)
+  let element: string | null = null
+  const array = normalized.indexOf('[]')
+  if (array >= 0) {
+    // Remove one array dimension.  A two-dimensional array therefore iterates
+    // over rows (`int[]`), just as Java's enhanced-for loop does.
+    element = normalized.slice(0, array) + normalized.slice(array + 2)
+  } else if (normalized !== 'var' && isIterableType(normalized)) {
+    element = genericArguments(normalized)[0] ?? null
+  }
+  // An initializer can supply the type for `var`, but Java's declared type is
+  // authoritative for explicit raw or unrelated declarations.
+  if (!element && initializer && normalized === 'var') element = initializerElementType(initializer)
+  const cleaned = element ? cleanElementType(element) : null
+  return cleaned || undefined
+}
+
 function inferBases(typeText: string, initializer: string | undefined): string[] {
   const normalized = normalizeType(typeText)
   const declared = baseType(normalized)
   const bases = new Set<string>()
+  const addBase = (base: string): void => {
+    if (!base) return
+    bases.add(base)
+    const simple = simpleTypeName(base)
+    if (simple && simple !== base) bases.add(simple)
+  }
   if (declared && declared !== 'var') {
-    bases.add(declared)
+    addBase(declared)
   }
   if (initializer) {
-    const newMatch = /\bnew\s+([A-Za-z_$][\w$]*(?:\s*<[^;{}()]*>)?)/.exec(initializer)
+    const newMatch = /\bnew\s+([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*<[^;{}()]*>)?)/.exec(initializer)
     if (newMatch) {
-      bases.add(baseType(newMatch[1]))
+      addBase(baseType(newMatch[1]))
     }
     if (/^\s*"(?:[^"\\]|\\.)*"/.test(initializer) || /^\s*'/.test(initializer)) bases.add('String')
-    if (/\b(?:Arrays\s*\.\s*asList|List\s*\.\s*of)\s*\(/.test(initializer)) bases.add('List')
-    if (/\b(?:Set\s*\.\s*of)\s*\(/.test(initializer)) bases.add('Set')
-    if (/\bMap\s*\.\s*of(?:Entries)?\s*\(/.test(initializer)) bases.add('Map')
+    if (/\b(?:Arrays\s*\.\s*asList|List\s*\.\s*of|Collections\s*\.\s*(?:emptyList|singletonList))\s*\(/.test(initializer)) addBase('List')
+    if (/\b(?:Set\s*\.\s*of)\s*\(/.test(initializer)) addBase('Set')
+    if (/\bMap\s*\.\s*of(?:Entries)?\s*\(/.test(initializer)) addBase('Map')
     if (/^\s*new\s+[A-Za-z_$][\w$]*\s*\[/.test(initializer)) bases.add('array')
   }
   if (normalized.endsWith('[]')) bases.add('array')
@@ -640,44 +1166,9 @@ function matchingBraces(source: string): { openToClose: Map<number, number>; clo
   const openToClose = new Map<number, number>()
   const closeToOpen = new Map<number, number>()
   const stack: number[] = []
-  let quote = ''
-  let escaped = false
-  let lineComment = false
-  let blockComment = false
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i]
-    const next = source[i + 1]
-    if (lineComment) {
-      if (char === '\n') lineComment = false
-      continue
-    }
-    if (blockComment) {
-      if (char === '*' && next === '/') {
-        blockComment = false
-        i += 1
-      }
-      continue
-    }
-    if (quote) {
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === quote) quote = ''
-      continue
-    }
-    if (char === '/' && next === '/') {
-      lineComment = true
-      i += 1
-      continue
-    }
-    if (char === '/' && next === '*') {
-      blockComment = true
-      i += 1
-      continue
-    }
-    if (char === '"' || char === '\'') {
-      quote = char
-      continue
-    }
+  const masked = maskJavaCommentsAndLiterals(source)
+  for (let i = 0; i < masked.length; i += 1) {
+    const char = masked[i]
     if (char === '{') stack.push(i)
     if (char === '}') {
       const open = stack.pop()
@@ -747,10 +1238,11 @@ function parameterNameAndType(parameter: string): { name: string; type: string }
     .replace(/@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*/g, '')
     .replace(/\bfinal\s+/g, '')
     .trim()
-  const match = /^(.*?)\s+([A-Za-z_$][\w$]*)$/.exec(clean)
+  const match = /^(.*?)\s+([A-Za-z_$][\w$]*)(\s*(?:\[\s*\])*)$/.exec(clean)
   if (!match) return null
+  if (clean.includes(':')) return null
   if (/^(?:if|while|switch|catch|for)$/.test(match[1].trim())) return null
-  return { type: match[1].trim(), name: match[2] }
+  return { type: `${match[1].trim()}${match[3] ?? ''}`, name: match[2] }
 }
 
 function extractParameters(source: string, position: number, braces: ReturnType<typeof matchingBraces>): JavaSymbol[] {
@@ -766,9 +1258,12 @@ function extractParameters(source: string, position: number, braces: ReturnType<
       const parsed = parameterNameAndType(parameter)
       if (!parsed) continue
       const nameStart = match.index + match[0].indexOf(parsed.name)
+      const elementType = inferElementType(parsed.type, undefined)
       result.push({
         name: parsed.name,
         bases: inferBases(parsed.type, undefined),
+        declaredType: normalizeType(parsed.type),
+        ...(elementType ? { elementType } : {}),
         kind: 'parameter',
         declaredAt: nameStart,
         scopeStart: openBrace + 1,
@@ -783,7 +1278,7 @@ function extractDeclarations(source: string, position: number, braces: ReturnTyp
   const result: JavaSymbol[] = []
   // A declaration starts after a statement/block boundary.  Keeping the
   // boundary in the expression avoids treating method calls as declarations.
-  const declaration = /(?:^|[;{}])\s*(?:(?:public|private|protected|static|final|volatile|transient|synchronized)\s+)*([A-Za-z_$][\w$]*(?:\s*<[^;{}=]*?>)?\s*(?:\[\s*\])*)\s+([^;{}]+);/gm
+  const declaration = /(?:^|[;{}])\s*(?:(?:public|private|protected|static|final|volatile|transient|synchronized)\s+)*([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*<[^;{}=]*?>)?\s*(?:\[\s*\])*)\s+([^;{}]+);/gm
   // Primitive names are legal declaration types even though Java classifies
   // them as keywords.  Only these statement/control-flow words invalidate the
   // first token of a declaration match.
@@ -798,7 +1293,7 @@ function extractDeclarations(source: string, position: number, braces: ReturnTyp
     const declarationStart = match.index + Math.max(0, boundaryOffset)
     const scope = enclosingScope(declarationStart, braces)
     for (const declarator of declarators) {
-      const variable = /^([A-Za-z_$][\w$]*)(?:\s*=\s*([\s\S]*))?$/.exec(declarator)
+      const variable = /^([A-Za-z_$][\w$]*)(\s*(?:\[\s*\])*)?(?:\s*=\s*([\s\S]*))?$/.exec(declarator)
       if (!variable) continue
       const declaredAt = match.index + match[0].indexOf(variable[1], boundaryOffset)
       const isField = scope.depth <= 1
@@ -806,9 +1301,13 @@ function extractDeclarations(source: string, position: number, braces: ReturnTyp
       // written before the field declaration. Local variables still obey the
       // normal declaration-before-use rule.
       if (declaredAt > position && !isField) continue
+      const variableType = `${typeText}${variable[2] ?? ''}`
+      const elementType = inferElementType(variableType, variable[3])
       result.push({
         name: variable[1],
-        bases: inferBases(typeText, variable[2]),
+        bases: inferBases(variableType, variable[3]),
+        declaredType: normalizeType(variableType),
+        ...(elementType ? { elementType } : {}),
         kind: isField ? 'field' : 'local',
         declaredAt,
         scopeStart: scope.start,
@@ -818,13 +1317,30 @@ function extractDeclarations(source: string, position: number, braces: ReturnTyp
   }
   // `for (int i = 0; ...` has a parenthesis boundary rather than a statement
   // boundary.  It is common enough in LeetCode solutions to handle separately.
-  const forDeclaration = /\bfor\s*\(\s*(?:final\s+)?([A-Za-z_$][\w$]*(?:\s*<[^;(){}]*?>)?\s*(?:\[\s*\])?)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*)/g
+  const forDeclaration = /\bfor\s*\(\s*(?:final\s+)?([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*<[^;(){}]*?>)?\s*(?:\[\s*\])*)\s+([A-Za-z_$][\w$]*)(\s*(?:\[\s*\])*)\s*=\s*([^;]*)/g
   while ((match = forDeclaration.exec(source))) {
     const declaredAt = match.index + match[0].lastIndexOf(match[2])
     if (declaredAt > position) continue
     const scope = enclosingScope(match.index, braces)
+    const variableType = `${match[1]}${match[3] ?? ''}`
+    const elementType = inferElementType(variableType, match[4])
     result.push({
-      name: match[2], bases: inferBases(match[1], match[3]), kind: 'local', declaredAt,
+      name: match[2], bases: inferBases(variableType, match[4]), declaredType: normalizeType(variableType), ...(elementType ? { elementType } : {}), kind: 'local', declaredAt,
+      scopeStart: scope.start, scopeEnd: scope.end,
+    })
+  }
+  const enhancedForDeclaration = /\bfor\s*\(\s*(?:final\s+)?([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*<[^;(){}]*?>)?\s*(?:\[\s*\])?)\s+([A-Za-z_$][\w$]*)\s*:\s*[^)]*\)/g
+  while ((match = enhancedForDeclaration.exec(source))) {
+    const declaredAt = match.index + match[0].lastIndexOf(match[2])
+    if (declaredAt > position) continue
+    const bodyOpen = source.indexOf('{', match.index + match[0].length)
+    const bodyClose = bodyOpen >= 0 ? braces.openToClose.get(bodyOpen) : undefined
+    const scope = bodyOpen >= 0 && bodyClose !== undefined
+      ? { start: bodyOpen + 1, end: bodyClose }
+      : enclosingScope(match.index, braces)
+    const elementType = inferElementType(match[1], undefined)
+    result.push({
+      name: match[2], bases: inferBases(match[1], undefined), declaredType: normalizeType(match[1]), ...(elementType ? { elementType } : {}), kind: 'local', declaredAt,
       scopeStart: scope.start, scopeEnd: scope.end,
     })
   }
@@ -1347,7 +1863,12 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
   if (!word || (word.from === word.to && !context.explicit)) return null
   return {
     from: word.from,
-    options: uniqueOptions([...symbolCompletions(symbols), ...methodCompletions(methods), ...JAVA_COMPLETIONS]),
+    options: uniqueOptions([
+      ...symbolCompletions(symbols),
+      ...methodCompletions(methods),
+      ...javaIterCompletions(source, position),
+      ...JAVA_COMPLETIONS,
+    ]),
     validFor: /^[\w$]*$/,
   }
 }

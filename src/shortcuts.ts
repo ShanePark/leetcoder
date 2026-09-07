@@ -63,6 +63,7 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
       { id: 'introduce-variable', bindings: ['Mod-Alt-v'], description: 'Introduce variable' },
       { id: 'extract-method', bindings: ['Mod-Alt-m'], description: 'Extract method' },
       { id: 'expand-template', bindings: ['Tab'], description: 'Expand live template / next template field' },
+      { id: 'finish-template', bindings: ['Enter'], description: 'Finish live template' },
     ],
   },
   {

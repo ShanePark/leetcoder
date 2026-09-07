@@ -69,6 +69,8 @@ import {
   javaCompletions,
   javaIdentifierAt,
   expandJavaPrintTemplate,
+  finishJavaIterTemplate,
+  javaIterTemplateExtension,
   resolveJavaDefinition,
 } from './completions'
 import type { ClipboardBridge } from './clipboard'
@@ -1851,6 +1853,7 @@ export class JavaEditor {
     const settingsShortcuts = bindings('open-settings')
     const introduceVariableShortcuts = bindings('introduce-variable')
     const extractMethodShortcuts = bindings('extract-method')
+    const finishTemplateShortcuts = bindings('finish-template')
     const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
@@ -2014,6 +2017,7 @@ export class JavaEditor {
         leetcoderTheme,
         syntaxHighlighting(leetcoderHighlight),
         java(),
+        javaIterTemplateExtension,
         javaAutoImports,
         javaImportPruning,
         javaFolding,
@@ -2080,6 +2084,7 @@ export class JavaEditor {
         ]),
         Prec.high(keymap.of([
           ...commandBindings(bindings('expand-template'), expandJavaTemplateOnTab, false),
+          ...commandBindings(finishTemplateShortcuts, finishJavaIterTemplate, false),
           // Run chords intentionally use Ctrl on both macOS and Linux.
           ...commandBindings(saveShortcuts, save),
           ...commandBindings(runTestAtCursorShortcuts, runTestAtCursor),
