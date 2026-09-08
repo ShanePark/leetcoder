@@ -332,6 +332,64 @@ fn commit_only_preserves_unrelated_staged_changes() {
 }
 
 #[test]
+fn commit_batches_existing_literal_paths_and_keeps_deleted_paths_isolated() {
+    let directory = fixture();
+    let root = directory.path().to_str().unwrap();
+    let existing = "existing [*].txt";
+    let deleted = "deleted [x].txt";
+    let renamed = "renamed [a]*.txt";
+    let unrelated = "unrelated staged.txt";
+
+    fs::write(directory.path().join(existing), "before\n").expect("existing file");
+    fs::write(directory.path().join(deleted), "before\n").expect("deleted file");
+    run_fixture_git(directory.path(), &["add", "--all"]);
+    run_fixture_git(directory.path(), &["commit", "--quiet", "-m", "baseline"]);
+
+    fs::rename(
+        directory.path().join("tracked.txt"),
+        directory.path().join(renamed),
+    )
+    .expect("rename tracked file");
+    run_fixture_git(directory.path(), &["add", "--all"]);
+    fs::write(directory.path().join(existing), "after\n").expect("modify existing file");
+    fs::remove_file(directory.path().join(deleted)).expect("delete tracked file");
+    fs::write(directory.path().join(unrelated), "keep staged\n").expect("unrelated file");
+    run_fixture_git(directory.path(), &["add", "--", unrelated]);
+
+    let result = commit(
+        root,
+        vec![
+            renamed.to_string(),
+            deleted.to_string(),
+            existing.to_string(),
+        ],
+        "Batch literal paths".to_string(),
+    )
+    .expect("selected changes should commit");
+
+    assert_eq!(
+        result.paths,
+        vec![
+            renamed.to_string(),
+            deleted.to_string(),
+            existing.to_string()
+        ]
+    );
+    assert!(!directory.path().join("tracked.txt").exists());
+    assert!(directory.path().join(renamed).exists());
+    assert!(!directory.path().join(deleted).exists());
+    assert_eq!(
+        fs::read_to_string(directory.path().join(existing)).unwrap(),
+        "after\n"
+    );
+
+    let status = list_changes(root).expect("status after commit");
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].path, unrelated);
+    assert_eq!(status[0].status, "A");
+}
+
+#[test]
 fn rejects_parent_path_before_running_mutating_commands() {
     let directory = fixture();
     let error = commit(

@@ -12,8 +12,7 @@ import {
   type JavaSymbol,
 } from './completions/model'
 import {
-  collectJavaMethods,
-  collectJavaSymbols,
+  analyzeJavaSource,
 } from './completions/source'
 import {
   javaIterCompletions,
@@ -498,8 +497,8 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
   const source = context.state.doc.toString()
   const position = context.pos
   const dot = findDotContext(source, position)
-  const symbols = collectJavaSymbols(source, position)
-  const methods = collectJavaMethods(source)
+  const analysis = analyzeJavaSource(source, position)
+  const { symbols, methods } = analysis
   if (dot) {
     if (dot.receiver === 'this') {
       return {
@@ -522,7 +521,7 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
     options: uniqueOptions([
       ...symbolCompletions(symbols),
       ...methodCompletions(methods),
-      ...javaIterCompletions(source, position),
+      ...javaIterCompletions(source, position, analysis),
       ...JAVA_COMPLETIONS,
     ]),
     validFor: /^[\w$]*$/,

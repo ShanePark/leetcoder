@@ -3,7 +3,14 @@ use std::path::{Component, Path, PathBuf};
 
 use super::process::{git_pathspec, require_success, run_git, utf8_stdout};
 use super::status::{git_path_string, list_changes_at_root};
+use crate::models::GitFileChange;
 use crate::security::{canonical_project_root, is_within, validate_git_relative_path};
+
+pub(crate) struct ChangedPathSelection {
+    pub(crate) selected_paths: Vec<String>,
+    pub(crate) command_paths: Vec<String>,
+    pub(crate) changes: Vec<GitFileChange>,
+}
 
 /// Validate a Git path before any command or filesystem mutation.  In
 /// addition to the existing canonical-boundary check, reject symlinked path
@@ -210,7 +217,7 @@ pub(crate) fn canonical_git_root(project_root: &str) -> Result<PathBuf, String> 
 pub(crate) fn changed_path_selection(
     root: &Path,
     requested_paths: Vec<String>,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> Result<ChangedPathSelection, String> {
     let mut selected_paths = Vec::new();
     let mut seen = HashSet::new();
     for requested in requested_paths {
@@ -252,5 +259,9 @@ pub(crate) fn changed_path_selection(
             command_paths.push(original_path.to_string());
         }
     }
-    Ok((selected_paths, command_paths))
+    Ok(ChangedPathSelection {
+        selected_paths,
+        command_paths,
+        changes,
+    })
 }

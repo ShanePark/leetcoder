@@ -12,7 +12,9 @@ pub(crate) fn commit(
     message: String,
 ) -> Result<GitCommitResult, String> {
     let root = canonical_git_root(project_root)?;
-    let (selected_paths, paths) = changed_path_selection(&root, requested_paths)?;
+    let selection = changed_path_selection(&root, requested_paths)?;
+    let selected_paths = selection.selected_paths;
+    let paths = selection.command_paths;
     let message = message.trim().to_string();
     if message.is_empty() {
         return Err("Commit message must not be empty".to_string());
@@ -51,20 +53,40 @@ pub(crate) fn commit(
     })
 }
 pub(crate) fn stage_paths(root: &Path, paths: &[String]) -> Result<(), String> {
+    let mut existing_paths = Vec::with_capacity(paths.len());
+    let mut missing_paths = Vec::new();
     for path in paths {
         let missing = matches!(
             std::fs::symlink_metadata(root.join(path)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound
         );
-        let mut args = vec!["add".to_string()];
         if missing {
-            // A deleted source path is still present in the index, but Git's
-            // regular add pathspec cannot match it after it disappears from
-            // the worktree. `-u` stages that tracked deletion explicitly.
-            args.push("-u".to_string());
+            missing_paths.push(path);
+        } else {
+            existing_paths.push(path);
         }
-        args.push("--".to_string());
-        args.push(git_pathspec(path));
+    }
+
+    // One Git process can stage all paths that still exist in the worktree.
+    // This matters for multi-file commits because process startup dominates
+    // the tiny per-path `git add` work.
+    if !existing_paths.is_empty() {
+        let mut args = vec!["add".to_string(), "--".to_string()];
+        args.extend(existing_paths.iter().map(|path| git_pathspec(path)));
+        require_success("Git stage", run_git(root, args.iter())?)?;
+    }
+
+    // Deleted paths need `git add -u`, and an already-staged rename includes
+    // an original path that no longer matches the worktree. Keep these calls
+    // per path so one unmatched rename source cannot prevent unrelated
+    // deletions from being staged.
+    for path in missing_paths {
+        let args = [
+            "add".to_string(),
+            "-u".to_string(),
+            "--".to_string(),
+            git_pathspec(path),
+        ];
         let output = run_git(root, args.iter())?;
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
@@ -72,7 +94,7 @@ pub(crate) fn stage_paths(root: &Path, paths: &[String]) -> Result<(), String> {
             // absent from the index, so `git add -u` has nothing to match.
             // The rename's deletion is already staged and remains covered by
             // the explicit commit pathspec below.
-            if !(missing && detail.contains("pathspec") && detail.contains("did not match")) {
+            if !(detail.contains("pathspec") && detail.contains("did not match")) {
                 return Err(command_error("Git stage", &output));
             }
         }

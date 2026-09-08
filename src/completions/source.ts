@@ -8,6 +8,23 @@ import {
   type JavaSymbol,
 } from './model'
 
+/**
+ * The source-level facts needed by one completion or definition lookup.
+ *
+ * Keeping the masked source alongside the derived symbols and methods lets a
+ * caller that needs several views of one document pay for the comment/literal
+ * scan only once. The type is intentionally kept out of the public
+ * `src/completions.ts` facade; it is an internal coordination contract.
+ */
+export interface JavaSourceAnalysis {
+  maskedSource: string
+  symbols: JavaSymbol[]
+  methods: JavaMethod[]
+}
+
+/** The subset needed when generating iterable completion candidates. */
+export type JavaSymbolAnalysis = Pick<JavaSourceAnalysis, 'maskedSource' | 'symbols'>
+
 function visibleJavaSymbols(symbols: JavaSymbol[], position: number): JavaSymbol[] {
   const visible = symbols.filter((symbol) => symbol.scopeStart <= position
     && position <= symbol.scopeEnd
@@ -95,9 +112,21 @@ function isIterableSymbol(symbol: JavaSymbol): boolean {
 }
 
 /** Return iterable values visible at a Java cursor, with loop defaults inferred. */
-export function javaIterableCandidates(source: string, position = source.length): JavaIterableCandidate[] {
-  const symbols = collectJavaSymbols(source, position)
-  const masked = maskJavaCommentsAndLiterals(source)
+export function javaIterableCandidates(
+  source: string,
+  position = source.length,
+): JavaIterableCandidate[] {
+  const maskedSource = maskJavaCommentsAndLiterals(source)
+  const symbols = collectJavaSymbolsFromMasked(source, position, maskedSource)
+  return javaIterableCandidatesFromAnalysis(source, position, { maskedSource, symbols })
+}
+
+export function javaIterableCandidatesFromAnalysis(
+  source: string,
+  position: number,
+  analysis: JavaSymbolAnalysis,
+): JavaIterableCandidate[] {
+  const { maskedSource: masked, symbols } = analysis
   const codeSymbols = symbols.filter((symbol) => masked.slice(symbol.declaredAt, symbol.declaredAt + symbol.name.length)
     === source.slice(symbol.declaredAt, symbol.declaredAt + symbol.name.length))
   return visibleJavaSymbols(codeSymbols, position)
@@ -248,11 +277,10 @@ function inferBases(typeText: string, initializer: string | undefined): string[]
   return [...expanded]
 }
 
-function matchingBraces(source: string): { openToClose: Map<number, number>; closeToOpen: Map<number, number> } {
+function matchingBraces(masked: string): { openToClose: Map<number, number>; closeToOpen: Map<number, number> } {
   const openToClose = new Map<number, number>()
   const closeToOpen = new Map<number, number>()
   const stack: number[] = []
-  const masked = maskJavaCommentsAndLiterals(source)
   for (let i = 0; i < masked.length; i += 1) {
     const char = masked[i]
     if (char === '{') stack.push(i)
@@ -433,9 +461,23 @@ function extractDeclarations(source: string, position: number, braces: ReturnTyp
   return result
 }
 
-export function collectJavaSymbols(source: string, position = source.length): JavaSymbol[] {
-  const braces = matchingBraces(source)
+function collectJavaSymbolsFromMasked(source: string, position: number, masked: string): JavaSymbol[] {
+  const braces = matchingBraces(masked)
   return [...extractDeclarations(source, position, braces), ...extractParameters(source, position, braces)]
+}
+
+export function analyzeJavaSource(source: string, position = source.length): JavaSourceAnalysis {
+  const maskedSource = maskJavaCommentsAndLiterals(source)
+  return {
+    maskedSource,
+    symbols: collectJavaSymbolsFromMasked(source, position, maskedSource),
+    methods: collectJavaMethodsFromMasked(source, maskedSource),
+  }
+}
+
+export function collectJavaSymbols(source: string, position = source.length): JavaSymbol[] {
+  const maskedSource = maskJavaCommentsAndLiterals(source)
+  return collectJavaSymbolsFromMasked(source, position, maskedSource)
 }
 
 /**
@@ -557,8 +599,7 @@ function methodHasReturnType(match: RegExpExecArray, nameStartInMatch: number): 
   return normalized.length > 0
 }
 
-export function collectJavaMethods(source: string): JavaMethod[] {
-  const maskedSource = maskJavaCommentsAndLiterals(source)
+function collectJavaMethodsFromMasked(source: string, maskedSource: string): JavaMethod[] {
   const classNames = javaClassNames(maskedSource)
   const result: JavaMethod[] = []
   const method = /(?:^|[;{}])\s*(?:(?:@(?:[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*(?:\([^)]*\))?\s*)+)?(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>{}]+>\s*)?(?:(?:[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)(?:\s*<[^>{}]*>)?\s*(?:\[\s*\])*\s+)?([A-Za-z_$][\w$]*)\s*\(([^(){}]*)\)\s*(?:throws\s+[^{}]+)?\{/gm
@@ -579,9 +620,13 @@ export function collectJavaMethods(source: string): JavaMethod[] {
   return result
 }
 
-/** Return the Java identifier under a source position, if it is code. */
-export function javaIdentifierAt(source: string, position: number): JavaIdentifier | null {
+export function collectJavaMethods(source: string): JavaMethod[] {
   const maskedSource = maskJavaCommentsAndLiterals(source)
+  return collectJavaMethodsFromMasked(source, maskedSource)
+}
+
+/** Return the Java identifier under a source position, if it is code. */
+function javaIdentifierAtMasked(source: string, maskedSource: string, position: number): JavaIdentifier | null {
   let cursor = Math.max(0, Math.min(Math.trunc(position), source.length))
   if (cursor === source.length || !/[A-Za-z0-9_$]/.test(maskedSource[cursor] ?? '')) {
     cursor -= 1
@@ -598,6 +643,10 @@ export function javaIdentifierAt(source: string, position: number): JavaIdentifi
     return null
   }
   return { name, from, to }
+}
+
+export function javaIdentifierAt(source: string, position: number): JavaIdentifier | null {
+  return javaIdentifierAtMasked(source, maskJavaCommentsAndLiterals(source), position)
 }
 
 function previousIdentifier(maskedSource: string, from: number): string | null {
@@ -714,9 +763,10 @@ function callArgumentCount(maskedSource: string, openParen: number): number | nu
  * Only unqualified/`this.` calls are considered.
  */
 export function resolveJavaDefinition(source: string, position: number): JavaDefinition | null {
-  const identifier = javaIdentifierAt(source, position)
+  const maskedSource = maskJavaCommentsAndLiterals(source)
+  const identifier = javaIdentifierAtMasked(source, maskedSource, position)
   if (!identifier) return null
-  const methods = collectJavaMethods(source)
+  const methods = collectJavaMethodsFromMasked(source, maskedSource)
   const declaration = methods.find((method) => identifier.from === method.nameStart && identifier.to === method.nameEnd)
   if (declaration) {
     return {
@@ -728,7 +778,6 @@ export function resolveJavaDefinition(source: string, position: number): JavaDef
     }
   }
 
-  const maskedSource = maskJavaCommentsAndLiterals(source)
   const openParen = callOpenParen(maskedSource, identifier.to)
   if (openParen === null) return null
   if (previousIdentifier(maskedSource, identifier.from) === 'new') return null

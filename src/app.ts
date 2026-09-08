@@ -20,7 +20,6 @@ import {
 } from './editor'
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
-import { sanitizeProblemHtml } from './sanitize'
 import {
   SHORTCUT_SECTIONS,
   formatShortcut,
@@ -67,21 +66,22 @@ import {
   defaultGitCommitMessage,
   gitFileName,
   gitResultToastMessage,
-  gitStatusGlyph,
   isGitNewFile,
   normalizeGitDiff,
   normalizeGitStatus,
-  normalizeGitStatusLabel,
-  parseUnifiedDiffLines,
 } from './app/git-helpers'
+import { findIndexedProblemFile, indexProblemFiles } from './app/file-index'
+import {
+  renderGitPanel as renderGitPanelView,
+  selectedGitFiles,
+  updateGitCommitControls as updateGitCommitControlsView,
+} from './app/git-view'
 import {
   discardGitChangesWarningMessage,
   findFileAfterDuplicate,
   findFileAfterRename,
   findRestoredFileAfterGitRename,
   findTodayProblemFile,
-  filterProblemFiles,
-  filterProblemFilesByGroup,
   joinFilePath,
   fileMutationResultPath,
   normalizeJavaFileName,
@@ -136,6 +136,15 @@ import {
 } from './app/layout'
 import { renderShellView } from './app/shell-view'
 import { renderTestResults, TEST_RUN_ROOT_KEY } from './app/results-view'
+import {
+  FILE_GROUPS,
+  OTHER_GROUP,
+  renderFilesView,
+} from './app/files-view'
+import {
+  createDailyProblemView,
+  type DailyProblemViewRenderer,
+} from './app/daily-view'
 import type {
   AppOptions,
   AppState,
@@ -167,17 +176,6 @@ const GIT_CONTEXT_MENU_HEIGHT = 76
 const SAVED_FLASH_MS = 1500
 const TOAST_DISMISS_MS = 3000
 const MAX_VISIBLE_TOASTS = 3
-
-const FILE_GROUPS: Array<{ key: ProblemFileEntry['packageSegment']; label: string }> = [
-  { key: 'easy', label: 'Easy' },
-  { key: 'medium', label: 'Medium' },
-  { key: 'xhard', label: 'Hard' },
-]
-/** Files outside the difficulty packages; shown only when the group is non-empty. */
-const OTHER_GROUP: { key: ProblemFileEntry['packageSegment']; label: string } = {
-  key: 'other',
-  label: 'Other',
-}
 
 /** The desktop application's single-window state and DOM orchestration. */
 export class LeetcoderApp {
@@ -248,6 +246,7 @@ export class LeetcoderApp {
   private editor: JavaEditor
   private readonly autosave: AutosaveCoordinator
   private readonly liveDiagnostics: LiveDiagnosticsScheduler
+  private readonly dailyProblemView: DailyProblemViewRenderer
   private suppressEditorChange = false
   private repositoryGeneration = 0
   private refreshRequestId = 0
@@ -300,8 +299,6 @@ export class LeetcoderApp {
   private renderedFileTabsActiveId: number | null = null
   private renameTargetFile: ProblemFileEntry | null = null
   private errorToastElement: HTMLElement | null = null
-  private sanitizedDescriptionSource: string | null = null
-  private sanitizedDescriptionElement: HTMLElement | null = null
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     accordionGroupKeys('easy', true),
   )
@@ -687,6 +684,47 @@ export class LeetcoderApp {
     this.dailyDescriptionHeight = readDailyDescriptionHeight(this.storage)
     this.dailyDescriptionOpen = this.storage?.getItem(DAILY_DESCRIPTION_KEY) === 'open'
     this.renderShell()
+    this.dailyProblemView = createDailyProblemView(
+      {
+        header: this.element<HTMLElement>('#daily-header'),
+        description: this.element<HTMLElement>('#daily-description'),
+        resizeHandle: this.element<HTMLElement>('#daily-description-resize-handle'),
+      },
+      {
+        onLookupInput: (value) => {
+          this.problemNumberDraft = value
+        },
+        onLookupSubmit: (value) => {
+          void this.loadProblemByNumber(value)
+        },
+        onRetry: () => {
+          if (this.lastProblemRequest === 'manual') {
+            void this.loadProblemByNumber(this.problemNumberDraft ?? '')
+          } else {
+            void this.loadDailyProblem(true)
+          }
+        },
+        onBackToToday: () => {
+          this.problemNumberDraft = null
+          this.state.problemSelection = 'daily'
+          this.state.dailyProblemDateKey = null
+          void this.loadDailyProblem(true)
+        },
+        onRefresh: () => this.refreshSelectedProblem(),
+        onToggleDescription: () => {
+          this.dailyDescriptionOpen = !this.dailyDescriptionOpen
+          this.storage?.setItem(DAILY_DESCRIPTION_KEY, this.dailyDescriptionOpen ? 'open' : 'closed')
+          this.renderDailyProblem()
+        },
+        onOpenFile: (file) => {
+          void this.openFile(file)
+        },
+        onCreateFile: () => {
+          void this.createFileForToday()
+        },
+        onApplyDescriptionHeight: () => this.applyDailyDescriptionHeight(),
+      },
+    )
     this.updateController = createUpdateController(
       {
         checkForUpdate: () => this.backend.checkForUpdate(),
@@ -1414,7 +1452,8 @@ export class LeetcoderApp {
       if (!this.isCurrentRefresh(repoPath, repositoryGeneration, requestId)) {
         return false
       }
-      const missingTabs = this.state.openTabs.filter((tab) => !files.some((file) => sameFilePath(file.path, tab.path)))
+      const filesByPath = indexProblemFiles(files)
+      const missingTabs = this.state.openTabs.filter((tab) => !findIndexedProblemFile(filesByPath, tab.path))
       if (missingTabs.length > 0 && !(await this.flushPendingSave())) {
         return false
       }
@@ -1424,7 +1463,7 @@ export class LeetcoderApp {
       this.state.files = files
       this.markGitStale()
       for (const tab of this.state.openTabs) {
-        const refreshed = files.find((file) => sameFilePath(file.path, tab.path))
+        const refreshed = findIndexedProblemFile(filesByPath, tab.path)
         if (refreshed) {
           tab.path = refreshed.path
           tab.name = refreshed.name
@@ -2570,7 +2609,7 @@ export class LeetcoderApp {
     if (this.state.busy || this.state.git.busy) {
       return
     }
-    this.state.git.selectedPaths = paths.filter((path, index) => paths.indexOf(path) === index)
+    this.state.git.selectedPaths = [...new Set(paths)]
     this.state.git.error = null
     this.renderGitPanel()
   }
@@ -2619,7 +2658,7 @@ export class LeetcoderApp {
       this.renderGitPanel()
       return
     }
-    const selectedFiles = this.state.git.files.filter((file) => paths.includes(file.path))
+    const selectedFiles = selectedGitFiles(this.state.git.files, new Set(paths))
     const message = this.state.git.commitMessage.trim() || defaultGitCommitMessage(selectedFiles)
     const repositoryGeneration = this.repositoryGeneration
     const operationId = ++this.gitOperationId
@@ -2686,137 +2725,19 @@ export class LeetcoderApp {
   }
 
   private renderGitPanel(): void {
-    const panel = this.element<HTMLElement>('#git-panel')
-    panel.hidden = this.state.bottomPanelTab !== 'git'
-    const git = this.state.git
-    this.element<HTMLElement>('#git-branch').textContent = git.branch ?? ''
-    const count = this.element<HTMLElement>('#git-file-count')
-    count.textContent = git.files.length > 0 ? String(git.files.length) : ''
-    count.hidden = git.files.length === 0
-    const status = this.element<HTMLElement>('#git-status')
-    if (git.error) {
-      status.hidden = false
-      status.textContent = git.error
-    } else {
-      status.hidden = true
-      status.textContent = ''
-    }
-
-    const list = this.element<HTMLElement>('#git-file-list')
-    list.innerHTML = ''
-    if (git.loading && git.files.length === 0) {
-      const loading = document.createElement('div')
-      loading.className = 'git-empty git-loading'
-      loading.textContent = 'Loading…'
-      list.append(loading)
-    } else if (git.files.length === 0) {
-      const empty = document.createElement('div')
-      empty.className = 'git-empty'
-      empty.textContent = 'No changes'
-      list.append(empty)
-    } else {
-      for (const file of git.files) {
-        const row = document.createElement('div')
-        row.className = 'git-file-row'
-        row.classList.toggle('is-active', file.path === git.activePath)
-        row.classList.toggle('is-selected', git.selectedPaths.includes(file.path))
-        row.title = file.path
-        const checkbox = document.createElement('input')
-        checkbox.type = 'checkbox'
-        checkbox.className = 'git-file-checkbox'
-        checkbox.checked = git.selectedPaths.includes(file.path)
-        checkbox.setAttribute('aria-label', `Select ${file.path} for commit`)
-        checkbox.disabled = this.state.busy || git.busy || git.loading
-        checkbox.addEventListener('change', () => {
-          this.toggleGitFile(file.path, checkbox.checked)
-        })
-        const fileButton = document.createElement('button')
-        fileButton.type = 'button'
-        fileButton.className = 'git-file-button'
-        fileButton.disabled = this.state.busy || git.busy
-        fileButton.addEventListener('click', () => this.setActiveGitFile(file.path))
-        const statusBadge = document.createElement('span')
-        statusBadge.className = `git-file-status git-file-status-${normalizeGitStatusLabel(file.status)}`
-        statusBadge.textContent = gitStatusGlyph(file.status)
-        statusBadge.setAttribute('aria-label', file.status)
-        const fileName = document.createElement('span')
-        fileName.className = 'git-file-name'
-        fileName.textContent = gitFileName(file.path)
-        fileButton.append(statusBadge, fileName)
-        const dirPath = gitDirectoryPath(file.path)
-        if (dirPath) {
-          const filePath = document.createElement('span')
-          filePath.className = 'git-file-path'
-          // The LRM guards keep punctuation from flipping when direction:rtl
-          // is used to ellipsize the head of the path instead of the tail.
-          filePath.textContent = `‎${dirPath}‎`
-          filePath.title = dirPath
-          fileButton.append(filePath)
-        }
-        const stats = document.createElement('span')
-        stats.className = 'git-file-stats'
-        if (file.additions !== null) {
-          const additions = document.createElement('span')
-          additions.className = 'git-additions'
-          additions.textContent = `+${file.additions}`
-          stats.append(additions)
-        }
-        if (file.deletions !== null) {
-          const deletions = document.createElement('span')
-          deletions.className = 'git-deletions'
-          deletions.textContent = `−${file.deletions}`
-          stats.append(deletions)
-        }
-        fileButton.append(stats)
-        row.append(checkbox, fileButton)
-        row.addEventListener('contextmenu', (event) => {
-          event.preventDefault()
-          this.openGitContextMenu(file, event.clientX, event.clientY)
-        })
-        list.append(row)
-      }
-    }
-
-    const activeFile = git.files.find((file) => file.path === git.activePath)
-    const diffFile = this.element<HTMLElement>('#git-diff-file')
-    diffFile.textContent = activeFile ? gitFileName(activeFile.path) : 'Select a file'
-    if (activeFile) {
-      diffFile.title = activeFile.path
-    } else {
-      diffFile.removeAttribute('title')
-    }
-    const diffState = this.element<HTMLElement>('#git-diff-state')
-    diffState.textContent = activeFile ? normalizeGitStatusLabel(activeFile.status) : ''
-    diffState.hidden = !activeFile
-    const diff = this.element<HTMLElement>('#git-diff')
-    diff.innerHTML = ''
-    if (git.diffLoading && activeFile && !git.diffByPath[activeFile.path]) {
-      const loading = document.createElement('div')
-      loading.className = 'git-empty git-loading'
-      loading.textContent = 'Loading…'
-      diff.append(loading)
-    } else if (activeFile) {
-      const text = git.diffByPath[activeFile.path] ?? ''
-      if (text) {
-        diff.append(renderUnifiedDiff(text))
-      } else {
-        const empty = document.createElement('div')
-        empty.className = 'git-empty'
-        empty.textContent = 'No diff available'
-        diff.append(empty)
-      }
-    } else {
-      const empty = document.createElement('div')
-      empty.className = 'git-empty'
-      empty.textContent = git.files.length === 0 ? 'No changes' : 'Select a file'
-      diff.append(empty)
-    }
-
-    const input = this.element<HTMLInputElement>('#git-commit-message')
-    if (input.value !== git.commitMessage) {
-      input.value = git.commitMessage
-    }
-    this.updateGitCommitControls()
+    renderGitPanelView(
+      this.root,
+      {
+        bottomPanelTab: this.state.bottomPanelTab,
+        busy: this.state.busy,
+        git: this.state.git,
+      },
+      {
+        onToggleFile: (path, selected) => this.toggleGitFile(path, selected),
+        onSelectFile: (path) => this.setActiveGitFile(path),
+        onContextMenu: (file, x, y) => this.openGitContextMenu(file, x, y),
+      },
+    )
     this.applyGitFileListWidth()
     this.renderGitContextMenu()
   }
@@ -2827,16 +2748,11 @@ export class LeetcoderApp {
    * (a rebuild would fight the caret).
    */
   private updateGitCommitControls(): void {
-    const git = this.state.git
-    const selectedFiles = git.files.filter((file) => git.selectedPaths.includes(file.path))
-    const input = this.element<HTMLInputElement>('#git-commit-message')
-    input.placeholder = defaultGitCommitMessage(selectedFiles)
-    input.disabled = this.state.busy || git.busy || git.files.length === 0
-    const commitDisabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
-    this.element<HTMLButtonElement>('#git-commit').disabled = commitDisabled
-    this.element<HTMLButtonElement>('#git-commit-push').disabled = commitDisabled
-    this.element<HTMLButtonElement>('#git-select-all').disabled = this.state.busy || git.busy || git.loading || git.files.length === 0
-    this.element<HTMLButtonElement>('#git-select-none').disabled = this.state.busy || git.busy || git.loading || git.selectedPaths.length === 0
+    updateGitCommitControlsView(this.root, {
+      bottomPanelTab: this.state.bottomPanelTab,
+      busy: this.state.busy,
+      git: this.state.git,
+    })
   }
 
   /** Update controls whose disabled state changes while a file operation runs. */
@@ -3020,257 +2936,19 @@ export class LeetcoderApp {
   }
 
   private renderDailyProblem(): void {
-    const header = this.element<HTMLElement>('#daily-header')
-    const description = this.element<HTMLElement>('#daily-description')
-    const resizeHandle = this.element<HTMLElement>('#daily-description-resize-handle')
-    const activeElement = document.activeElement
-    const focusedLookup = activeElement instanceof HTMLInputElement
-      && activeElement.classList.contains('problem-lookup-input')
-      && header.contains(activeElement)
-    const lookupInput = focusedLookup ? activeElement : null
-    const lookupSelectionStart = lookupInput?.selectionStart ?? null
-    const lookupSelectionEnd = lookupInput?.selectionEnd ?? null
-    header.innerHTML = ''
     const problem = this.state.dailyProblem
-
-    header.append(this.renderProblemLookup(problem))
-    if (focusedLookup) {
-      const input = header.querySelector<HTMLInputElement>('.problem-lookup-input')
-      if (input) {
-        input.focus()
-        if (lookupSelectionStart !== null && lookupSelectionEnd !== null) {
-          input.setSelectionRange(lookupSelectionStart, lookupSelectionEnd)
-        }
-      }
-    }
-
-    if (!problem) {
-      description.hidden = true
-      resizeHandle.hidden = true
-      this.applyDailyDescriptionHeight()
-      if (this.state.dailyLoading) {
-        header.append(this.renderDailySkeleton())
-      } else if (this.state.dailyError) {
-        header.append(this.renderDailyError())
-      } else {
-        const waiting = document.createElement('span')
-        waiting.className = 'daily-waiting'
-        waiting.textContent = 'Waiting for today’s problem…'
-        header.append(waiting)
-      }
-      return
-    }
-
-    const title = document.createElement('strong')
-    title.className = 'problem-title'
-    title.textContent = problem.title
-    title.title = problem.title
-    const difficulty = document.createElement('span')
-    difficulty.className = `difficulty difficulty-${problem.difficulty.toLowerCase()}`
-    difficulty.textContent = problem.difficulty
-    const viewingToday = this.isViewingTodayProblem(problem)
-    const today = document.createElement(viewingToday ? 'span' : 'button')
-    today.className = viewingToday ? 'daily-today-status' : 'secondary-button daily-today'
-    if (viewingToday) {
-      today.setAttribute('aria-label', 'Today’s problem')
-      today.append(iconFor('calendarDays', 'button-icon'))
-      today.append(document.createTextNode('Today’s problem'))
-    } else {
-      const todayButton = today as HTMLButtonElement
-      todayButton.type = 'button'
-      todayButton.title = 'Show today’s problem'
-      todayButton.setAttribute('aria-label', 'Back to today')
-      todayButton.disabled = this.state.busy || this.state.dailyLoading
-      todayButton.append(iconFor('calendarDays', 'button-icon'))
-      todayButton.append(document.createTextNode('Back to today'))
-      todayButton.addEventListener('click', () => {
-        this.problemNumberDraft = null
-        this.state.problemSelection = 'daily'
-        this.state.dailyProblemDateKey = null
-        void this.loadDailyProblem(true)
-      })
-    }
-    const actions = document.createElement('div')
-    actions.className = 'daily-actions'
-
-    const refresh = document.createElement('button')
-    refresh.type = 'button'
-    refresh.className = 'icon-button'
-    const refreshLabel = this.state.problemSelection === 'manual'
-      ? 'Refresh selected problem'
-      : 'Refresh today’s problem'
-    refresh.setAttribute('aria-label', refreshLabel)
-    refresh.title = refreshLabel
-    refresh.append(iconFor('refresh', 'button-icon'))
-    refresh.disabled = this.state.busy || this.state.dailyLoading
-    refresh.classList.toggle('is-spinning', this.state.dailyLoading)
-    refresh.addEventListener('click', () => {
-      this.refreshSelectedProblem()
+    this.dailyProblemView({
+      problem,
+      existingFile: problem ? findTodayProblemFile(this.state.files, problem) : null,
+      projectValid: this.state.projectValid,
+      busy: this.state.busy,
+      dailyLoading: this.state.dailyLoading,
+      dailyError: this.state.dailyError,
+      problemSelection: this.state.problemSelection,
+      problemNumberDraft: this.problemNumberDraft,
+      viewingToday: problem ? this.isViewingTodayProblem(problem) : false,
+      dailyDescriptionOpen: this.dailyDescriptionOpen,
     })
-    actions.append(refresh)
-
-    const link = document.createElement('a')
-    link.className = 'icon-button'
-    link.href = problem.url
-    link.target = '_blank'
-    link.rel = 'noreferrer noopener'
-    link.setAttribute('aria-label', 'Open on LeetCode')
-    link.title = 'Open on LeetCode'
-    link.append(iconFor('externalLink', 'button-icon'))
-    actions.append(link)
-
-    const hasContent = Boolean(problem.content && problem.content.trim().length > 0)
-    if (hasContent) {
-      const toggle = document.createElement('button')
-      toggle.type = 'button'
-      toggle.className = 'icon-button daily-description-toggle'
-      toggle.setAttribute('aria-label', 'Toggle problem description')
-      toggle.setAttribute('aria-expanded', String(this.dailyDescriptionOpen))
-      toggle.setAttribute('aria-controls', 'daily-description')
-      toggle.title = 'Description'
-      toggle.append(iconFor('bookOpen', 'button-icon'))
-      toggle.classList.toggle('is-active', this.dailyDescriptionOpen)
-      toggle.addEventListener('click', () => {
-        this.dailyDescriptionOpen = !this.dailyDescriptionOpen
-        this.storage?.setItem(DAILY_DESCRIPTION_KEY, this.dailyDescriptionOpen ? 'open' : 'closed')
-        this.renderDailyProblem()
-      })
-      actions.append(toggle)
-    }
-
-    const existingFile = findTodayProblemFile(this.state.files, problem)
-    const primary = document.createElement('button')
-    primary.type = 'button'
-    primary.className = 'primary-button daily-primary'
-    primary.textContent = existingFile ? 'Open file' : 'Create file'
-    if (!this.state.projectValid) {
-      primary.disabled = true
-      primary.title = 'Choose a repository first'
-    } else {
-      primary.disabled = this.state.busy
-    }
-    primary.addEventListener('click', () => {
-      if (existingFile) {
-        void this.openFile(existingFile)
-      } else {
-        void this.createFileForToday()
-      }
-    })
-    actions.append(primary)
-    header.append(title, difficulty, today, actions)
-
-    if (hasContent && this.dailyDescriptionOpen) {
-      description.hidden = false
-      this.renderDailyDescription(description, problem.content ?? '')
-      resizeHandle.hidden = false
-      this.applyDailyDescriptionHeight()
-    } else {
-      description.hidden = true
-      resizeHandle.hidden = true
-      this.applyDailyDescriptionHeight()
-    }
-  }
-
-  private renderProblemLookup(problem: DailyProblem | null): HTMLElement {
-    const form = document.createElement('form')
-    form.className = 'problem-lookup'
-    form.setAttribute('aria-label', 'Load a LeetCode problem by number')
-
-    const field = document.createElement('label')
-    field.className = 'problem-lookup-field'
-    field.title = 'Load a LeetCode problem by number'
-    const prefix = document.createElement('span')
-    prefix.className = 'problem-lookup-prefix'
-    prefix.textContent = '#'
-    prefix.setAttribute('aria-hidden', 'true')
-    const input = document.createElement('input')
-    input.className = 'problem-lookup-input'
-    input.type = 'text'
-    input.inputMode = 'numeric'
-    input.pattern = '[0-9]*'
-    input.placeholder = 'number'
-    input.autocomplete = 'off'
-    input.spellcheck = false
-    input.value = this.problemNumberDraft ?? problem?.frontendId ?? ''
-    input.setAttribute('aria-label', 'LeetCode problem number')
-    input.addEventListener('input', () => {
-      this.problemNumberDraft = input.value
-    })
-    input.addEventListener('focus', () => {
-      input.select()
-    })
-    field.append(prefix, input)
-
-    const submit = document.createElement('button')
-    submit.type = 'submit'
-    submit.className = 'icon-button problem-lookup-submit'
-    submit.setAttribute('aria-label', 'Load problem')
-    submit.title = 'Load problem'
-    submit.append(iconFor('arrowRight', 'button-icon'))
-    submit.disabled = this.state.busy || this.state.dailyLoading
-    form.addEventListener('submit', (event) => {
-      event.preventDefault()
-      void this.loadProblemByNumber(input.value)
-    })
-
-    form.append(field, submit)
-    return form
-  }
-
-  private renderDailySkeleton(): HTMLElement {
-    const skeleton = document.createElement('div')
-    skeleton.className = 'daily-skeleton'
-    skeleton.setAttribute('aria-label', 'Loading today’s problem')
-    skeleton.setAttribute('role', 'progressbar')
-    skeleton.setAttribute('aria-busy', 'true')
-    for (const width of ['48px', '220px', '52px']) {
-      const bar = document.createElement('span')
-      bar.className = 'skeleton-bar'
-      bar.style.width = width
-      skeleton.append(bar)
-    }
-    return skeleton
-  }
-
-  private renderDailyError(): HTMLElement {
-    const wrapper = document.createElement('div')
-    wrapper.className = 'daily-error'
-    const message = document.createElement('span')
-    message.className = 'daily-error-copy'
-    message.textContent = 'Couldn’t load this problem'
-    if (this.state.dailyError) {
-      message.title = this.state.dailyError
-    }
-    const retry = document.createElement('button')
-    retry.type = 'button'
-    retry.className = 'text-button'
-    retry.textContent = 'Retry'
-    retry.disabled = this.state.dailyLoading
-    retry.addEventListener('click', () => {
-      if (this.lastProblemRequest === 'manual') {
-        void this.loadProblemByNumber(this.problemNumberDraft ?? '')
-      } else {
-        void this.loadDailyProblem(true)
-      }
-    })
-    wrapper.append(message, retry)
-    return wrapper
-  }
-
-  private renderDailyDescription(container: HTMLElement, content: string): void {
-    // Sanitizing rebuilds a DOM tree; cache it so toggling or unrelated
-    // rerenders do not re-parse the same HTML payload.
-    if (this.sanitizedDescriptionSource !== content || !this.sanitizedDescriptionElement) {
-      const body = document.createElement('div')
-      body.className = 'daily-description-body'
-      body.append(sanitizeProblemHtml(content))
-      this.sanitizedDescriptionSource = content
-      this.sanitizedDescriptionElement = body
-    }
-    if (this.sanitizedDescriptionElement.parentElement !== container) {
-      container.innerHTML = ''
-      container.append(this.sanitizedDescriptionElement)
-    }
   }
 
   private renderFileTabs(): void {
@@ -3436,120 +3114,35 @@ export class LeetcoderApp {
   }
 
   private renderFiles(): void {
-    const list = this.element<HTMLElement>('#file-list')
-    list.innerHTML = ''
-    const searchInput = this.element<HTMLInputElement>('#file-search')
-    if (searchInput.value !== this.state.fileSearch) {
-      searchInput.value = this.state.fileSearch
-    }
-    const totalCount = this.element<HTMLElement>('#file-count')
-    if (!this.state.projectValid) {
-      totalCount.textContent = ''
-      const empty = document.createElement('p')
-      empty.className = 'muted-copy sidebar-empty'
-      empty.textContent = 'Choose a repository to see problems'
-      list.append(empty)
-      return
-    }
-
-    const searchTerm = this.state.fileSearch.trim()
-    const javaFiles = this.state.files.filter((file) => /\.java$/i.test(file.path))
-    totalCount.textContent = javaFiles.length > 0 ? String(javaFiles.length) : ''
-    const filteredFiles = filterProblemFiles(javaFiles, searchTerm)
-    if (searchTerm && filteredFiles.length === 0) {
-      const empty = document.createElement('p')
-      empty.className = 'muted-copy sidebar-empty'
-      empty.textContent = 'No matches'
-      list.append(empty)
-      return
-    }
-
-    const groups = [...FILE_GROUPS, OTHER_GROUP]
-    const grouped = groups.map((group) => ({
-      group,
-      files: filterProblemFilesByGroup(javaFiles, group.key, searchTerm),
-    }))
-    const anyFiles = grouped.some((entry) => entry.files.length > 0)
-
-    for (const { group, files } of grouped) {
-      // Hide empty groups; when the repository has no files at all, still show
-      // the difficulty skeleton so the structure reads at a glance. The Other
-      // bucket only ever appears when it has files.
-      if (files.length === 0 && (anyFiles || group.key === 'other')) {
-        continue
-      }
-      const section = document.createElement('section')
-      section.className = 'file-group'
-      const expanded = this.expandedGroups.has(group.key)
-      section.dataset.expanded = String(expanded)
-
-      const headingButton = document.createElement('button')
-      headingButton.type = 'button'
-      headingButton.className = 'file-group-toggle'
-      headingButton.setAttribute('aria-expanded', String(expanded))
-      headingButton.setAttribute('aria-controls', `file-group-${group.key}`)
-      const groupLabel = document.createElement('span')
-      groupLabel.className = 'file-group-label'
-      groupLabel.append(
-        iconFor(expanded ? 'chevronDown' : 'chevronRight', 'group-toggle-icon'),
-        createGroupDot(group.key),
-        document.createTextNode(group.label),
-      )
-      const count = document.createElement('span')
-      count.className = 'file-count'
-      count.textContent = String(files.length)
-      headingButton.append(groupLabel, count)
-      headingButton.addEventListener('click', () => {
-        const nextExpanded = !this.expandedGroups.has(group.key)
-        this.setExpandedGroup(group.key, nextExpanded)
-        // Re-render all groups so a newly opened group closes the previously
-        // expanded group in both state and DOM. This also keeps the active row
-        // scroll target in the newly visible viewport.
-        this.renderFiles()
-      })
-      section.append(headingButton)
-      const groupList = document.createElement('div')
-      groupList.className = 'file-group-list'
-      groupList.id = `file-group-${group.key}`
-      groupList.hidden = !expanded
-      for (const file of files) {
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.className = 'file-item'
-        const active = sameFilePath(file.path, this.state.selectedPath ?? '')
-        button.classList.toggle('is-active', active)
-        button.classList.toggle('is-open', this.openTabForPath(file.path) !== null)
-        if (active) {
-          button.setAttribute('aria-current', 'page')
-        }
-        button.disabled = this.state.busy
-        button.setAttribute('aria-haspopup', 'menu')
-        button.dataset.path = file.path
-        button.title = file.path
-        const fileName = document.createElement('span')
-        fileName.className = 'file-item-name'
-        fileName.textContent = file.name.replace(/\.java$/i, '')
-        button.append(fileName)
-        button.addEventListener('click', () => {
+    renderFilesView(
+      {
+        list: this.element<HTMLElement>('#file-list'),
+        searchInput: this.element<HTMLInputElement>('#file-search'),
+        totalCount: this.element<HTMLElement>('#file-count'),
+      },
+      {
+        projectValid: this.state.projectValid,
+        files: this.state.files,
+        selectedPath: this.state.selectedPath,
+        fileSearch: this.state.fileSearch,
+        expandedGroups: this.expandedGroups,
+        busy: this.state.busy,
+        isFileOpen: (path) => this.openTabForPath(path) !== null,
+      },
+      {
+        onFileSelect: (file) => {
           void this.openFile(file)
-        })
-        button.addEventListener('contextmenu', (event) => {
-          event.preventDefault()
-          this.openFileContextMenu(file, event.clientX, event.clientY)
-        })
-        groupList.append(button)
-      }
-      if (files.length === 0) {
-        const empty = document.createElement('span')
-        empty.className = 'group-empty'
-        empty.textContent = 'No files yet'
-        groupList.append(empty)
-      }
-      section.append(groupList)
-      list.append(section)
-    }
-
-    this.scrollActiveFileIntoView()
+        },
+        onGroupToggle: (group, expanded) => {
+          this.setExpandedGroup(group, expanded)
+          this.renderFiles()
+        },
+        onFileContextMenu: (file, position) => {
+          this.openFileContextMenu(file, position.x, position.y)
+        },
+        onRendered: () => this.scrollActiveFileIntoView(),
+      },
+    )
     if (this.state.contextMenu && !this.state.files.some((file) => file.path === this.state.contextMenu?.file.path)) {
       this.state.contextMenu = null
     }
@@ -4656,52 +4249,11 @@ function safeStorage(): Storage | undefined {
   }
 }
 
-/** The 6px colored difficulty dot in a sidebar group heading. */
-function createGroupDot(groupKey: ProblemFileEntry['packageSegment']): HTMLElement {
-  const dot = document.createElement('span')
-  dot.className = 'group-dot group-dot-' + groupKey
-  dot.setAttribute('aria-hidden', 'true')
-  return dot
-}
-
 function currentIsMacPlatform(): boolean {
   if (typeof navigator === 'undefined') {
     return false
   }
   return isMacPlatform(navigator.platform, navigator.userAgent)
-}
-
-function renderUnifiedDiff(diff: string): HTMLElement {
-  const fragment = document.createDocumentFragment()
-  for (const parsedLine of parseUnifiedDiffLines(diff)) {
-    const row = document.createElement('div')
-    row.className = `git-diff-line is-${parsedLine.kind}`
-    const oldNumber = document.createElement('span')
-    oldNumber.className = 'git-diff-line-number git-diff-old-line'
-    const newNumber = document.createElement('span')
-    newNumber.className = 'git-diff-line-number git-diff-new-line'
-    const marker = document.createElement('span')
-    marker.className = 'git-diff-line-marker'
-    marker.textContent = parsedLine.marker
-    marker.setAttribute('aria-hidden', 'true')
-    const content = document.createElement('code')
-    content.className = 'git-diff-line-content'
-    // textContent is deliberate: source text must never be interpreted as
-    // markup, and an empty code node still reserves the row's line height.
-    content.textContent = parsedLine.content
-    if (parsedLine.oldLine !== null) {
-      oldNumber.textContent = String(parsedLine.oldLine)
-    }
-    if (parsedLine.newLine !== null) {
-      newNumber.textContent = String(parsedLine.newLine)
-    }
-    row.append(oldNumber, newNumber, marker, content)
-    fragment.append(row)
-  }
-  const wrapper = document.createElement('div')
-  wrapper.className = 'git-diff-lines'
-  wrapper.append(fragment)
-  return wrapper
 }
 
 // Keep the original app module as a compatibility barrel while feature code

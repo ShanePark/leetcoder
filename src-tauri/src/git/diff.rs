@@ -2,7 +2,6 @@ use super::path::{canonical_git_root, changed_path_selection, validate_worktree_
 use super::process::{
     command_error, git_pathspec, has_head, null_device, require_success, run_git,
 };
-use super::status::list_changes_at_root;
 use std::collections::HashSet;
 
 /// Return one unified patch for the selected paths.
@@ -13,8 +12,9 @@ use std::collections::HashSet;
 /// has no HEAD, so its staged and unstaged diffs are emitted separately.
 pub(crate) fn diff(project_root: &str, requested_paths: Vec<String>) -> Result<String, String> {
     let root = canonical_git_root(project_root)?;
-    let (_selected_paths, paths) = changed_path_selection(&root, requested_paths)?;
-    let changes = list_changes_at_root(&root)?;
+    let selection = changed_path_selection(&root, requested_paths)?;
+    let paths = selection.command_paths;
+    let changes = selection.changes;
     let untracked: HashSet<&str> = changes
         .iter()
         .filter(|change| change.index_status == "?" && change.worktree_status == "?")

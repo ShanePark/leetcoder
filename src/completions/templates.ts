@@ -25,8 +25,10 @@ import {
   collectJavaSymbols,
   iterableElementTypeForExpression,
   javaIterableCandidates,
+  javaIterableCandidatesFromAnalysis,
   maskJavaCommentsAndLiterals,
 } from './source'
+import type { JavaSymbolAnalysis } from './source'
 import type { JavaIterableCandidate, JavaPrintTemplateKind } from './model'
 
 export type { JavaIterableCandidate, JavaPrintTemplateKind }
@@ -349,8 +351,14 @@ export function javaIterCompletion(candidate: JavaIterableCandidate | null, labe
   }
 }
 
-export function javaIterCompletions(source: string, position: number): Completion[] {
-  const candidates = javaIterableCandidates(source, position)
+export function javaIterCompletions(
+  source: string,
+  position: number,
+  analysis?: JavaSymbolAnalysis,
+): Completion[] {
+  const candidates = analysis
+    ? javaIterableCandidatesFromAnalysis(source, position, analysis)
+    : javaIterableCandidates(source, position)
   if (candidates.length <= 1) {
     return [javaIterCompletion(candidates[0] ?? null)]
   }
