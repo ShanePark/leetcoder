@@ -7,14 +7,79 @@ import {
 } from '@codemirror/autocomplete'
 import { defaultKeymap, history } from '@codemirror/commands'
 import { java } from '@codemirror/lang-java'
+import { indentUnit } from '@codemirror/language'
 import { EditorState, Prec, type TransactionSpec } from '@codemirror/state'
 import { keymap, runScopeHandlers, type EditorView } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
 import { expandJavaTemplateOnTab } from '../../../src/editor'
-import { finishJavaIterTemplate, javaCompletions, javaIterTemplateExtension } from '../../../src/completions'
+import {
+  finishJavaIterTemplate,
+  finishJavaTemplate,
+  javaCompletions,
+  javaIterTemplateExtension,
+} from '../../../src/completions'
 import { runEditorCommand, mutableEditorView, javaState, applyUndo } from './helpers'
 
 describe('Java template Tab command', () => {
+  it('expands test at a class declaration', () => {
+    const source = `class S {
+    test
+}`
+    const cursor = source.indexOf('test') + 'test'.length
+    const state = runEditorCommand(
+      EditorState.create({
+        doc: source,
+        extensions: [java(), indentUnit.of('    '), EditorState.allowMultipleSelections.of(true)],
+        selection: { anchor: cursor },
+      }),
+      expandJavaTemplateOnTab,
+    )
+
+    expect(state.doc.toString()).toBe(`import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class S {
+    @Test
+    public void () {
+        assertThat()
+    }
+}`)
+  })
+
+  it('leaves test unchanged inside a method body', () => {
+    const source = `class S {
+    void helper() {
+        test
+    }
+}`
+    const cursor = source.indexOf('test') + 'test'.length
+    const harness = mutableEditorView(
+      javaState(source, true).update({ selection: { anchor: cursor } }).state,
+    )
+
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(false)
+    expect(harness.state().doc.toString()).toBe(source)
+  })
+
+  it('moves from the test name field to the assertion field on Tab', () => {
+    const source = `class S {
+    test
+}`
+    const cursor = source.indexOf('test') + 'test'.length
+    const harness = mutableEditorView(EditorState.create({
+      doc: source,
+      extensions: [java(), indentUnit.of('    '), EditorState.allowMultipleSelections.of(true)],
+      selection: { anchor: cursor },
+    }))
+
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    const expanded = harness.state().doc.toString()
+    expect(harness.state().selection.main.head).toBe(expanded.indexOf('()'))
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    expect(harness.state().selection.main.head).toBe(expanded.indexOf('assertThat()') + 'assertThat('.length)
+  })
+
   it('expands sout at the cursor', () => {
     const source = `class S {
     void f() {
@@ -32,6 +97,119 @@ describe('Java template Tab command', () => {
         System.out.println();
     }
 }`)
+  })
+
+  it('finishes a linked print field on Enter without mirroring a newline', () => {
+    const source = `class S {
+    void f(int n) {
+        serrv
+    }
+}`
+    const cursor = source.indexOf('serrv') + 'serrv'.length
+    let state = EditorState.create({
+      doc: source,
+      extensions: [
+        java(),
+        keymap.of(defaultKeymap),
+        Prec.high(keymap.of([{ key: 'Enter', run: finishJavaTemplate }])),
+        EditorState.allowMultipleSelections.of(true),
+      ],
+      selection: { anchor: cursor },
+    })
+    const view = {
+      get state() {
+        return state
+      },
+      dispatch: (spec: TransactionSpec) => {
+        state = state.update(spec).state
+      },
+    } as unknown as EditorView
+
+    expect(expandJavaTemplateOnTab(view)).toBe(true)
+    const expandedSource = state.doc.toString()
+    const templateEnd = expandedSource.indexOf(';', expandedSource.indexOf('System.err.println')) + 1
+    const enter = () => runScopeHandlers(view, {
+      key: 'Enter',
+      keyCode: 13,
+      shiftKey: false,
+      altKey: false,
+      metaKey: false,
+      ctrlKey: false,
+    } as KeyboardEvent, 'editor')
+
+    expect(enter()).toBe(true)
+    expect(state.doc.toString()).toBe(expandedSource)
+    expect(state.selection.ranges).toHaveLength(1)
+    expect(state.selection.main.head).toBe(templateEnd)
+    expect(hasNextSnippetField(state) || hasPrevSnippetField(state)).toBe(false)
+
+    // Once the linked field is finished, a later Enter creates one ordinary
+    // newline at the final cursor instead of mirroring it into the print call.
+    expect(enter()).toBe(true)
+    expect(state.selection.ranges).toHaveLength(1)
+    expect(state.doc.lines).toBe(expandedSource.split('\n').length + 1)
+  })
+
+  it('runs template finish before an active completion Enter binding', () => {
+    const source = `class S {
+    void f(int n) {
+        serrv
+    }
+}`
+    const cursor = source.indexOf('serrv') + 'serrv'.length
+    const calls: string[] = []
+    let state = EditorState.create({
+      doc: source,
+      extensions: [
+        java(),
+        EditorState.allowMultipleSelections.of(true),
+        // This mirrors the production order: the template binding is
+        // Prec.highest and autocompletion contributes its own highest Enter
+        // binding later in the extension list.
+        Prec.highest(keymap.of([{
+          key: 'Enter',
+          run: (view: EditorView) => {
+            calls.push('template')
+            return finishJavaTemplate(view)
+          },
+        }])),
+        autocompletion({ override: [javaCompletions] }),
+        // A selected completion makes CodeMirror's Enter handler return true.
+        // Keep a synthetic binding here so this test remains DOM-free while
+        // still proving the precedence required by the real popup path.
+        Prec.highest(keymap.of([{
+          key: 'Enter',
+          run: () => {
+            calls.push('completion')
+            return true
+          },
+        }])),
+        keymap.of(defaultKeymap),
+      ],
+      selection: { anchor: cursor },
+    })
+    const view = {
+      get state() {
+        return state
+      },
+      dispatch: (spec: TransactionSpec) => {
+        state = state.update(spec).state
+      },
+    } as unknown as EditorView
+
+    expect(expandJavaTemplateOnTab(view)).toBe(true)
+    const expanded = state.doc.toString()
+    expect(runScopeHandlers(view, {
+      key: 'Enter',
+      keyCode: 13,
+      shiftKey: false,
+      altKey: false,
+      metaKey: false,
+      ctrlKey: false,
+    } as KeyboardEvent, 'editor')).toBe(true)
+    expect(calls).toEqual(['template'])
+    expect(state.doc.toString()).toBe(expanded)
+    expect(state.selection.ranges).toHaveLength(1)
   })
 
   it('expands mod at the cursor', () => {

@@ -13,6 +13,7 @@ import {
 import { EditorView } from '@codemirror/view'
 import {
   expandJavaPrintTemplate,
+  expandJavaTestTemplate,
 } from '../completions'
 import type { ClipboardBridge } from '../clipboard'
 import {
@@ -295,7 +296,10 @@ export function extractJavaMethod(view: EditorView, onError?: (message: string) 
 
 /** Snippet navigation takes precedence over expanding a fresh abbreviation. */
 export function expandJavaTemplateOnTab(view: EditorView): boolean {
-  return nextSnippetField(view) || acceptCompletion(view) || expandJavaPrintTemplate(view)
+  return nextSnippetField(view)
+    || acceptCompletion(view)
+    || expandJavaTestTemplate(view)
+    || expandJavaPrintTemplate(view)
 }
 
 function previousLine(source: string, lineFrom: number): SourceLine | null {

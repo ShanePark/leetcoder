@@ -7,7 +7,7 @@
  * plain `Mod-` binding also gets an `Alt-` twin, and `Alt-` is the form Linux
  * advertises. The `Mod-` twin stays registered on Linux as `Ctrl-` so muscle
  * memory from other editors still works, but it is never the primary label.
- * The explicit Ctrl bindings and IntelliJ-style `Mod-Alt-*` chords are the
+ * The explicit Ctrl bindings and platform-independent `Mod-Alt-*` chords are the
  * platform-independent exceptions.
  *
  * Both forms are listed here so the in-app list matches what is registered.
@@ -62,6 +62,7 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
       { id: 'reformat', bindings: ['Mod-Alt-l'], description: 'Reformat code' },
       { id: 'introduce-variable', bindings: ['Mod-Alt-v'], description: 'Introduce variable' },
       { id: 'extract-method', bindings: ['Mod-Alt-m'], description: 'Extract method' },
+      { id: 'rename-method', bindings: ['Shift-F6'], description: 'Rename method' },
       { id: 'expand-template', bindings: ['Tab'], description: 'Expand live template / next template field' },
       { id: 'finish-template', bindings: ['Enter'], description: 'Finish live template' },
     ],
@@ -77,7 +78,7 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
   {
     title: 'Run',
     entries: [
-      // Ctrl is intentional here: these IntelliJ-style run chords are the
+      // Ctrl is intentional here: these platform-independent run chords are the
       // same on macOS and Linux, so they have no Mod/Alt platform twin.
       { id: 'run-test', bindings: ['Ctrl-r'], description: 'Run all tests', hint: true },
       { id: 'run-test-at-cursor', bindings: ['Ctrl-Shift-r'], description: 'Run test at cursor', hint: true },

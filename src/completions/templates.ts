@@ -4,6 +4,7 @@ import {
   completionStatus,
   hasNextSnippetField,
   hasPrevSnippetField,
+  nextSnippetField,
   selectedCompletion,
   snippet,
   startCompletion,
@@ -19,6 +20,7 @@ import {
   type Transaction,
   type TransactionSpec,
 } from '@codemirror/state'
+import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
 import type { EditorView } from '@codemirror/view'
 
 import {
@@ -28,6 +30,7 @@ import {
   javaIterableCandidatesFromAnalysis,
   maskJavaCommentsAndLiterals,
 } from './source'
+import { importLines } from './imports'
 import type { JavaSymbolAnalysis } from './source'
 import type { JavaIterableCandidate, JavaPrintTemplateKind } from './model'
 
@@ -83,10 +86,140 @@ function javaIterTemplateBody(candidate: JavaIterableCandidate | null): string {
   const elementType = candidate?.elementType ?? 'var'
   const variableName = candidate?.variableName ?? 'item'
   const target = candidate?.name ?? 'items'
-  // The expression being iterated is the first stop, matching IntelliJ's
+  // The expression being iterated is the first stop, matching the configured
   // live-template flow. The type is updated by the extension when the target
   // resolves to a different iterable element type.
   return `for (\${2:${elementType}} \${3:${variableName}} : \${1:${target}}) {\n    \${0}\n}`
+}
+
+// The configured `test` template uses fully qualified names in its stored body,
+// then shortens them and applies the configured static import. The generated
+// problem files already carry those imports, so the editor inserts the same
+// shortened form directly.
+const JAVA_TEST_TEMPLATE_BODY = '@Test\npublic void \${1}() {\n\tassertThat(\${0})\n}'
+
+const JAVA_TEST_IMPORT = 'org.junit.jupiter.api.Test'
+const JAVA_ASSERT_IMPORT = 'org.assertj.core.api.Assertions.assertThat'
+
+interface JavaTestImportChange {
+  from: number
+  insert: string
+}
+
+function hasJavaImport(
+  imports: ReturnType<typeof importLines>,
+  fullyQualifiedName: string,
+  isStatic: boolean,
+): boolean {
+  const packageName = fullyQualifiedName.slice(0, fullyQualifiedName.lastIndexOf('.'))
+  return imports.some((line) => line.static === isStatic
+    && (line.name === fullyQualifiedName || line.name === `${packageName}.*`))
+}
+
+function javaTestImportChange(source: string): JavaTestImportChange | null {
+  const imports = importLines(source)
+  const addTest = !hasJavaImport(imports, JAVA_TEST_IMPORT, false)
+  const addAssert = !hasJavaImport(imports, JAVA_ASSERT_IMPORT, true)
+  if (!addTest && !addAssert) return null
+
+  const newline = source.includes('\r\n') ? '\r\n' : '\n'
+  const ordinary = imports.filter((line) => !line.static)
+  const statics = imports.filter((line) => line.static)
+  const ordinaryLines = addTest ? `import ${JAVA_TEST_IMPORT};${newline}` : ''
+  const staticLines = addAssert ? `import static ${JAVA_ASSERT_IMPORT};${newline}` : ''
+
+  if (addTest && ordinary.length > 0) {
+    const from = statics[0]?.from ?? ordinary.at(-1)!.to
+    if (statics.length > 0) {
+      return {
+        from,
+        insert: `${ordinaryLines}${addAssert ? newline + staticLines : ''}`,
+      }
+    }
+    return {
+      from,
+      insert: `${ordinaryLines}${addAssert ? newline + staticLines : ''}`,
+    }
+  }
+
+  if (addTest && statics.length > 0) {
+    return {
+      from: statics[0].from,
+      insert: `${ordinaryLines}${addAssert ? newline + staticLines : ''}`,
+    }
+  }
+
+  if (addAssert && statics.length > 0) {
+    return { from: statics.at(-1)!.to, insert: staticLines }
+  }
+
+  if (addAssert && ordinary.length > 0) {
+    return { from: ordinary.at(-1)!.to, insert: `${newline}${staticLines}` }
+  }
+
+  const packageMatch = /^[\t ]*package[\t ]+[\w.]+[\t ]*;[^\S\r\n]*(?:\r?\n|$)/m.exec(source)
+  if (packageMatch) {
+    return {
+      from: packageMatch.index + packageMatch[0].length,
+      insert: `${ordinaryLines}${addAssert ? newline + staticLines : ''}`,
+    }
+  }
+  return {
+    from: 0,
+    insert: `${ordinaryLines}${addAssert ? newline + staticLines : ''}${newline}`,
+  }
+}
+
+function javaTestAbbreviation(source: string, position: number): { from: number } | null {
+  const before = source.slice(0, position)
+  const match = /(?:^|[^A-Za-z0-9_$])(test)$/.exec(before)
+  if (!match) return null
+  return { from: position - match[1].length }
+}
+
+function javaDeclarationContext(state: EditorView['state'], position: number): boolean {
+  ensureSyntaxTree(state, state.doc.length, 1000)
+  let node: ReturnType<typeof syntaxTree>['topNode'] | null = syntaxTree(state).resolveInner(position, 1)
+  while (node) {
+    if (node.name === 'Block') return false
+    if (node.name === 'ClassBody' || node.name === 'InterfaceBody' || node.name === 'EnumBody') {
+      return true
+    }
+    node = node.parent
+  }
+  return false
+}
+
+function applyJavaTestTemplate(
+  view: EditorView,
+  completion: Completion | null,
+  from: number,
+  to: number,
+): void {
+  if (!javaDeclarationContext(view.state, to)) return
+  const importChange = javaTestImportChange(view.state.doc.toString())
+  if (importChange) {
+    view.dispatch({
+      changes: { from: importChange.from, insert: importChange.insert },
+      userEvent: 'input.complete',
+    })
+    if (importChange.from <= from) {
+      const offset = importChange.insert.length
+      from += offset
+      to += offset
+    }
+  }
+  snippet(JAVA_TEST_TEMPLATE_BODY)(view, completion, from, to)
+}
+
+/** Completion entry for the JUnit test live template. */
+export function javaTestCompletion(): Completion {
+  return {
+    label: 'test',
+    type: 'snippet',
+    detail: 'Creates a JUnit test method',
+    apply: (view, completion, from, to) => applyJavaTestTemplate(view, completion, from, to),
+  }
 }
 
 interface JavaIterTemplateSession {
@@ -244,6 +377,67 @@ export function finishJavaIterTemplate(view: EditorView): boolean {
     scrollIntoView: true,
   })
   return true
+}
+
+/**
+ * Finish the active live template at its final field.
+ *
+ * Completion acceptance and snippet navigation share the Enter key in the
+ * editor. Once a completion is accepted, advance through the remaining
+ * snippet fields in the same command so linked fields cannot receive a
+ * newline as multiple cursors.
+ */
+function finishActiveJavaTemplate(view: EditorView): boolean {
+  const session = view.state.field(javaIterTemplateState, false)
+  if (session && selectionInsideIterLoop(view.state.selection, session)
+    && (hasNextSnippetField(view.state) || hasPrevSnippetField(view.state))) {
+    const bodyPosition = session.bodyFrom
+    clearSnippet(view)
+    view.dispatch({
+      selection: { anchor: bodyPosition },
+      effects: setJavaIterTemplateSession.of(null),
+      scrollIntoView: true,
+    })
+    return true
+  }
+
+  if (hasNextSnippetField(view.state)) {
+    while (nextSnippetField(view)) {
+      // The last call selects the final field and clears CodeMirror's active
+      // snippet state, collapsing linked ranges to one cursor.
+    }
+    return true
+  }
+
+  const cursor = view.state.selection.main.head
+  if (!clearSnippet(view)) return false
+  if (view.state.selection.ranges.length > 1) {
+    view.dispatch({ selection: { anchor: cursor } })
+  }
+  return true
+}
+
+export function finishJavaTemplate(view: EditorView): boolean {
+  const iterSessionBeforeAccept = view.state.field(javaIterTemplateState, false)
+  const hadActiveSnippetBeforeAccept = hasNextSnippetField(view.state) || hasPrevSnippetField(view.state)
+  if (acceptCompletion(view)) {
+    // Accepting a completion that expands a fresh template should leave its
+    // first field active. Existing iter templates retain their historical
+    // Enter behavior as well; a pre-existing print/test template is the case
+    // that needs to finish after replacing its active field.
+    if (hadActiveSnippetBeforeAccept && !iterSessionBeforeAccept) {
+      finishActiveJavaTemplate(view)
+    }
+    return true
+  }
+
+  // A selected completion can be temporarily unaccepted during CodeMirror's
+  // interaction delay. Keep Enter with the popup until it can be accepted.
+  if (completionStatus(view.state) === 'active' && selectedCompletion(view.state)) {
+    return true
+  }
+
+  return finishActiveJavaTemplate(view)
 }
 
 function matchingLoopEnd(source: string, loopFrom: number): number {
@@ -411,5 +605,36 @@ export function expandJavaPrintTemplate(view: EditorView): boolean {
   }
 
   applyJavaPrintTemplate(view, abbreviation.kind, abbreviation.from, position, null)
+  return true
+}
+
+/** Expand the `test` live-template abbreviation at a class declaration. */
+export function expandJavaTestTemplate(view: EditorView): boolean {
+  const { state } = view
+  if (state.selection.ranges.length !== 1 || !state.selection.main.empty) {
+    return false
+  }
+  const position = state.selection.main.head
+  const source = state.doc.toString()
+  const abbreviation = javaTestAbbreviation(source, position)
+  if (!abbreviation || !javaDeclarationContext(state, abbreviation.from)) {
+    return false
+  }
+
+  const masked = maskJavaCommentsAndLiterals(source)
+  if (masked.slice(abbreviation.from, position) !== source.slice(abbreviation.from, position)) {
+    return false
+  }
+  if (/[A-Za-z0-9_$]/.test(source[position] ?? '')) {
+    return false
+  }
+
+  const lineStart = source.lastIndexOf('\n', abbreviation.from - 1) + 1
+  const linePrefix = source.slice(lineStart, abbreviation.from)
+  if (!/^[\t ]*$/.test(linePrefix)) {
+    return false
+  }
+
+  applyJavaTestTemplate(view, null, abbreviation.from, position)
   return true
 }

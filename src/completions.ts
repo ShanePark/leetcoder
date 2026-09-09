@@ -15,6 +15,7 @@ import {
   analyzeJavaSource,
 } from './completions/source'
 import {
+  javaTestCompletion,
   javaIterCompletions,
   javaPrintCompletion,
 } from './completions/templates'
@@ -43,7 +44,10 @@ export {
 } from './completions/source'
 export {
   expandJavaPrintTemplate,
+  expandJavaTestTemplate,
+  finishJavaTemplate,
   finishJavaIterTemplate,
+  javaTestCompletion,
   javaIterTemplateExtension,
 } from './completions/templates'
 
@@ -87,6 +91,7 @@ const JAVA_COMPLETIONS: Completion[] = [
   javaPrintCompletion('serr'),
   javaPrintCompletion('serrv'),
   javaPrintCompletion('mod'),
+  javaTestCompletion(),
   snippetCompletion('new ArrayList<>()', 'ArrayList', 'new ArrayList<>()'),
   snippetCompletion('new HashMap<>()', 'HashMap', 'new HashMap<>()'),
   snippetCompletion('for (int i = 0; i < ...; i++)', 'loop', 'for (int ${i} = 0; ${i} < ${length}; ${i}++) {\n    ${}\n}'),

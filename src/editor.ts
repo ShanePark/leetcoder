@@ -53,7 +53,7 @@ import {
   addJavaTypeImports,
   JAVA_TYPE_IMPORTS,
   javaCompletions,
-  finishJavaIterTemplate,
+  finishJavaTemplate,
   javaIdentifierAt,
   javaIterTemplateExtension,
 } from './completions'
@@ -93,6 +93,9 @@ import {
   moveToJavaLineEnd,
 } from './editor/statement-completion'
 import {
+  renameJavaMethod,
+} from './editor/rename'
+import {
   definitionHover,
   javaDefinitionAt,
   javaDefinitionHoverRange,
@@ -110,6 +113,16 @@ export {
   selectedLineBlocks,
   copySelectedText,
 } from './editor/editing'
+export {
+  planJavaMethodRename,
+  renameJavaMethod,
+} from './editor/rename'
+export type {
+  JavaMethodRenameFailure,
+  JavaMethodRenamePlan,
+  JavaMethodRenameRange,
+  JavaMethodRenameResult,
+} from './editor/rename'
 export type { JavaDocInsertion, JavaVariableInsertion } from './editor/editing'
 export {
   completeJavaStatement,
@@ -575,7 +588,7 @@ const javaIdentifierCallKeyBindings = [
 /** High-precedence keymap used by the editor and its keyboard regression tests. */
 export const javaIdentifierCallKeymap = Prec.highest(keymap.of(javaIdentifierCallKeyBindings))
 
-/** Match the IntelliJ-style Ctrl/Command+Option+V chord by physical key. */
+/** Match the cross-platform Ctrl/Command+Option+V chord by physical key. */
 export function isIntroduceVariableShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'KeyV'
     && event.altKey
@@ -583,7 +596,7 @@ export function isIntroduceVariableShortcut(event: JavaDocAltShortcutEvent): boo
     && (event.metaKey !== event.ctrlKey)
 }
 
-/** Match the IntelliJ-style Ctrl/Command+Option+M chord by physical key. */
+/** Match the cross-platform Ctrl/Command+Option+M chord by physical key. */
 export function isExtractMethodShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'KeyM'
     && event.altKey
@@ -629,10 +642,12 @@ export class JavaEditor {
     const settingsShortcuts = bindings('open-settings')
     const introduceVariableShortcuts = bindings('introduce-variable')
     const extractMethodShortcuts = bindings('extract-method')
+    const renameMethodShortcuts = bindings('rename-method')
     const finishTemplateShortcuts = bindings('finish-template')
     const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
+    const renameMethod = (view: EditorView): boolean => renameJavaMethod(view, callbacks.onRefactorError)
     const showShortcuts = (): boolean => {
       callbacks.onShowShortcuts?.()
       return true
@@ -846,6 +861,10 @@ export class JavaEditor {
         // Consume the printable opening parenthesis before the browser can
         // emit a second input event with the stale selection range.
         javaIdentifierCallKeymap,
+        // Run before autocompletion's own Prec.highest Enter binding so an
+        // accepted completion can also finish an already active live
+        // template in the same key press.
+        Prec.highest(keymap.of(commandBindings(finishTemplateShortcuts, finishJavaTemplate, false))),
         keymap.of([
           ...closeBracketsKeymap,
           ...completionKeymap,
@@ -855,7 +874,6 @@ export class JavaEditor {
         ]),
         Prec.high(keymap.of([
           ...commandBindings(bindings('expand-template'), expandJavaTemplateOnTab, false),
-          ...commandBindings(finishTemplateShortcuts, finishJavaIterTemplate, false),
           // Run chords intentionally use Ctrl on both macOS and Linux.
           ...commandBindings(saveShortcuts, save),
           ...commandBindings(runTestAtCursorShortcuts, runTestAtCursor),
@@ -867,7 +885,8 @@ export class JavaEditor {
           ...commandBindings(moveLineDownShortcuts, moveLineDown),
           ...commandBindings(introduceVariableShortcuts, introduceJavaVariable),
           ...commandBindings(extractMethodShortcuts, extractMethod),
-          // IntelliJ-style line editing shortcuts. CodeMirror's built-in
+          ...commandBindings(renameMethodShortcuts, renameMethod),
+          // Familiar line-editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while
           // preserving the document's configured line separator.
           ...commandBindings(duplicateLineShortcuts, copyLineDown),

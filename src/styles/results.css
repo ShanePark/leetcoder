@@ -63,7 +63,7 @@
   padding: 0 16px 16px;
 }
 
-/* IntelliJ-style test results: the tree remains visible while the selected
+/* Test results layout: the tree remains visible while the selected
    test's assertion details and console output occupy the larger pane. */
 .test-results-workspace {
   display: grid;

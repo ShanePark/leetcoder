@@ -1,14 +1,108 @@
+import { EditorState } from '@codemirror/state'
+import { java } from '@codemirror/lang-java'
+import type { EditorView } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
 import { collectJavaSymbols, javaIterableCandidates } from '../../../src/completions'
+import { expandJavaTestTemplate } from '../../../src/completions/templates'
 import { labels, applyCompletion, expandPrintTemplateState, expandPrintTemplate } from './helpers'
 
+function expandTestTemplate(source: string): { expanded: boolean, state: EditorState } {
+  const marker = source.indexOf('|')
+  if (marker < 0) throw new Error('Expansion source must include a | cursor marker')
+  let state = EditorState.create({
+    doc: `${source.slice(0, marker)}${source.slice(marker + 1)}`,
+    extensions: [java()],
+    selection: { anchor: marker },
+  })
+  const view = {
+    get state() { return state },
+    dispatch(spec: Parameters<EditorState['update']>[0]) {
+      state = state.update(spec).state
+    },
+  }
+  return { expanded: expandJavaTestTemplate(view as unknown as EditorView), state }
+}
+
 describe('lightweight Java completions', () => {
-it('offers the IntelliJ-style print live-template abbreviations', () => {
+it('expands the test live template at a class declaration', () => {
+    const result = expandTestTemplate(`class Solution {
+  test|
+}`)
+
+    expect(result.expanded).toBe(true)
+    expect(result.state.doc.toString()).toBe(`import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class Solution {
+  @Test
+  public void () {
+    assertThat()
+  }
+}`)
+    expect(result.state.selection.main.empty).toBe(true)
+    expect(result.state.selection.main.head).toBe(result.state.doc.toString().indexOf('()'))
+  })
+
+it('reuses existing test imports without duplicating them', () => {
+    const result = expandTestTemplate(`import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class Solution {
+  test|
+}`)
+
+    expect(result.expanded).toBe(true)
+    expect(result.state.doc.toString()).toBe(`import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class Solution {
+  @Test
+  public void () {
+    assertThat()
+  }
+}`)
+  })
+
+it('adds the assertion static import beside unrelated static imports', () => {
+    const result = expandTestTemplate(`import java.util.List;
+
+import static java.util.Collections.emptyList;
+
+class Solution {
+  test|
+}`)
+
+    expect(result.expanded).toBe(true)
+    expect(result.state.doc.toString()).toContain('import org.junit.jupiter.api.Test;')
+    expect(result.state.doc.toString()).toContain('import static org.assertj.core.api.Assertions.assertThat;')
+    expect(result.state.doc.toString()).toContain('import static java.util.Collections.emptyList;')
+  })
+
+it('only expands test in a Java declaration context', () => {
+    for (const source of [
+      'class Solution { void helper() { test| } }',
+      'class Solution { String text = "test|"; }',
+      'class Solution { // test|\n}',
+    ]) {
+      const result = expandTestTemplate(source)
+      expect(result.expanded).toBe(false)
+      expect(result.state.doc.toString()).toBe(source.replace('|', ''))
+    }
+  })
+
+it('offers the print live-template abbreviations', () => {
     const options = labels('class Solution { void test() { sout| } }')
     expect(options).toEqual(expect.arrayContaining(['sout', 'soutv']))
     expect(labels('class Solution { void test() { serr| } }')).toEqual(
       expect.arrayContaining(['serr', 'serrv']),
     )
+  })
+
+it('offers the test live template as a completion', () => {
+    expect(labels('class Solution {\n  test|\n}')).toContain('test')
   })
 
 it('expands print templates with a nearby variable and keeps linked fields', () => {

@@ -6,6 +6,7 @@
 - Do not invent requirements, broaden scope, or add speculative abstractions or dependencies.
 - Follow existing conventions and preserve unrelated behavior and work.
 - Write clear code. Comment only non-obvious rationale, invariants, or constraints.
+- Keep commit messages, code comments, documentation, and user-facing copy focused on behavior and function; avoid unnecessary references to specific products or brands. Preserve required API identifiers and license attributions.
 - Keyboard shortcuts follow the policy in `## Keyboard Shortcuts` below.
 
 ## Keyboard Shortcuts
@@ -28,8 +29,8 @@ with `Ctrl`.
   primary label. Save shows as `Alt+S` on Linux and `⌘S` on macOS; JavaDoc as
   `Alt+Shift+J` and `⇧⌘J`.
 - Exceptions are shortcuts that are the same chord on both platforms already —
-  `Ctrl-Space`, and IntelliJ chords the user asked for verbatim such as
-  `Mod-Alt-l` for reformat. These get no `Alt-` twin.
+  `Ctrl-Space`, and platform-independent chords the user asked for verbatim
+  such as `Mod-Alt-l` for reformat. These get no `Alt-` twin.
 - macOS turns `Option`+letter into a typed glyph, so CodeMirror's key names do
   not match those bindings. Every `Alt-` shortcut also needs a matcher in
   `src/editor.ts` that works from `event.code`, registered in

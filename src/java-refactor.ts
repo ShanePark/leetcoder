@@ -974,7 +974,7 @@ function statementPlan(
 }
 
 /**
- * Plan a bounded IntelliJ-style Extract Method operation. It accepts an exact
+ * Plan a bounded Extract Method operation. It accepts an exact
  * Java expression or complete direct statements inside one method body and
  * returns source edits without mutating editor state.
  */
