@@ -68,6 +68,20 @@
   font-size: 12px;
 }
 
+.git-status.is-progress {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 20px;
+  color: var(--text-dim);
+}
+
+.git-status-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
 .git-workspace {
   display: grid;
   flex: 1;

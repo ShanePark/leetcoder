@@ -4,13 +4,8 @@ import {
   createBackendClient,
   errorMessage,
   type BackendClient,
-  type DailyProblem,
-  type GitPushResult,
   type ProblemDiagnostic,
   type ProblemFileEntry,
-  type TestCaseResult,
-  type TestResult,
-  type TestRunProgress,
   type RepositoryFilesChanged,
 } from './backend'
 import {
@@ -21,10 +16,7 @@ import {
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
 import {
-  SHORTCUT_SECTIONS,
-  formatShortcut,
   isSettingsShortcut,
-  platformBindings,
   runShortcutAction,
   shortcutHints,
   shortcutLabel,
@@ -45,39 +37,33 @@ import {
   isCloseAllTabsShortcut,
   isCloseTabShortcut,
   isCurrentRepositoryRefresh,
-  isFileTabsShiftWheel,
   RepositoryPickerCoordinator,
   replacementTabIndex,
 } from './app/navigation'
 import {
-  autoSelectedTestKey,
   collectDiagnosticEditorIssues,
   collectEditorIssues,
-  isTestRunSourceCurrent,
-  liveSnapshotResult,
-  runnerFailureResult,
-  testFailureMessage,
-  testResultBannerMessage,
-  sameTest,
 } from './app/test-results'
 import {
-  asGitCommitResult,
-  asGitPushResult,
-  defaultGitCommitMessage,
   gitFileName,
-  gitResultToastMessage,
   isGitNewFile,
-  normalizeGitDiff,
-  normalizeGitStatus,
 } from './app/git-helpers'
+import { createGitState, GitController } from './app/git-controller'
+import { createPaneLayoutController, type PaneLayoutController } from './app/pane-layout'
+import { ProblemSelectionController } from './app/problem-selection-controller'
+import {
+  createFileTabsView,
+  renderFileHeading as renderFileHeadingView,
+  type FileTabsView,
+  type FileTabsViewModel,
+} from './app/tabs-view'
+import { TestRunController } from './app/test-run-controller'
 import { findIndexedProblemFile, indexProblemFiles } from './app/file-index'
 import {
   renderGitPanel as renderGitPanelView,
-  selectedGitFiles,
   updateGitCommitControls as updateGitCommitControlsView,
 } from './app/git-view'
 import {
-  discardGitChangesWarningMessage,
   findFileAfterDuplicate,
   findFileAfterRename,
   findRestoredFileAfterGitRename,
@@ -93,16 +79,7 @@ import {
 } from './app/path-helpers'
 import {
   applyTheme,
-  clampBottomPanelHeight,
-  clampContextMenuPosition,
-  clampDailyDescriptionHeight,
-  clampGitFileListWidth,
-  clampSidebarWidth,
-  BOTTOM_PANEL_HEIGHT_KEY,
-  DAILY_DESCRIPTION_HEIGHT_KEY,
-  DAILY_DESCRIPTION_LAYOUT_OVERHEAD,
   DEFAULT_GIT_FILE_LIST_WIDTH,
-  GIT_FILE_LIST_WIDTH_KEY,
   MAX_BOTTOM_PANEL_HEIGHT,
   MAX_DAILY_DESCRIPTION_HEIGHT,
   MAX_SIDEBAR_WIDTH,
@@ -111,31 +88,23 @@ import {
   MIN_GIT_DIFF_WIDTH,
   MIN_GIT_FILE_LIST_WIDTH,
   MIN_SIDEBAR_WIDTH,
-  MIN_CODE_CARD_HEIGHT,
-  SIDEBAR_WIDTH_KEY,
   THEME_MODE_KEY,
-  VIEWPORT_MARGIN,
-  maxBottomPanelHeight,
-  maxDailyDescriptionHeight,
-  maxGitFileListWidth,
-  maxSidebarWidth,
-  macShortcutDialogLabel,
-  normalizeDailyProblemDateKey,
-  normalizeProblemNumber,
   normalizeThemeMode,
-  nextUtcMidnightDelayMs,
-  readBottomPanelHeight,
-  readDailyDescriptionHeight,
-  readGitFileListWidth,
-  readSidebarWidth,
   readThemeMode,
-  windowHeight,
   defaultShortcutPlatform,
   isMacPlatform,
-  utcDateKey,
 } from './app/layout'
+import {
+  renderAboutDialog as renderAboutDialogView,
+  renderAppMenu as renderAppMenuView,
+  renderDeleteFileDialog as renderDeleteFileDialogView,
+  renderDiscardGitDialog as renderDiscardGitDialogView,
+  renderFileContextMenu as renderFileContextMenuView,
+  renderGitContextMenu as renderGitContextMenuView,
+  renderSettingsDialog as renderSettingsDialogView,
+} from './app/dialogs-view'
 import { renderShellView } from './app/shell-view'
-import { renderTestResults, TEST_RUN_ROOT_KEY } from './app/results-view'
+import { renderTestResults } from './app/results-view'
 import {
   FILE_GROUPS,
   OTHER_GROUP,
@@ -151,28 +120,16 @@ import type {
   AutosaveSnapshot,
   DirectoryPicker,
   FileManagementBackend,
-  GitBackendClient,
   GitChangedFile,
   LiveDiagnosticsBackend,
   OpenFileTab,
-  ProblemSelection,
   SettingsSection,
   ShortcutPlatform,
-  TestRunSnapshot,
-  TestRunSourceSnapshot,
-  TestRunnerBackend,
   ThemeMode,
 } from './app/types'
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
 const APP_VERSION = '0.1.0'
 const DAILY_DESCRIPTION_KEY = 'leetcoder.daily-description'
-const GIT_REFRESH_DEBOUNCE_MS = 250
-const GIT_POLL_INTERVAL_MS = 4000
-const DAILY_RETRY_INTERVAL_MS = 60_000
-const FILE_CONTEXT_MENU_WIDTH = 156
-const FILE_CONTEXT_MENU_HEIGHT = 108
-const GIT_CONTEXT_MENU_WIDTH = 190
-const GIT_CONTEXT_MENU_HEIGHT = 76
 const SAVED_FLASH_MS = 1500
 const TOAST_DISMISS_MS = 3000
 const MAX_VISIBLE_TOASTS = 3
@@ -226,67 +183,24 @@ export class LeetcoderApp {
     bottomPanelTab: 'tests',
     contextMenu: null,
     gitContextMenu: null,
-    git: {
-      branch: null,
-      files: [],
-      selectedPaths: [],
-      activePath: null,
-      diffByPath: {},
-      fallbackDiff: '',
-      loading: false,
-      diffLoading: false,
-      busy: false,
-      error: null,
-      commitMessage: '',
-      commitMessageEdited: false,
-      loadedRepoPath: null,
-      stale: false,
-    },
+    git: createGitState(),
   }
   private editor: JavaEditor
   private readonly autosave: AutosaveCoordinator
   private readonly liveDiagnostics: LiveDiagnosticsScheduler
   private readonly dailyProblemView: DailyProblemViewRenderer
+  private readonly problemSelectionController: ProblemSelectionController
   private suppressEditorChange = false
   private repositoryGeneration = 0
   private refreshRequestId = 0
   private externalReloadInFlight = false
   private stopWatchingFiles: (() => void) | null = null
   private shortcutsPlatform: ShortcutPlatform = defaultShortcutPlatform(currentIsMacPlatform())
-  private testRunGeneration = 0
-  /** Whether the user has explicitly chosen a row in the current run. */
-  private testSelectionExplicit = false
   private nextOpenTabId = 1
   private closePreparation: Promise<void> | null = null
   private destroyed = false
-  private testResultSource: TestRunSourceSnapshot | null = null
-  private liveRenderFrame: number | null = null
-  private liveRenderToken = 0
-  private bottomPanelHeight: number
-  private panelResizeStartY: number | null = null
-  private panelResizeStartHeight: number | null = null
-  private gitFileListWidth: number
-  private gitSplitterStartX: number | null = null
-  private gitSplitterStartWidth: number | null = null
-  private sidebarWidth: number
-  private sidebarSplitterStartX: number | null = null
-  private sidebarSplitterStartWidth: number | null = null
-  private dailyDescriptionHeight: number
-  private dailyDescriptionResizeStartY: number | null = null
-  private dailyDescriptionResizeStartHeight: number | null = null
-  private gitStatusRequestId = 0
-  private gitDiffRequestId = 0
-  private gitOperationId = 0
   private fileOperationId = 0
   private fileOpenInProgress = false
-  private gitRefreshTimer: ReturnType<typeof setTimeout> | null = null
-  private dailyRefreshTimer: ReturnType<typeof setTimeout> | null = null
-  private dailyRequestId = 0
-  private problemNumberDraft: string | null = null
-  private lastProblemRequest: ProblemSelection = 'daily'
-  /** Remember the current daily id while a manual problem is being viewed. */
-  private latestDailyProblem: { frontendId: string; dateKey: string } | null = null
-  private pendingGitDiffPath: string | null = null
   private saveWriteInFlight = false
   private savedFlash = false
   private savedFlashTimer: ReturnType<typeof setTimeout> | null = null
@@ -296,9 +210,12 @@ export class LeetcoderApp {
   private gitDiscardDialogFocusTarget: HTMLElement | null = null
   private deleteDialogFile: ProblemFileEntry | null = null
   private deleteDialogFocusTarget: HTMLElement | null = null
-  private renderedFileTabsActiveId: number | null = null
   private renameTargetFile: ProblemFileEntry | null = null
   private errorToastElement: HTMLElement | null = null
+  private readonly gitController: GitController
+  private readonly paneLayout: PaneLayoutController
+  private readonly fileTabsView: FileTabsView
+  private readonly testRunController: TestRunController
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     accordionGroupKeys('easy', true),
   )
@@ -343,11 +260,11 @@ export class LeetcoderApp {
       }
       event.preventDefault()
       if (runAction === 'run-test') {
-        void this.runCurrentTest()
+        void this.testRunController.runCurrentTest()
       } else {
         // Ctrl+Shift+R is still useful outside an @Test method. In that
         // context it follows Ctrl+R and runs the complete test class.
-        void this.runCurrentTest(findJavaTestMethodAt(this.editor.view.state) ?? undefined)
+        void this.testRunController.runCurrentTest(findJavaTestMethodAt(this.editor.view.state) ?? undefined)
       }
       return
     }
@@ -391,38 +308,6 @@ export class LeetcoderApp {
     items[nextIndex]?.focus()
   }
 
-  private readonly handlePanelPointerMove = (event: PointerEvent): void => {
-    if (this.panelResizeStartY === null || this.panelResizeStartHeight === null) {
-      return
-    }
-    const nextHeight = clampBottomPanelHeight(
-      this.panelResizeStartHeight + this.panelResizeStartY - event.clientY,
-    )
-    if (nextHeight === this.bottomPanelHeight) {
-      return
-    }
-    this.bottomPanelHeight = nextHeight
-    this.applyBottomPanelHeight()
-    this.applyDailyDescriptionHeight()
-  }
-
-  private readonly handlePanelPointerUp = (): void => {
-    if (this.panelResizeStartY === null) {
-      return
-    }
-    this.panelResizeStartY = null
-    this.panelResizeStartHeight = null
-    this.root.classList.remove('is-resizing-panel')
-    this.storage?.setItem(BOTTOM_PANEL_HEIGHT_KEY, String(this.bottomPanelHeight))
-  }
-
-  private readonly handlePanelWindowBlur = (): void => {
-    this.handlePanelPointerUp()
-    this.handleGitSplitterPointerUp()
-    this.handleSidebarSplitterPointerUp()
-    this.handleDailyDescriptionResizePointerUp()
-  }
-
   private readonly handleWindowFocus = (): void => {
     this.handleAppVisibilityReturn()
   }
@@ -431,175 +316,13 @@ export class LeetcoderApp {
     this.revealSelectedFileInExplorer()
   }
 
-  private readonly handleFileTabsWheel = (event: WheelEvent): void => {
-    const list = this.root.querySelector<HTMLElement>('#file-tabs')
-    if (!list || !isFileTabsShiftWheel(event) || list.scrollWidth <= list.clientWidth) {
-      return
-    }
-    event.preventDefault()
-    list.scrollLeft += event.deltaY
-  }
-
   private readonly handleVisibilityChange = (): void => {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-      this.clearScheduledGitRefresh()
-      this.clearScheduledDailyRefresh()
+      this.gitController.clearScheduledRefresh()
+      this.problemSelectionController.clearScheduledRefresh()
       return
     }
     this.handleAppVisibilityReturn()
-  }
-
-  private readonly handleWindowResize = (): void => {
-    const nextHeight = clampBottomPanelHeight(this.bottomPanelHeight)
-    if (nextHeight !== this.bottomPanelHeight) {
-      this.bottomPanelHeight = nextHeight
-      this.storage?.setItem(BOTTOM_PANEL_HEIGHT_KEY, String(this.bottomPanelHeight))
-    }
-    this.applyBottomPanelHeight()
-    const nextWidth = clampGitFileListWidth(this.gitFileListWidth, this.gitWorkspaceWidth())
-    if (nextWidth !== this.gitFileListWidth) {
-      this.gitFileListWidth = nextWidth
-      this.storage?.setItem(GIT_FILE_LIST_WIDTH_KEY, String(this.gitFileListWidth))
-    }
-    this.applyGitFileListWidth()
-    const nextSidebarWidth = clampSidebarWidth(this.sidebarWidth, this.sidebarWorkspaceWidth())
-    if (nextSidebarWidth !== this.sidebarWidth) {
-      this.sidebarWidth = nextSidebarWidth
-      this.storage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth))
-    }
-    this.applySidebarWidth()
-    const nextDescriptionHeight = clampDailyDescriptionHeight(
-      this.dailyDescriptionHeight,
-      this.dailyDescriptionWorkspaceHeight(),
-    )
-    if (nextDescriptionHeight !== this.dailyDescriptionHeight) {
-      this.dailyDescriptionHeight = nextDescriptionHeight
-      this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
-    }
-    this.applyDailyDescriptionHeight()
-  }
-
-  private readonly handleGitSplitterPointerMove = (event: PointerEvent): void => {
-    if (this.gitSplitterStartX === null || this.gitSplitterStartWidth === null) {
-      return
-    }
-    const nextWidth = clampGitFileListWidth(
-      this.gitSplitterStartWidth + event.clientX - this.gitSplitterStartX,
-      this.gitWorkspaceWidth(),
-    )
-    if (nextWidth === this.gitFileListWidth) {
-      return
-    }
-    this.gitFileListWidth = nextWidth
-    this.applyGitFileListWidth()
-  }
-
-  private readonly handleGitSplitterPointerUp = (): void => {
-    if (this.gitSplitterStartX === null) {
-      return
-    }
-    this.gitSplitterStartX = null
-    this.gitSplitterStartWidth = null
-    this.root.classList.remove('is-resizing-git')
-    this.storage?.setItem(GIT_FILE_LIST_WIDTH_KEY, String(this.gitFileListWidth))
-  }
-
-  private readonly handleGitSplitterKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') {
-      return
-    }
-    event.preventDefault()
-    const nextWidth = event.key === 'Home'
-      ? MIN_GIT_FILE_LIST_WIDTH
-      : event.key === 'End'
-        ? maxGitFileListWidth(this.gitWorkspaceWidth())
-        : this.gitFileListWidth + (event.key === 'ArrowRight' ? 16 : -16)
-    this.gitFileListWidth = clampGitFileListWidth(nextWidth, this.gitWorkspaceWidth())
-    this.applyGitFileListWidth()
-    this.storage?.setItem(GIT_FILE_LIST_WIDTH_KEY, String(this.gitFileListWidth))
-  }
-
-  private readonly handleSidebarSplitterPointerMove = (event: PointerEvent): void => {
-    if (this.sidebarSplitterStartX === null || this.sidebarSplitterStartWidth === null) {
-      return
-    }
-    const nextWidth = clampSidebarWidth(
-      this.sidebarSplitterStartWidth + event.clientX - this.sidebarSplitterStartX,
-      this.sidebarWorkspaceWidth(),
-    )
-    if (nextWidth === this.sidebarWidth) {
-      return
-    }
-    this.sidebarWidth = nextWidth
-    this.applySidebarWidth()
-  }
-
-  private readonly handleSidebarSplitterPointerUp = (): void => {
-    if (this.sidebarSplitterStartX === null) {
-      return
-    }
-    this.sidebarSplitterStartX = null
-    this.sidebarSplitterStartWidth = null
-    this.root.classList.remove('is-resizing-sidebar')
-    this.storage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth))
-  }
-
-  private readonly handleSidebarSplitterKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') {
-      return
-    }
-    event.preventDefault()
-    const nextWidth = event.key === 'Home'
-      ? MIN_SIDEBAR_WIDTH
-      : event.key === 'End'
-        ? maxSidebarWidth(this.sidebarWorkspaceWidth())
-        : this.sidebarWidth + (event.key === 'ArrowRight' ? 16 : -16)
-    this.sidebarWidth = clampSidebarWidth(nextWidth, this.sidebarWorkspaceWidth())
-    this.applySidebarWidth()
-    this.storage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth))
-  }
-
-  private readonly handleDailyDescriptionResizePointerMove = (event: PointerEvent): void => {
-    if (this.dailyDescriptionResizeStartY === null || this.dailyDescriptionResizeStartHeight === null) {
-      return
-    }
-    const nextHeight = clampDailyDescriptionHeight(
-      this.dailyDescriptionResizeStartHeight + event.clientY - this.dailyDescriptionResizeStartY,
-      this.dailyDescriptionWorkspaceHeight(),
-    )
-    if (nextHeight === this.dailyDescriptionHeight) {
-      return
-    }
-    this.dailyDescriptionHeight = nextHeight
-    this.applyDailyDescriptionHeight()
-  }
-
-  private readonly handleDailyDescriptionResizePointerUp = (): void => {
-    if (this.dailyDescriptionResizeStartY === null) {
-      return
-    }
-    this.dailyDescriptionResizeStartY = null
-    this.dailyDescriptionResizeStartHeight = null
-    this.root.classList.remove('is-resizing-description')
-    this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
-  }
-
-  private readonly handleDailyDescriptionResizeKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown' && event.key !== 'Home' && event.key !== 'End') {
-      return
-    }
-    event.preventDefault()
-    const nextHeight = event.key === 'Home'
-      ? MIN_DAILY_DESCRIPTION_HEIGHT
-      : event.key === 'End'
-        ? maxDailyDescriptionHeight(this.dailyDescriptionWorkspaceHeight())
-        : this.dailyDescriptionHeight + (event.key === 'ArrowDown' ? 16 : -16)
-    this.dailyDescriptionHeight = clampDailyDescriptionHeight(
-      nextHeight,
-      this.dailyDescriptionWorkspaceHeight(),
-    )
-    this.applyDailyDescriptionHeight()
-    this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
   }
 
   private readonly handleContextMenuOutside = (event: PointerEvent): void => {
@@ -652,24 +375,6 @@ export class LeetcoderApp {
     }
   }
 
-  private readonly handlePanelKeydown = (event: KeyboardEvent): void => {
-    const step = event.shiftKey ? 40 : 16
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'Home' || event.key === 'End') {
-      event.preventDefault()
-    } else {
-      return
-    }
-    const nextHeight = event.key === 'Home'
-      ? MIN_BOTTOM_PANEL_HEIGHT
-      : event.key === 'End'
-        ? maxBottomPanelHeight()
-        : this.bottomPanelHeight + (event.key === 'ArrowUp' ? step : -step)
-    this.bottomPanelHeight = clampBottomPanelHeight(nextHeight)
-    this.applyBottomPanelHeight()
-    this.applyDailyDescriptionHeight()
-    this.storage?.setItem(BOTTOM_PANEL_HEIGHT_KEY, String(this.bottomPanelHeight))
-  }
-
   constructor(root: HTMLElement, options: AppOptions = {}) {
     this.root = root
     this.backend = options.backend ?? createBackendClient()
@@ -678,12 +383,39 @@ export class LeetcoderApp {
     this.requestClose = options.requestClose
     this.themeMode = readThemeMode(this.storage)
     applyTheme(this.themeMode)
-    this.bottomPanelHeight = readBottomPanelHeight(this.storage)
-    this.gitFileListWidth = readGitFileListWidth(this.storage)
-    this.sidebarWidth = readSidebarWidth(this.storage)
-    this.dailyDescriptionHeight = readDailyDescriptionHeight(this.storage)
     this.dailyDescriptionOpen = this.storage?.getItem(DAILY_DESCRIPTION_KEY) === 'open'
+    this.gitController = new GitController(this.backend, {
+      getContext: () => ({
+        repoPath: this.state.repoPath,
+        projectValid: this.state.projectValid,
+        repositoryGeneration: this.repositoryGeneration,
+        appBusy: this.state.busy,
+      }),
+      flushPendingSave: () => this.flushPendingSave(),
+      setAppBusy: (busy) => {
+        this.state.busy = busy
+      },
+      render: () => this.renderAll(),
+      renderPanel: () => this.renderGitPanel(),
+      isGitPanelVisible: () => this.state.bottomPanelTab === 'git',
+      isWindowVisible: () => this.isWindowVisible(),
+      isDestroyed: () => this.destroyed,
+      setMessage: (message, tone) => this.setMessage(message, tone),
+    }, this.state.git)
     this.renderShell()
+    this.paneLayout = createPaneLayoutController(this.root, { storage: this.storage })
+    this.fileTabsView = createFileTabsView(this.element<HTMLElement>('#file-tabs'), {
+      onOpenTab: (tabId) => this.openTab(tabId),
+      onCloseTab: (tabId) => this.closeOpenTab(tabId),
+    })
+    this.problemSelectionController = new ProblemSelectionController({
+      state: this.state,
+      backend: this.backend,
+      render: () => this.renderAll(),
+      setMessage: (message, tone) => this.setMessage(message, tone),
+      isWindowVisible: () => this.isWindowVisible(),
+      isDestroyed: () => this.destroyed,
+    })
     this.dailyProblemView = createDailyProblemView(
       {
         header: this.element<HTMLElement>('#daily-header'),
@@ -691,26 +423,17 @@ export class LeetcoderApp {
         resizeHandle: this.element<HTMLElement>('#daily-description-resize-handle'),
       },
       {
-        onLookupInput: (value) => {
-          this.problemNumberDraft = value
-        },
+        onLookupInput: (value) => this.problemSelectionController.setProblemNumberDraft(value),
         onLookupSubmit: (value) => {
-          void this.loadProblemByNumber(value)
+          void this.problemSelectionController.loadProblemByNumber(value)
         },
         onRetry: () => {
-          if (this.lastProblemRequest === 'manual') {
-            void this.loadProblemByNumber(this.problemNumberDraft ?? '')
-          } else {
-            void this.loadDailyProblem(true)
-          }
+          this.problemSelectionController.retry()
         },
         onBackToToday: () => {
-          this.problemNumberDraft = null
-          this.state.problemSelection = 'daily'
-          this.state.dailyProblemDateKey = null
-          void this.loadDailyProblem(true)
+          this.problemSelectionController.selectToday()
         },
-        onRefresh: () => this.refreshSelectedProblem(),
+        onRefresh: () => this.problemSelectionController.refreshSelectedProblem(),
         onToggleDescription: () => {
           this.dailyDescriptionOpen = !this.dailyDescriptionOpen
           this.storage?.setItem(DAILY_DESCRIPTION_KEY, this.dailyDescriptionOpen ? 'open' : 'closed')
@@ -722,7 +445,7 @@ export class LeetcoderApp {
         onCreateFile: () => {
           void this.createFileForToday()
         },
-        onApplyDescriptionHeight: () => this.applyDailyDescriptionHeight(),
+        onApplyDescriptionHeight: () => this.paneLayout.applyDailyDescriptionHeight(),
       },
     )
     this.updateController = createUpdateController(
@@ -772,6 +495,27 @@ export class LeetcoderApp {
       onResult: (snapshot, diagnostics) => this.applyLiveDiagnostics(snapshot, diagnostics),
       onError: (snapshot, error) => this.handleLiveDiagnosticsError(snapshot, error),
     })
+    this.testRunController = new TestRunController({
+      state: this.state,
+      runProblemTest: this.backend.runProblemTest.bind(this.backend),
+      flushPendingSave: () => this.flushPendingSave(),
+      setEditorIssues: (issues) => this.editor.setIssues(issues),
+      setLiveDiagnosticsBlocked: (blocked) => this.liveDiagnostics.setBlocked(blocked),
+      cancelLiveDiagnostics: () => this.liveDiagnostics.cancel(),
+      clearLiveDiagnosticsError: () => {
+        this.state.liveDiagnosticsError = null
+      },
+      selectTestsTab: () => this.selectBottomPanelTab('tests'),
+      renderAll: () => this.renderAll(),
+      renderResult: () => this.renderResult(),
+      setMessage: (message, tone) => this.setMessage(message, tone),
+      focusTestResult: (key) => {
+        const item = Array.from(this.root.querySelectorAll<HTMLButtonElement>('.test-tree-item'))
+          .find((entry) => entry.dataset.testKey === key)
+        item?.focus()
+      },
+      isDestroyed: () => this.destroyed,
+    })
     this.editor = new JavaEditor(this.element('#editor'), {
       onChange: (source) => this.onEditorChange(source),
       onSave: () => {
@@ -779,7 +523,7 @@ export class LeetcoderApp {
         return true
       },
       onRun: () => {
-        void this.runCurrentTest()
+        void this.testRunController.runCurrentTest()
         return true
       },
       onShowShortcuts: () => {
@@ -792,7 +536,7 @@ export class LeetcoderApp {
       onRunTestAtCursor: (methodName) => {
         // A cursor miss falls back to the same all-tests run as Ctrl+R. This
         // keeps the editor keymap and the window-level shortcut consistent.
-        void this.runCurrentTest(methodName ?? undefined)
+        void this.testRunController.runCurrentTest(methodName ?? undefined)
         return true
       },
     })
@@ -811,7 +555,7 @@ export class LeetcoderApp {
     } catch {
       // Without the watcher the editor still syncs on window focus.
     }
-    await this.loadDailyProblem()
+    await this.problemSelectionController.loadDailyProblem()
     const rememberedPath = this.storage?.getItem(LAST_REPOSITORY_KEY) ?? null
     if (rememberedPath) {
       await this.selectRepository(rememberedPath, false)
@@ -858,33 +602,20 @@ export class LeetcoderApp {
       return
     }
     await this.prepareToClose()
-    this.cancelScheduledLiveRender()
+    this.testRunController.dispose()
     this.liveDiagnostics.dispose()
-    this.clearScheduledGitRefresh()
+    this.gitController.dispose()
+    this.fileTabsView.dispose()
+    this.paneLayout.destroy()
     this.editor.destroy()
     this.autosave.dispose()
     this.element<HTMLElement>('#editor-host').removeEventListener('focusin', this.handleEditorFocus)
-    this.element<HTMLElement>('#file-tabs').removeEventListener('wheel', this.handleFileTabsWheel)
     window.removeEventListener('keydown', this.handleGlobalKeydown)
     window.removeEventListener('focus', this.handleWindowFocus)
     document.removeEventListener('visibilitychange', this.handleVisibilityChange)
-    window.removeEventListener('pointermove', this.handlePanelPointerMove)
-    window.removeEventListener('pointerup', this.handlePanelPointerUp)
-    window.removeEventListener('pointercancel', this.handlePanelPointerUp)
-    window.removeEventListener('pointermove', this.handleGitSplitterPointerMove)
-    window.removeEventListener('pointerup', this.handleGitSplitterPointerUp)
-    window.removeEventListener('pointercancel', this.handleGitSplitterPointerUp)
-    window.removeEventListener('pointermove', this.handleSidebarSplitterPointerMove)
-    window.removeEventListener('pointerup', this.handleSidebarSplitterPointerUp)
-    window.removeEventListener('pointercancel', this.handleSidebarSplitterPointerUp)
-    window.removeEventListener('pointermove', this.handleDailyDescriptionResizePointerMove)
-    window.removeEventListener('pointerup', this.handleDailyDescriptionResizePointerUp)
-    window.removeEventListener('pointercancel', this.handleDailyDescriptionResizePointerUp)
-    window.removeEventListener('blur', this.handlePanelWindowBlur)
-    window.removeEventListener('resize', this.handleWindowResize)
     window.removeEventListener('pointerdown', this.handleContextMenuOutside)
     window.removeEventListener('keydown', this.handleContextMenuKeydown)
-    this.clearScheduledDailyRefresh()
+    this.problemSelectionController.dispose()
     if (this.updateCheckTimer !== null) {
       clearInterval(this.updateCheckTimer)
       this.updateCheckTimer = null
@@ -928,7 +659,6 @@ export class LeetcoderApp {
     this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
     this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
     this.element<HTMLElement>('#git-branch-icon').append(iconFor('gitBranch', 'button-icon'))
-    this.element<HTMLElement>('#file-tabs').addEventListener('wheel', this.handleFileTabsWheel, { passive: false })
   }
 
   private renderEditorEmptyState(): void {
@@ -1002,7 +732,7 @@ export class LeetcoderApp {
       }
     })
     this.element<HTMLButtonElement>('#run-test').addEventListener('click', () => {
-      void this.runCurrentTest()
+      void this.testRunController.runCurrentTest()
     })
     this.element<HTMLButtonElement>('#tests-tab').addEventListener('click', () => {
       this.selectBottomPanelTab('tests')
@@ -1028,10 +758,10 @@ export class LeetcoderApp {
       })
     }
     this.element<HTMLButtonElement>('#git-select-all').addEventListener('click', () => {
-      this.selectAllGitFiles()
+      this.gitController.selectAllFiles()
     })
     this.element<HTMLButtonElement>('#git-select-none').addEventListener('click', () => {
-      this.selectNoGitFiles()
+      this.gitController.selectNoFiles()
     })
     this.element<HTMLInputElement>('#git-commit-message').addEventListener('input', (event) => {
       // Typing must not re-render the panel — a rerender would fight the
@@ -1041,10 +771,10 @@ export class LeetcoderApp {
       this.updateGitCommitControls()
     })
     this.element<HTMLButtonElement>('#git-commit').addEventListener('click', () => {
-      void this.commitSelectedGitFiles(false)
+      void this.gitController.commitSelectedFiles(false)
     })
     this.element<HTMLButtonElement>('#git-commit-push').addEventListener('click', () => {
-      void this.commitAndPushGitChanges()
+      void this.gitController.commitSelectedFiles(true)
     })
     this.element<HTMLButtonElement>('#delete-file-action').addEventListener('click', () => {
       this.openDeleteFileDialog()
@@ -1165,72 +895,6 @@ export class LeetcoderApp {
         this.closeDeleteFileDialog()
       }
     })
-    const sidebarSplitter = this.element<HTMLElement>('#sidebar-splitter')
-    sidebarSplitter.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) {
-        return
-      }
-      event.preventDefault()
-      this.sidebarSplitterStartX = event.clientX
-      this.sidebarSplitterStartWidth = this.sidebarWidth
-      this.root.classList.add('is-resizing-sidebar')
-      sidebarSplitter.setPointerCapture?.(event.pointerId)
-    })
-    sidebarSplitter.addEventListener('keydown', this.handleSidebarSplitterKeydown)
-    sidebarSplitter.addEventListener('lostpointercapture', this.handleSidebarSplitterPointerUp)
-    const descriptionResizeHandle = this.element<HTMLElement>('#daily-description-resize-handle')
-    descriptionResizeHandle.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0 || descriptionResizeHandle.hidden) {
-        return
-      }
-      event.preventDefault()
-      this.dailyDescriptionResizeStartY = event.clientY
-      this.dailyDescriptionResizeStartHeight = this.dailyDescriptionHeight
-      this.root.classList.add('is-resizing-description')
-      descriptionResizeHandle.setPointerCapture?.(event.pointerId)
-    })
-    descriptionResizeHandle.addEventListener('keydown', this.handleDailyDescriptionResizeKeydown)
-    descriptionResizeHandle.addEventListener('lostpointercapture', this.handleDailyDescriptionResizePointerUp)
-    const gitSplitter = this.element<HTMLElement>('#git-splitter')
-    gitSplitter.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) {
-        return
-      }
-      event.preventDefault()
-      this.gitSplitterStartX = event.clientX
-      this.gitSplitterStartWidth = this.gitFileListWidth
-      this.root.classList.add('is-resizing-git')
-      gitSplitter.setPointerCapture?.(event.pointerId)
-    })
-    gitSplitter.addEventListener('keydown', this.handleGitSplitterKeydown)
-    gitSplitter.addEventListener('lostpointercapture', this.handleGitSplitterPointerUp)
-    const resizeHandle = this.element<HTMLElement>('#bottom-panel-resize-handle')
-    resizeHandle.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) {
-        return
-      }
-      event.preventDefault()
-      this.panelResizeStartY = event.clientY
-      this.panelResizeStartHeight = this.bottomPanelHeight
-      this.root.classList.add('is-resizing-panel')
-      resizeHandle.setPointerCapture?.(event.pointerId)
-    })
-    resizeHandle.addEventListener('keydown', this.handlePanelKeydown)
-    resizeHandle.addEventListener('lostpointercapture', this.handlePanelPointerUp)
-    window.addEventListener('pointermove', this.handlePanelPointerMove)
-    window.addEventListener('pointerup', this.handlePanelPointerUp)
-    window.addEventListener('pointercancel', this.handlePanelPointerUp)
-    window.addEventListener('pointermove', this.handleGitSplitterPointerMove)
-    window.addEventListener('pointerup', this.handleGitSplitterPointerUp)
-    window.addEventListener('pointercancel', this.handleGitSplitterPointerUp)
-    window.addEventListener('pointermove', this.handleSidebarSplitterPointerMove)
-    window.addEventListener('pointerup', this.handleSidebarSplitterPointerUp)
-    window.addEventListener('pointercancel', this.handleSidebarSplitterPointerUp)
-    window.addEventListener('pointermove', this.handleDailyDescriptionResizePointerMove)
-    window.addEventListener('pointerup', this.handleDailyDescriptionResizePointerUp)
-    window.addEventListener('pointercancel', this.handleDailyDescriptionResizePointerUp)
-    window.addEventListener('blur', this.handlePanelWindowBlur)
-    window.addEventListener('resize', this.handleWindowResize)
     window.addEventListener('pointerdown', this.handleContextMenuOutside)
     window.addEventListener('keydown', this.handleContextMenuKeydown)
     window.addEventListener('keydown', this.handleGlobalKeydown)
@@ -1286,7 +950,10 @@ export class LeetcoderApp {
       this.state.files = []
       this.state.openTabs = []
       this.state.fileSearch = ''
-      this.resetGitState()
+      this.state.gitContextMenu = null
+      this.gitDiscardDialogFile = null
+      this.gitDiscardDialogFocusTarget = null
+      this.gitController.reset()
       this.resetCurrentFile()
     }
     try {
@@ -1316,130 +983,6 @@ export class LeetcoderApp {
     }
   }
 
-  private async loadDailyProblem(notifyOnError = false): Promise<void> {
-    if (this.state.dailyLoading) {
-      return
-    }
-    const requestId = ++this.dailyRequestId
-    this.lastProblemRequest = 'daily'
-    this.state.dailyLoading = true
-    this.state.dailyError = null
-    this.renderAll()
-    try {
-      const problem = await this.backend.fetchDailyProblem()
-      if (this.destroyed || requestId !== this.dailyRequestId) {
-        return
-      }
-      const problemDateKey = normalizeDailyProblemDateKey(problem.date)
-      const currentDateKey = utcDateKey()
-      if (!problemDateKey) {
-        this.state.dailyRetryPending = true
-        this.state.dailyError = 'The daily problem returned an invalid date.'
-        if (notifyOnError) {
-          this.setMessage(`Could not load today’s problem: ${this.state.dailyError}`, 'error')
-        }
-      } else if (problemDateKey !== currentDateKey) {
-        // The provider still serves yesterday's problem. Not an error: the
-        // card shows a waiting state and the retry timer keeps polling.
-        this.state.dailyRetryPending = true
-        this.state.dailyProblemDateKey = problemDateKey
-        this.state.dailyError = null
-        if (notifyOnError) {
-          this.setMessage('Today’s problem is not available yet. Try again shortly.', 'info')
-        }
-      } else {
-        this.state.dailyProblem = problem
-        this.state.problemSelection = 'daily'
-        this.problemNumberDraft = problem.frontendId
-        this.latestDailyProblem = {
-          frontendId: problem.frontendId,
-          dateKey: problemDateKey,
-        }
-        this.state.dailyProblemDateKey = problemDateKey
-        this.state.dailyRetryPending = false
-        this.state.dailyError = null
-      }
-    } catch (error) {
-      if (this.destroyed || requestId !== this.dailyRequestId) {
-        return
-      }
-      this.state.dailyRetryPending = true
-      this.state.dailyError = errorMessage(error)
-      if (notifyOnError) {
-        this.setMessage(`Could not load today’s problem: ${errorMessage(error)}`, 'error')
-      }
-    } finally {
-      if (!this.destroyed && requestId === this.dailyRequestId) {
-        this.state.dailyLoading = false
-        this.scheduleDailyProblemRefresh(this.state.dailyRetryPending ? DAILY_RETRY_INTERVAL_MS : nextUtcMidnightDelayMs())
-        this.renderAll()
-      }
-    }
-  }
-
-  private async loadProblemByNumber(value: string): Promise<void> {
-    const problemNumber = normalizeProblemNumber(value)
-    if (!problemNumber) {
-      this.setMessage('Enter a valid LeetCode problem number.', 'error')
-      return
-    }
-    if (this.state.dailyLoading) {
-      return
-    }
-
-    const requestId = ++this.dailyRequestId
-    this.lastProblemRequest = 'manual'
-    this.problemNumberDraft = problemNumber
-    this.state.dailyLoading = true
-    this.state.dailyError = null
-    this.renderAll()
-    try {
-      const problem = await this.backend.fetchProblemByNumber(problemNumber)
-      if (this.destroyed || requestId !== this.dailyRequestId) {
-        return
-      }
-      this.state.dailyProblem = problem
-      this.state.problemSelection = 'manual'
-      this.state.dailyProblemDateKey = null
-      this.state.dailyRetryPending = false
-      this.state.dailyError = null
-    } catch (error) {
-      if (this.destroyed || requestId !== this.dailyRequestId) {
-        return
-      }
-      // Keep the currently displayed problem intact when a lookup fails.
-      if (this.state.dailyProblem && this.problemNumberDraft === problemNumber) {
-        this.problemNumberDraft = this.state.dailyProblem.frontendId
-      }
-      this.state.dailyRetryPending = false
-      this.state.dailyError = errorMessage(error)
-      this.setMessage(`Could not load problem #${problemNumber}: ${errorMessage(error)}`, 'error')
-    } finally {
-      if (!this.destroyed && requestId === this.dailyRequestId) {
-        this.state.dailyLoading = false
-        this.scheduleDailyProblemRefresh()
-        this.renderAll()
-      }
-    }
-  }
-
-  private refreshSelectedProblem(): void {
-    if (this.state.problemSelection === 'manual' && this.state.dailyProblem) {
-      void this.loadProblemByNumber(this.state.dailyProblem.frontendId)
-      return
-    }
-    void this.loadDailyProblem(true)
-  }
-
-  private isViewingTodayProblem(problem: DailyProblem): boolean {
-    const currentDateKey = utcDateKey()
-    if (this.state.problemSelection === 'daily') {
-      return this.state.dailyProblemDateKey === currentDateKey
-    }
-    return this.latestDailyProblem?.frontendId === problem.frontendId
-      && this.latestDailyProblem.dateKey === currentDateKey
-  }
-
   private async refreshFiles(): Promise<boolean> {
     if (!this.state.repoPath || !this.state.projectValid) {
       return false
@@ -1461,7 +1004,7 @@ export class LeetcoderApp {
         return false
       }
       this.state.files = files
-      this.markGitStale()
+      this.gitController.markStale()
       for (const tab of this.state.openTabs) {
         const refreshed = findIndexedProblemFile(filesByPath, tab.path)
         if (refreshed) {
@@ -1575,8 +1118,9 @@ export class LeetcoderApp {
       return
     }
     this.state.liveDiagnosticsError = null
-    const testIssues = this.testResultSource && this.state.testResult
-      && this.isTestRunSourceCurrent(this.testResultSource)
+    const testResultSource = this.testRunController.resultSource
+    const testIssues = testResultSource && this.state.testResult
+      && this.testRunController.isResultSourceCurrent(testResultSource)
       ? collectEditorIssues(this.state.testResult, snapshot.relativePath)
       : []
     this.editor.setIssues(
@@ -1594,18 +1138,6 @@ export class LeetcoderApp {
     // service failure should be visible without interrupting typing.
     this.state.liveDiagnosticsError = errorMessage(error)
     this.renderResult()
-  }
-
-  private resetTestState(): void {
-    this.state.testResult = null
-    this.state.testRun = null
-    this.state.selectedTestKey = null
-    this.testSelectionExplicit = false
-    this.testRunGeneration += 1
-    this.editor.setIssues([])
-    this.liveDiagnostics.cancel()
-    this.state.liveDiagnosticsError = null
-    this.testResultSource = null
   }
 
   private async openFile(file: ProblemFileEntry): Promise<void> {
@@ -1647,7 +1179,7 @@ export class LeetcoderApp {
         this.state.openTabs.push(tab)
       }
       this.state.activeTabId = tab.id
-      this.resetTestState()
+      this.testRunController.resetTestState()
       this.state.selectedPath = file.path
       this.state.selectedSource = source
       this.state.savedSource = source
@@ -1751,7 +1283,7 @@ export class LeetcoderApp {
         difficulty: problem.difficulty,
         javaCodeSnippet: problem.javaSnippet,
       })
-      this.markGitStale()
+      this.gitController.markStale()
       await this.refreshFiles()
       const createdFile = this.state.files.find((file) => file.path === plan.path) ?? {
         path: plan.path,
@@ -1772,17 +1304,13 @@ export class LeetcoderApp {
     if (this.suppressEditorChange || !this.state.selectedPath || !this.state.repoPath) {
       return
     }
-    const activeRunId = this.state.testRun?.status === 'running'
-      ? this.state.testRun.id
-      : null
     this.editor.setIssues([])
     this.state.selectedSource = source
-    this.testResultSource = null
     this.state.dirty = source !== this.state.savedSource
     this.state.saveError = null
     this.clearSavedFlash()
-    if (activeRunId !== null) {
-      this.discardStaleTestRun(activeRunId)
+    if (this.state.testRun?.status === 'running') {
+      this.testRunController.cancelCurrentRun()
       this.renderResult()
     }
     if (!this.gitDiscardInProgress) {
@@ -1805,7 +1333,7 @@ export class LeetcoderApp {
     this.state.selectedFqcn = null
     this.state.dirty = false
     this.state.saveError = null
-    this.resetTestState()
+    this.testRunController.resetTestState()
     this.suppressEditorChange = true
     try {
       this.editor.setValue('')
@@ -1846,7 +1374,7 @@ export class LeetcoderApp {
     this.state.dirty = this.state.selectedSource !== this.state.savedSource
     this.state.saveError = null
     this.element<HTMLElement>('#editor-host').dataset.savedSource = snapshot.source
-    this.markGitStale()
+    this.gitController.markStale()
     if (!this.state.dirty) {
       this.flashSavedIndicator()
     }
@@ -1882,337 +1410,24 @@ export class LeetcoderApp {
     this.renderAll()
   }
 
-  private async runCurrentTest(testMethod?: string): Promise<void> {
-    if (this.state.busy) {
-      return
-    }
-    if (!this.state.repoPath || !this.state.selectedPath || !this.state.selectedFqcn) {
-      this.setMessage('Select a Java problem file to run', 'info')
-      return
-    }
-    const runSnapshot: TestRunSourceSnapshot = {
-      repoPath: this.state.repoPath,
-      filePath: this.state.selectedPath,
-      source: this.state.selectedSource,
-    }
-    const runRepoPath = runSnapshot.repoPath
-    const runFilePath = runSnapshot.filePath
-    const runFqcn = this.state.selectedFqcn
-    this.state.busy = true
-    const runId = ++this.testRunGeneration
-    const run: TestRunSnapshot = {
-      id: runId,
-      status: 'running',
-      phase: 'starting',
-      startedAt: Date.now(),
-      tests: [],
-      stdout: '',
-      stderr: '',
-      activeTest: null,
-      error: null,
-      testMethod: testMethod ?? null,
-    }
-    this.state.testRun = run
-    this.state.testResult = null
-    this.testResultSource = null
-    this.state.selectedTestKey = null
-    this.testSelectionExplicit = false
-    this.liveDiagnostics.setBlocked(true)
-    this.editor.setIssues([])
-    // A starting run always brings the Tests tab forward so progress is visible.
-    this.selectBottomPanelTab('tests')
-    this.renderAll()
-    try {
-      if (!(await this.flushPendingSave())) {
-        if (this.isCurrentTestRun(runId)) {
-          if (!this.isTestRunSourceCurrent(runSnapshot)) {
-            this.discardStaleTestRun(runId)
-            return
-          }
-          const failure = runnerFailureResult(
-            run,
-            this.state.saveError ?? 'The source file could not be saved before running tests.',
-          )
-          run.status = 'error'
-          run.error = testFailureMessage(failure)
-          this.state.testResult = failure
-          this.testResultSource = runSnapshot
-          this.autoSelectFailedTest(failure)
-        }
-        return
-      }
-      const runner = (this.backend as unknown as TestRunnerBackend).runProblemTest
-      const onProgress = (progress: TestRunProgress): void => this.applyTestRunProgress(runId, progress)
-      const result = testMethod === undefined
-        ? await runner(runRepoPath, runFqcn, onProgress)
-        : await runner(runRepoPath, runFqcn, onProgress, testMethod)
-      if (!this.isCurrentTestRun(runId)) {
-        return
-      }
-      if (!this.isTestRunSourceCurrent(runSnapshot)) {
-        this.discardStaleTestRun(runId)
-        return
-      }
-      this.state.testResult = result
-      this.testResultSource = runSnapshot
-      this.autoSelectFailedTest(result)
-      this.editor.setIssues(collectEditorIssues(result, runFilePath))
-      run.status = 'completed'
-      run.phase = result.phase
-      run.tests = result.tests
-      run.stdout = result.stdout
-      run.stderr = result.stderr
-      run.activeTest = null
-      run.error = result.success ? null : testFailureMessage(result)
-      if (result.success) {
-        // Failures never toast: the Tests panel is already front and center.
-        this.setMessage(testResultBannerMessage(result), 'success')
-      }
-    } catch (error) {
-      if (this.isCurrentTestRun(runId)) {
-        if (!this.isTestRunSourceCurrent(runSnapshot)) {
-          this.discardStaleTestRun(runId)
-          return
-        }
-        const failure = runnerFailureResult(run, errorMessage(error))
-        run.status = 'error'
-        run.phase = failure.phase
-        run.error = testFailureMessage(failure)
-        run.activeTest = null
-        this.state.testResult = failure
-        this.testResultSource = runSnapshot
-        this.autoSelectFailedTest(failure)
-      }
-    } finally {
-      this.liveDiagnostics.setBlocked(false)
-      this.state.busy = false
-      this.renderAll()
-    }
-  }
-
-  private isCurrentTestRun(runId: number): boolean {
-    return this.state.testRun?.id === runId
-      && this.testRunGeneration === runId
-  }
-
-  private isTestRunSourceCurrent(snapshot: TestRunSourceSnapshot): boolean {
-    return isTestRunSourceCurrent(snapshot, {
-      repoPath: this.state.repoPath,
-      filePath: this.state.selectedPath,
-      source: this.state.selectedSource,
-    })
-  }
-
-  private discardStaleTestRun(runId: number): void {
-    if (!this.isCurrentTestRun(runId)) {
-      return
-    }
-    this.state.testRun = null
-    this.state.testResult = null
-    this.testResultSource = null
-    this.state.selectedTestKey = null
-    this.testSelectionExplicit = false
-    this.editor.setIssues([])
-    this.setMessage('Run cancelled — file changed', 'info')
-  }
-
-  private applyTestRunProgress(runId: number, progress: TestRunProgress): void {
-    if (!this.isCurrentTestRun(runId)) {
-      return
-    }
-    const run = this.state.testRun
-    if (!run || run.status !== 'running') {
-      return
-    }
-    switch (progress.kind) {
-      case 'started':
-        run.phase = 'starting'
-        break
-      case 'phase':
-        run.phase = progress.phase
-        break
-      case 'log':
-        run[progress.stream] += progress.text
-        break
-      case 'testStarted':
-        run.activeTest = progress.test
-        this.upsertLiveTest(run, { ...progress.test, status: 'running' })
-        break
-      case 'testFinished':
-        this.upsertLiveTest(run, progress.test)
-        if (progress.test.status === 'failed' || progress.test.status === 'error') {
-          this.autoSelectFailedTest(liveSnapshotResult(run))
-        }
-        if (sameTest(run.activeTest, progress.test)) {
-          run.activeTest = null
-        }
-        break
-    }
-    this.scheduleLiveResultRender()
-  }
-
-  private upsertLiveTest(run: TestRunSnapshot, test: TestCaseResult): void {
-    const index = run.tests.findIndex((entry) => sameTest(entry, test))
-    if (index < 0) {
-      run.tests.push(test)
-      return
-    }
-    run.tests[index] = { ...run.tests[index], ...test }
-  }
-
-  private scheduleLiveResultRender(): void {
-    if (this.destroyed || this.liveRenderFrame !== null) {
-      return
-    }
-    const token = ++this.liveRenderToken
-    const flush = (): void => {
-      if (token !== this.liveRenderToken || this.destroyed) {
-        return
-      }
-      this.liveRenderFrame = null
-      this.renderResult()
-    }
-    if (typeof window.requestAnimationFrame === 'function') {
-      this.liveRenderFrame = window.requestAnimationFrame(flush)
-    } else {
-      // The fallback keeps the same coalescing behavior in non-visual test
-      // environments where requestAnimationFrame is unavailable.
-      this.liveRenderFrame = -1
-      queueMicrotask(() => {
-        if (this.liveRenderFrame === -1) {
-          flush()
-        }
-      })
-    }
-  }
-
-  private cancelScheduledLiveRender(): void {
-    this.liveRenderToken += 1
-    if (
-      this.liveRenderFrame !== null
-      && this.liveRenderFrame !== -1
-      && typeof window.cancelAnimationFrame === 'function'
-    ) {
-      window.cancelAnimationFrame(this.liveRenderFrame)
-    }
-    this.liveRenderFrame = null
-  }
-
-  private resetGitState(): void {
-    this.clearScheduledGitRefresh()
-    this.state.gitContextMenu = null
-    this.gitDiscardDialogFile = null
-    this.gitDiscardDialogFocusTarget = null
-    this.gitStatusRequestId += 1
-    this.gitDiffRequestId += 1
-    this.gitOperationId += 1
-    this.pendingGitDiffPath = null
-    this.state.git = {
-      branch: null,
-      files: [],
-      selectedPaths: [],
-      activePath: null,
-      diffByPath: {},
-      fallbackDiff: '',
-      loading: false,
-      diffLoading: false,
-      busy: false,
-      error: null,
-      commitMessage: '',
-      commitMessageEdited: false,
-      loadedRepoPath: null,
-      stale: false,
-    }
-  }
-
-  private applyBottomPanelHeight(): void {
-    const panel = this.element<HTMLElement>('#bottom-panel')
-    panel.style.setProperty('--bottom-panel-height', `${this.bottomPanelHeight}px`)
-    const handle = this.element<HTMLElement>('#bottom-panel-resize-handle')
-    handle.setAttribute('aria-valuenow', String(this.bottomPanelHeight))
-    handle.setAttribute('aria-valuemax', String(maxBottomPanelHeight()))
-  }
-
-  private gitWorkspaceWidth(): number {
-    const workspace = this.root.querySelector<HTMLElement>('.git-workspace')
-    return workspace && workspace.clientWidth > 0 ? workspace.clientWidth : 900
-  }
-
-  private sidebarWorkspaceWidth(): number {
-    const workspace = this.root.querySelector<HTMLElement>('.workspace')
-    if (workspace && workspace.clientWidth > 0) {
-      return workspace.clientWidth
-    }
-    if (typeof window !== 'undefined' && window.innerWidth > 0) {
-      return window.innerWidth
-    }
-    return 1000
-  }
-
-  private applySidebarWidth(): void {
-    const workspace = this.element<HTMLElement>('.workspace')
-    const width = clampSidebarWidth(this.sidebarWidth, this.sidebarWorkspaceWidth())
-    this.sidebarWidth = width
-    workspace.style.setProperty('--sidebar-width', `${width}px`)
-    const splitter = this.element<HTMLElement>('#sidebar-splitter')
-    splitter.setAttribute('aria-valuenow', String(width))
-    splitter.setAttribute('aria-valuemax', String(maxSidebarWidth(this.sidebarWorkspaceWidth())))
-  }
-
-  private dailyDescriptionWorkspaceHeight(): number {
-    const column = this.root.querySelector<HTMLElement>('.editor-column')
-    if (column && column.clientHeight > 0) {
-      return column.clientHeight
-    }
-    // jsdom and the initial hidden webview do not expose layout metrics. The
-    // workspace is the viewport minus the app header and bottom panel.
-    return Math.max(
-      MIN_DAILY_DESCRIPTION_HEIGHT + MIN_CODE_CARD_HEIGHT + DAILY_DESCRIPTION_LAYOUT_OVERHEAD,
-      windowHeight() - 44 - this.bottomPanelHeight,
-    )
-  }
-
-  private applyDailyDescriptionHeight(): void {
-    const description = this.element<HTMLElement>('#daily-description')
-    const height = clampDailyDescriptionHeight(
-      this.dailyDescriptionHeight,
-      this.dailyDescriptionWorkspaceHeight(),
-    )
-    this.dailyDescriptionHeight = height
-    description.style.setProperty('--daily-description-height', `${height}px`)
-    const handle = this.element<HTMLElement>('#daily-description-resize-handle')
-    handle.setAttribute('aria-valuenow', String(height))
-    handle.setAttribute('aria-valuemax', String(maxDailyDescriptionHeight(this.dailyDescriptionWorkspaceHeight())))
-  }
-
-  private applyGitFileListWidth(): void {
-    const workspace = this.element<HTMLElement>('.git-workspace')
-    const width = clampGitFileListWidth(this.gitFileListWidth, this.gitWorkspaceWidth())
-    this.gitFileListWidth = width
-    workspace.style.setProperty('--git-file-list-width', `${width}px`)
-    const splitter = this.element<HTMLElement>('#git-splitter')
-    splitter.setAttribute('aria-valuenow', String(width))
-    splitter.setAttribute('aria-valuemax', String(maxGitFileListWidth(this.gitWorkspaceWidth())))
-  }
-
   private selectBottomPanelTab(tab: 'tests' | 'git', focus = false): void {
     this.state.bottomPanelTab = tab
     if (tab !== 'git') {
-      this.clearScheduledGitRefresh()
+      this.gitController.clearScheduledRefresh()
     }
     this.renderBottomPanelTabs()
     this.renderGitPanel()
     if (tab === 'git') {
       // The workspace has just become measurable; reclamp persisted width
       // against its actual client width instead of the hidden-panel fallback.
-      this.applyGitFileListWidth()
+      this.paneLayout.applyGitFileListWidth()
     }
     if (focus) {
       this.element<HTMLButtonElement>(tab === 'tests' ? '#tests-tab' : '#git-tab').focus()
     }
     if (tab === 'git' && this.state.repoPath && this.state.projectValid
       && !this.state.busy && !this.state.git.loading) {
-      void this.refreshGitStatus()
+      void this.gitController.refreshStatus()
     }
   }
 
@@ -2231,38 +1446,6 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#run-test').hidden = !testsSelected
   }
 
-  private isCurrentGitStatusRequest(
-    repoPath: string,
-    repositoryGeneration: number,
-    requestId: number,
-  ): boolean {
-    return this.state.projectValid
-      && this.state.repoPath === repoPath
-      && this.repositoryGeneration === repositoryGeneration
-      && this.gitStatusRequestId === requestId
-  }
-
-  private isCurrentGitDiffRequest(
-    repoPath: string,
-    repositoryGeneration: number,
-    statusRequestId: number,
-    diffRequestId: number,
-  ): boolean {
-    return this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, statusRequestId)
-      && this.gitDiffRequestId === diffRequestId
-  }
-
-  private isCurrentGitOperation(
-    repoPath: string,
-    repositoryGeneration: number,
-    operationId: number,
-  ): boolean {
-    return this.state.projectValid
-      && this.state.repoPath === repoPath
-      && this.repositoryGeneration === repositoryGeneration
-      && this.gitOperationId === operationId
-  }
-
   private isCurrentFileOperation(
     repoPath: string,
     repositoryGeneration: number,
@@ -2272,96 +1455,6 @@ export class LeetcoderApp {
       && this.state.repoPath === repoPath
       && this.repositoryGeneration === repositoryGeneration
       && this.fileOperationId === operationId
-  }
-
-  private markGitStale(): void {
-    this.gitStatusRequestId += 1
-    this.gitDiffRequestId += 1
-    this.clearScheduledGitRefresh()
-    this.state.git.stale = true
-    this.state.git.loading = false
-    this.state.git.diffLoading = false
-    if (this.state.bottomPanelTab === 'git') {
-      this.renderGitPanel()
-      this.scheduleGitRefreshIfNeeded()
-    }
-  }
-
-  private scheduleGitRefreshIfNeeded(): void {
-    if (this.gitRefreshTimer !== null
-      || this.state.bottomPanelTab !== 'git'
-      || !this.state.repoPath
-      || !this.state.projectValid
-      || !this.isWindowVisible()
-      || this.state.busy
-      || this.state.git.busy
-      || this.state.git.loading) {
-      return
-    }
-    this.gitRefreshTimer = setTimeout(() => {
-      this.gitRefreshTimer = null
-      if (this.state.bottomPanelTab !== 'git'
-        || !this.state.repoPath
-        || !this.state.projectValid
-        || !this.isWindowVisible()
-        || this.state.busy
-        || this.state.git.busy
-        || this.state.git.loading
-        || this.state.bottomPanelTab !== 'git') {
-        this.scheduleGitRefreshIfNeeded()
-        return
-      }
-      // Consume this stale marker before attempting the request. The regular
-      // poll remains active after an error, while request guards prevent an
-      // older response from painting over a newer repository state.
-      this.state.git.stale = false
-      void this.refreshGitStatus()
-    }, this.state.git.stale ? GIT_REFRESH_DEBOUNCE_MS : GIT_POLL_INTERVAL_MS)
-  }
-
-  private clearScheduledGitRefresh(): void {
-    if (this.gitRefreshTimer !== null) {
-      clearTimeout(this.gitRefreshTimer)
-      this.gitRefreshTimer = null
-    }
-  }
-
-  private clearScheduledDailyRefresh(): void {
-    if (this.dailyRefreshTimer !== null) {
-      clearTimeout(this.dailyRefreshTimer)
-      this.dailyRefreshTimer = null
-    }
-  }
-
-  private scheduleDailyProblemRefresh(delayMs = nextUtcMidnightDelayMs()): void {
-    this.clearScheduledDailyRefresh()
-    if (this.destroyed
-      || this.state.dailyLoading
-      || this.state.problemSelection !== 'daily'
-      || !this.isWindowVisible()) {
-      return
-    }
-    this.dailyRefreshTimer = setTimeout(() => {
-      this.dailyRefreshTimer = null
-      if (!this.isWindowVisible() || this.destroyed) {
-        return
-      }
-      this.refreshDailyProblemIfStale()
-    }, Math.max(1, delayMs))
-  }
-
-  private refreshDailyProblemIfStale(): void {
-    const currentDateKey = utcDateKey()
-    if (this.state.dailyLoading || this.state.problemSelection !== 'daily') {
-      return
-    }
-    if (this.state.dailyRetryPending
-      || !this.state.dailyProblem
-      || this.state.dailyProblemDateKey !== currentDateKey) {
-      void this.loadDailyProblem()
-      return
-    }
-    this.scheduleDailyProblemRefresh()
   }
 
   private readonly handleRepositoryFilesChanged = (change: RepositoryFilesChanged): void => {
@@ -2424,8 +1517,7 @@ export class LeetcoderApp {
         this.suppressEditorChange = false
       }
       this.editor.setIssues([])
-      this.testResultSource = null
-      this.markGitStale()
+      this.gitController.markStale()
       this.scheduleLiveDiagnostics()
       this.renderFileHeading()
       this.updateFileTabState()
@@ -2441,287 +1533,17 @@ export class LeetcoderApp {
     if (!this.isWindowVisible() || this.destroyed) {
       return
     }
-    this.refreshDailyProblemIfStale()
+    this.problemSelectionController.refreshDailyProblemIfStale()
     // Filesystem events can be missed while the window is hidden, so returning
     // to it re-checks the open file the way an IDE syncs on frame activation.
     if (this.state.selectedPath && this.state.projectValid) {
       void this.reloadOpenFileFromDisk(this.state.selectedPath)
     }
-    if (this.state.bottomPanelTab !== 'git'
-      || !this.state.projectValid
-      || !this.state.repoPath
-      || this.state.busy
-      || this.state.git.busy
-      || this.state.git.loading) {
-      return
-    }
-    this.clearScheduledGitRefresh()
-    void this.refreshGitStatus()
+    this.gitController.handleVisibilityReturn()
   }
 
   private isWindowVisible(): boolean {
     return typeof document === 'undefined' || document.visibilityState !== 'hidden'
-  }
-
-  private async refreshGitStatus(allowBusy = false): Promise<void> {
-    const repoPath = this.state.repoPath
-    if (!repoPath || !this.state.projectValid) {
-      this.state.git.error = 'Choose a repository first'
-      this.renderGitPanel()
-      return
-    }
-    if ((!allowBusy && this.state.busy) || this.state.git.loading) {
-      return
-    }
-    this.clearScheduledGitRefresh()
-    const gitBackend = this.backend as unknown as GitBackendClient
-    const method = gitBackend.getGitStatus ?? gitBackend.listGitChanges
-    if (!method) {
-      this.state.git.error = 'Not available in this build'
-      this.state.git.loadedRepoPath = repoPath
-      this.renderGitPanel()
-      return
-    }
-    const previousPaths = this.state.git.selectedPaths
-    const repositoryGeneration = this.repositoryGeneration
-    const requestId = ++this.gitStatusRequestId
-    this.pendingGitDiffPath = null
-    this.state.git.loading = true
-    this.state.git.stale = false
-    this.state.git.error = null
-    this.renderGitPanel()
-    try {
-      const snapshot = normalizeGitStatus(await method(repoPath))
-      if (!this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, requestId)) {
-        return
-      }
-      const availablePaths = new Set(snapshot.files.map((file) => file.path))
-      const preserveSelection = this.state.git.loadedRepoPath === repoPath
-      const selectedPaths = preserveSelection
-        ? previousPaths.filter((path) => availablePaths.has(path))
-        : snapshot.files.map((file) => file.path)
-      this.state.git.branch = snapshot.branch
-      this.state.git.files = snapshot.files
-      this.state.git.selectedPaths = selectedPaths
-      this.state.git.activePath = snapshot.files.some((file) => file.path === this.state.git.activePath)
-        ? this.state.git.activePath
-        : snapshot.files[0]?.path ?? null
-      this.state.git.diffByPath = {}
-      this.state.git.fallbackDiff = ''
-      this.state.git.loadedRepoPath = repoPath
-      const activePath = this.state.git.activePath
-      await this.loadGitDiff(
-        repoPath,
-        activePath ? [activePath] : [],
-        requestId,
-        repositoryGeneration,
-      )
-      if (!this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, requestId)) {
-        return
-      }
-      this.state.git.stale = false
-    } catch (error) {
-      if (!this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, requestId)) {
-        return
-      }
-      this.state.git.error = errorMessage(error)
-    } finally {
-      if (this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, requestId)) {
-        this.state.git.loading = false
-        this.renderAll()
-      }
-    }
-  }
-
-  private async loadGitDiff(
-    repoPath: string,
-    paths: string[],
-    statusRequestId = this.gitStatusRequestId,
-    repositoryGeneration = this.repositoryGeneration,
-  ): Promise<void> {
-    if (paths.length === 0) {
-      if (this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, statusRequestId)) {
-        this.state.git.diffLoading = false
-      }
-      return
-    }
-    const method = (this.backend as unknown as GitBackendClient).getGitDiff
-    if (!method) {
-      if (this.isCurrentGitStatusRequest(repoPath, repositoryGeneration, statusRequestId)) {
-        this.state.git.error = 'Not available in this build'
-      }
-      return
-    }
-    const diffRequestId = ++this.gitDiffRequestId
-    this.state.git.diffLoading = true
-    this.renderGitPanel()
-    try {
-      const normalized = normalizeGitDiff(await method(repoPath, paths), paths)
-      if (!this.isCurrentGitDiffRequest(repoPath, repositoryGeneration, statusRequestId, diffRequestId)) {
-        return
-      }
-      this.state.git.diffByPath = { ...this.state.git.diffByPath, ...normalized }
-      if (!this.state.git.activePath && paths[0]) {
-        this.state.git.activePath = paths[0]
-      }
-    } catch (error) {
-      if (!this.isCurrentGitDiffRequest(repoPath, repositoryGeneration, statusRequestId, diffRequestId)) {
-        return
-      }
-      this.state.git.error = errorMessage(error)
-    } finally {
-      if (this.isCurrentGitDiffRequest(repoPath, repositoryGeneration, statusRequestId, diffRequestId)) {
-        this.state.git.diffLoading = false
-        this.renderGitPanel()
-        const nextPath = this.pendingGitDiffPath
-        if (nextPath
-          && this.state.git.activePath === nextPath
-          && !this.state.git.diffByPath[nextPath]
-          && this.state.repoPath === repoPath
-          && this.state.projectValid) {
-          this.pendingGitDiffPath = null
-          void this.loadGitDiff(repoPath, [nextPath], statusRequestId, repositoryGeneration)
-        }
-      }
-    }
-  }
-
-  private setActiveGitFile(path: string): void {
-    if (this.state.busy || this.state.git.busy || !this.state.git.files.some((file) => file.path === path)) {
-      return
-    }
-    this.state.git.activePath = path
-    this.renderGitPanel()
-    if (this.state.git.diffByPath[path]) {
-      this.pendingGitDiffPath = null
-      return
-    }
-    if (this.state.git.diffLoading) {
-      this.pendingGitDiffPath = path
-      return
-    }
-    if (this.state.repoPath) {
-      void this.loadGitDiff(this.state.repoPath, [path], this.gitStatusRequestId, this.repositoryGeneration)
-    }
-  }
-
-  private updateGitSelection(paths: string[]): void {
-    if (this.state.busy || this.state.git.busy) {
-      return
-    }
-    this.state.git.selectedPaths = [...new Set(paths)]
-    this.state.git.error = null
-    this.renderGitPanel()
-  }
-
-  private toggleGitFile(path: string, selected: boolean): void {
-    const paths = selected
-      ? [...this.state.git.selectedPaths, path]
-      : this.state.git.selectedPaths.filter((entry) => entry !== path)
-    this.updateGitSelection(paths)
-  }
-
-  private selectAllGitFiles(): void {
-    this.updateGitSelection(this.state.git.files.map((file) => file.path))
-  }
-
-  private selectNoGitFiles(): void {
-    this.updateGitSelection([])
-  }
-
-  private async commitSelectedGitFiles(pushAfterCommit: boolean): Promise<void> {
-    if (this.state.busy || this.state.git.busy) {
-      return
-    }
-    const repoPath = this.state.repoPath
-    const paths = [...this.state.git.selectedPaths]
-    if (!repoPath || !this.state.projectValid) {
-      this.state.git.error = 'Choose a repository first'
-      this.renderGitPanel()
-      return
-    }
-    if (paths.length === 0) {
-      this.state.git.error = 'Select at least one file to commit'
-      this.renderGitPanel()
-      return
-    }
-    const gitBackend = this.backend as unknown as GitBackendClient
-    const method = gitBackend.commitGitChanges ?? gitBackend.commitGit
-    if (!method) {
-      this.state.git.error = 'Not available in this build'
-      this.renderGitPanel()
-      return
-    }
-    const pushMethod = gitBackend.pushGit
-    if (pushAfterCommit && !pushMethod) {
-      this.state.git.error = 'Not available in this build'
-      this.renderGitPanel()
-      return
-    }
-    const selectedFiles = selectedGitFiles(this.state.git.files, new Set(paths))
-    const message = this.state.git.commitMessage.trim() || defaultGitCommitMessage(selectedFiles)
-    const repositoryGeneration = this.repositoryGeneration
-    const operationId = ++this.gitOperationId
-    this.state.busy = true
-    this.state.git.busy = true
-    this.state.git.error = null
-    this.renderAll()
-    let committed = false
-    try {
-      if (!(await this.flushPendingSave()) || !this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      const commitResult = asGitCommitResult(await method(repoPath, paths, message))
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      committed = true
-      let pushResult: GitPushResult | null = null
-      if (pushAfterCommit && pushMethod) {
-        pushResult = asGitPushResult(await pushMethod(repoPath))
-      }
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      this.state.git.commitMessage = ''
-      this.state.git.commitMessageEdited = false
-      await this.refreshGitStatus(true)
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      this.setMessage(
-        gitResultToastMessage(paths.length, pushAfterCommit, commitResult, pushResult),
-        'success',
-      )
-    } catch (error) {
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      const failure = errorMessage(error)
-      // Git may have staged paths before a commit failure. Refresh the view so
-      // the user can see that mutation while retaining the original error.
-      await this.refreshGitStatus(true)
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      this.state.git.error = failure
-      this.setMessage(
-        committed && pushAfterCommit
-          ? `Committed, but could not push: ${this.state.git.error}`
-          : `Could not commit changes: ${this.state.git.error}`,
-        'error',
-      )
-    } finally {
-      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        this.state.busy = false
-        this.state.git.busy = false
-        this.renderAll()
-      }
-    }
-  }
-
-  private async commitAndPushGitChanges(): Promise<void> {
-    await this.commitSelectedGitFiles(true)
   }
 
   private renderGitPanel(): void {
@@ -2731,14 +1553,15 @@ export class LeetcoderApp {
         bottomPanelTab: this.state.bottomPanelTab,
         busy: this.state.busy,
         git: this.state.git,
+        operationLabel: this.gitController.progressLabel,
       },
       {
-        onToggleFile: (path, selected) => this.toggleGitFile(path, selected),
-        onSelectFile: (path) => this.setActiveGitFile(path),
+        onToggleFile: (path, selected) => this.gitController.toggleFile(path, selected),
+        onSelectFile: (path) => this.gitController.setActiveFile(path),
         onContextMenu: (file, x, y) => this.openGitContextMenu(file, x, y),
       },
     )
-    this.applyGitFileListWidth()
+    this.paneLayout.applyGitFileListWidth()
     this.renderGitContextMenu()
   }
 
@@ -2844,49 +1667,23 @@ export class LeetcoderApp {
     this.scrollActiveFileIntoView()
   }
 
-  /** Update tab selection and the active tab's dirty marker without rebuilding tabs. */
-  private updateFileTabState(): void {
-    const list = this.element<HTMLElement>('#file-tabs')
-    const items = Array.from(list.querySelectorAll<HTMLElement>('.file-tab'))
-    if (items.length !== this.state.openTabs.length) {
-      this.renderFileTabs()
-      return
-    }
-    const activeChanged = this.renderedFileTabsActiveId !== this.state.activeTabId
-    const itemsById = new Map(items.map((item) => [item.dataset.tabId ?? '', item]))
-    for (const tab of this.state.openTabs) {
-      const item = itemsById.get(String(tab.id))
-      const tabButton = item?.querySelector<HTMLButtonElement>('[role="tab"]')
-      if (!item || !tabButton) {
-        this.renderFileTabs()
-        return
-      }
-      const active = tab.id === this.state.activeTabId
-      item.classList.toggle('is-active', active)
-      tabButton.setAttribute('aria-selected', String(active))
-      tabButton.tabIndex = active ? 0 : -1
-      const dirty = active && (this.state.dirty || this.autosave.hasPendingChanges)
-      const dirtyMarker = item.querySelector<HTMLElement>('.file-tab-dirty')
-      if (dirty && !dirtyMarker) {
-        const marker = document.createElement('span')
-        marker.className = 'file-tab-dirty'
-        marker.setAttribute('aria-label', 'Unsaved changes')
-        tabButton.append(marker)
-      } else if (!dirty && dirtyMarker) {
-        dirtyMarker.remove()
-      }
-      item.classList.toggle('is-dirty', dirty)
-    }
-    this.renderedFileTabsActiveId = this.state.activeTabId
-    if (activeChanged && this.state.activeTabId !== null) {
-      this.scheduleActiveFileTabReveal(this.state.activeTabId)
+  private fileTabsModel(): FileTabsViewModel {
+    return {
+      openTabs: this.state.openTabs,
+      activeTabId: this.state.activeTabId,
+      dirty: this.state.dirty,
+      hasPendingChanges: this.autosave.hasPendingChanges,
+      busy: this.state.busy,
     }
   }
 
+  /** Forward the app-owned tab state to the focused tab-strip view. */
+  private updateFileTabState(): void {
+    this.fileTabsView.update(this.fileTabsModel())
+  }
+
   private renderAll(): void {
-    this.cancelScheduledLiveRender()
-    this.applyBottomPanelHeight()
-    this.applySidebarWidth()
+    this.paneLayout.apply()
     this.renderHeader()
     this.renderAppMenu()
     this.renderSettingsDialog()
@@ -2904,7 +1701,7 @@ export class LeetcoderApp {
     this.renderDeleteFileDialog()
     this.updateBusyControls()
     this.updateEditorVisibility()
-    this.scheduleGitRefreshIfNeeded()
+    this.gitController.scheduleRefreshIfNeeded()
   }
 
   private renderHeader(): void {
@@ -2945,122 +1742,14 @@ export class LeetcoderApp {
       dailyLoading: this.state.dailyLoading,
       dailyError: this.state.dailyError,
       problemSelection: this.state.problemSelection,
-      problemNumberDraft: this.problemNumberDraft,
-      viewingToday: problem ? this.isViewingTodayProblem(problem) : false,
+      problemNumberDraft: this.problemSelectionController.problemNumberDraft,
+      viewingToday: problem ? this.problemSelectionController.isViewingTodayProblem(problem) : false,
       dailyDescriptionOpen: this.dailyDescriptionOpen,
     })
   }
 
   private renderFileTabs(): void {
-    const list = this.element<HTMLElement>('#file-tabs')
-    const activeChanged = this.renderedFileTabsActiveId !== this.state.activeTabId
-    this.renderedFileTabsActiveId = this.state.activeTabId
-    list.innerHTML = ''
-    for (const tab of this.state.openTabs) {
-      const item = document.createElement('div')
-      item.className = 'file-tab'
-      item.setAttribute('role', 'presentation')
-      item.dataset.tabId = String(tab.id)
-
-      const tabButton = document.createElement('button')
-      tabButton.type = 'button'
-      tabButton.className = 'file-tab-button'
-      tabButton.setAttribute('role', 'tab')
-      const active = tab.id === this.state.activeTabId
-      item.classList.toggle('is-active', active)
-      tabButton.setAttribute('aria-selected', String(active))
-      tabButton.setAttribute('aria-controls', 'editor-host')
-      tabButton.tabIndex = active ? 0 : -1
-      tabButton.title = tab.path
-
-      const label = document.createElement('span')
-      label.className = 'file-tab-label'
-      label.textContent = tab.name.replace(/\.java$/i, '')
-      tabButton.append(label)
-      tabButton.setAttribute('aria-label', tab.name)
-
-      if (active && (this.state.dirty || this.autosave.hasPendingChanges)) {
-        const dirty = document.createElement('span')
-        dirty.className = 'file-tab-dirty'
-        dirty.setAttribute('aria-label', 'Unsaved changes')
-        tabButton.append(dirty)
-        item.classList.add('is-dirty')
-      }
-
-      const close = document.createElement('button')
-      close.type = 'button'
-      close.className = 'file-tab-close'
-      close.setAttribute('aria-label', `Close ${tab.name}`)
-      close.title = `Close ${tab.name}`
-      close.textContent = '×'
-      close.disabled = this.state.busy
-      close.addEventListener('click', (event) => {
-        event.stopPropagation()
-        void this.closeOpenTab(tab.id)
-      })
-      close.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') {
-          return
-        }
-        event.preventDefault()
-        event.stopPropagation()
-        void this.closeOpenTab(tab.id)
-      })
-
-      tabButton.addEventListener('click', () => {
-        void this.openTab(tab.id)
-      })
-      tabButton.addEventListener('keydown', (event) => {
-        const tabs = Array.from(list.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
-        const currentIndex = tabs.indexOf(tabButton)
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault()
-          void this.openTab(tab.id)
-          return
-        }
-        if (currentIndex < 0 || tabs.length === 0) {
-          return
-        }
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-          return
-        }
-        event.preventDefault()
-        const nextIndex = event.key === 'Home'
-          ? 0
-          : event.key === 'End'
-            ? tabs.length - 1
-            : Math.max(0, Math.min(
-              tabs.length - 1,
-              currentIndex + (event.key === 'ArrowLeft' ? -1 : 1),
-            ))
-        tabs[nextIndex].focus()
-      })
-      item.append(tabButton, close)
-      list.append(item)
-    }
-    if (activeChanged && this.state.activeTabId !== null) {
-      this.scheduleActiveFileTabReveal(this.state.activeTabId)
-    }
-  }
-
-  private scheduleActiveFileTabReveal(tabId: number): void {
-    const reveal = (): void => {
-      if (this.state.activeTabId !== tabId) {
-        return
-      }
-      const list = this.element<HTMLElement>('#file-tabs')
-      const item = Array.from(list.querySelectorAll<HTMLElement>('.file-tab'))
-        .find((entry) => entry.dataset.tabId === String(tabId))
-      item?.querySelector<HTMLElement>('[role="tab"]')?.scrollIntoView?.({
-        block: 'nearest',
-        inline: 'nearest',
-      })
-    }
-    if (typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(reveal)
-    } else {
-      queueMicrotask(reveal)
-    }
+    this.fileTabsView.render(this.fileTabsModel())
   }
 
   private async openTab(tabId: number): Promise<void> {
@@ -3247,25 +1936,12 @@ export class LeetcoderApp {
   }
 
   private renderAppMenu(): void {
-    const menu = this.root.querySelector<HTMLElement>('#app-menu')
-    const button = this.root.querySelector<HTMLButtonElement>('#app-menu-button')
-    const update = this.root.querySelector<HTMLButtonElement>('#update-menu-action')
-    const settings = this.root.querySelector<HTMLButtonElement>('#settings-menu-action')
-    const settingsShortcut = this.root.querySelector<HTMLElement>('#settings-menu-shortcut')
-    if (!menu || !button || !update) {
-      return
-    }
-    menu.hidden = !this.appMenuOpen
-    button.setAttribute('aria-expanded', String(this.appMenuOpen))
-    update.hidden = !this.updateAvailable
-    update.disabled = this.updateBusy
-    update.setAttribute('aria-busy', String(this.updateBusy))
-    if (settings && settingsShortcut) {
-      const label = shortcutLabel('open-settings', currentIsMacPlatform())
-      settingsShortcut.textContent = label
-      settings.title = `Open Settings (${label})`
-      settings.setAttribute('aria-label', `Settings (${label})`)
-    }
+    renderAppMenuView(this.root, {
+      open: this.appMenuOpen,
+      updateAvailable: this.updateAvailable,
+      updateBusy: this.updateBusy,
+      settingsShortcutLabel: shortcutLabel('open-settings', currentIsMacPlatform()),
+    })
   }
 
   private setThemeMode(mode: string): void {
@@ -3306,10 +1982,7 @@ export class LeetcoderApp {
   }
 
   private renderAboutDialog(): void {
-    const dialog = this.root.querySelector<HTMLElement>('#about-dialog')
-    if (dialog) {
-      dialog.hidden = !this.aboutDialogOpen
-    }
+    renderAboutDialogView(this.root, this.aboutDialogOpen)
   }
 
   private async requestApplicationClose(): Promise<void> {
@@ -3400,70 +2073,12 @@ export class LeetcoderApp {
   }
 
   private renderSettingsDialog(): void {
-    const dialog = this.root.querySelector<HTMLElement>('#settings-dialog')
-    if (!dialog) {
-      return
-    }
-    dialog.hidden = !this.settingsDialogOpen
-    const appearanceNav = this.element<HTMLButtonElement>('#settings-appearance-nav')
-    const keymapNav = this.element<HTMLButtonElement>('#settings-keymap-nav')
-    const appearancePanel = this.element<HTMLElement>('#settings-appearance-panel')
-    const keymapPanel = this.element<HTMLElement>('#settings-keymap-panel')
-    const appearanceSelected = this.settingsSection === 'appearance'
-    for (const [tab, selected] of [[appearanceNav, appearanceSelected], [keymapNav, !appearanceSelected]] as const) {
-      tab.classList.toggle('is-active', selected)
-      tab.setAttribute('aria-selected', String(selected))
-      tab.tabIndex = selected ? 0 : -1
-    }
-    appearancePanel.hidden = !appearanceSelected
-    keymapPanel.hidden = appearanceSelected
-    const linuxTab = this.element<HTMLButtonElement>('#shortcuts-linux-tab')
-    const macosTab = this.element<HTMLButtonElement>('#shortcuts-macos-tab')
-    const mac = this.shortcutsPlatform === 'macos'
-    for (const [tab, selected] of [[linuxTab, !mac], [macosTab, mac]] as const) {
-      tab.classList.toggle('is-active', selected)
-      tab.setAttribute('aria-selected', String(selected))
-      tab.tabIndex = selected ? 0 : -1
-    }
-    const body = this.element<HTMLElement>('#shortcuts-body')
-    body.setAttribute('aria-labelledby', mac ? 'shortcuts-macos-tab' : 'shortcuts-linux-tab')
-    body.innerHTML = ''
-    keymapPanel.classList.toggle('is-macos', mac)
-    this.root.querySelectorAll<HTMLInputElement>('#settings-form input[name="theme-mode"]').forEach((input) => {
-      input.checked = input.value === this.themeMode
+    renderSettingsDialogView(this.root, {
+      open: this.settingsDialogOpen,
+      section: this.settingsSection,
+      platform: this.shortcutsPlatform,
+      themeMode: this.themeMode,
     })
-    for (const section of SHORTCUT_SECTIONS) {
-      const group = document.createElement('section')
-      group.className = 'shortcuts-group'
-      const heading = document.createElement('h3')
-      heading.className = 'shortcuts-group-title'
-      heading.textContent = section.title
-      group.append(heading)
-      const list = document.createElement('dl')
-      list.className = 'shortcuts-list'
-      for (const entry of section.entries) {
-        const keys = document.createElement('dt')
-        keys.className = 'shortcuts-keys'
-        for (const [index, binding] of platformBindings(entry, mac).entries()) {
-          if (index > 0) {
-            keys.append(document.createTextNode(' / '))
-          }
-          const key = document.createElement('kbd')
-          const label = formatShortcut(binding, mac)
-          const displayLabel = mac ? macShortcutDialogLabel(binding, label) : label
-          key.textContent = displayLabel
-          key.setAttribute('aria-label', displayLabel)
-          key.title = displayLabel
-          keys.append(key)
-        }
-        const description = document.createElement('dd')
-        description.className = 'shortcuts-description'
-        description.textContent = entry.description
-        list.append(keys, description)
-      }
-      group.append(list)
-      body.append(group)
-    }
   }
 
   private openDiscardGitDialog(): void {
@@ -3506,17 +2121,11 @@ export class LeetcoderApp {
   }
 
   private renderDiscardGitDialog(): void {
-    const dialog = this.element<HTMLElement>('#discard-git-dialog')
-    const file = this.gitDiscardDialogFile
-    dialog.hidden = !file
-    if (!file) {
-      this.element<HTMLElement>('#discard-git-path').textContent = ''
-      this.element<HTMLElement>('#discard-git-message').textContent = ''
-      return
-    }
-    this.element<HTMLElement>('#discard-git-path').textContent = file.path
-    this.element<HTMLElement>('#discard-git-message').textContent = discardGitChangesWarningMessage()
-    this.element<HTMLButtonElement>('#confirm-discard-git').disabled = this.state.busy || this.state.git.busy
+    renderDiscardGitDialogView(this.root, {
+      file: this.gitDiscardDialogFile,
+      busy: this.state.busy,
+      gitBusy: this.state.git.busy,
+    })
   }
 
   private openDeleteFileDialog(): void {
@@ -3564,60 +2173,27 @@ export class LeetcoderApp {
   }
 
   private renderDeleteFileDialog(): void {
-    const dialog = this.element<HTMLElement>('#delete-file-dialog')
-    const file = this.deleteDialogFile
-    dialog.hidden = !file
-    this.element<HTMLElement>('#delete-file-name').textContent = file?.name ?? ''
-    this.element<HTMLButtonElement>('#confirm-delete-file').disabled = this.state.busy
+    renderDeleteFileDialogView(this.root, {
+      file: this.deleteDialogFile,
+      busy: this.state.busy,
+    })
   }
 
   private renderContextMenu(): void {
-    const menu = this.element<HTMLElement>('#file-context-menu')
-    const context = this.state.contextMenu
-    if (!context) {
-      menu.hidden = true
-      return
-    }
-    const width = FILE_CONTEXT_MENU_WIDTH
-    const height = FILE_CONTEXT_MENU_HEIGHT
-    const margin = VIEWPORT_MARGIN
-    const viewportWidth = typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 1000
-    const viewportHeight = typeof window !== 'undefined' && window.innerHeight > 0 ? window.innerHeight : 800
-    menu.style.left = `${Math.max(margin, Math.min(context.x, viewportWidth - width - margin))}px`
-    menu.style.top = `${Math.max(margin, Math.min(context.y, viewportHeight - height - margin))}px`
-    menu.hidden = false
-    // Keep the menu action labels compact. The confirmation dialog below
-    // contains the target filename, while the context menu exposes the
-    // available file operations.
-    this.element<HTMLElement>('#duplicate-file-label').textContent = 'Duplicate'
-    this.element<HTMLElement>('#rename-file-label').textContent = 'Rename'
-    this.element<HTMLElement>('#delete-file-label').textContent = 'Delete'
-    this.element<HTMLButtonElement>('#duplicate-file-action').disabled = this.state.busy
-    this.element<HTMLButtonElement>('#rename-file-action').disabled = this.state.busy
-    this.element<HTMLButtonElement>('#delete-file-action').disabled = this.state.busy
+    renderFileContextMenuView(this.root, {
+      context: this.state.contextMenu,
+      busy: this.state.busy,
+    })
   }
 
   private renderGitContextMenu(): void {
-    const menu = this.element<HTMLElement>('#git-context-menu')
-    const context = this.state.gitContextMenu
-    const fileStillChanged = context
-      && this.state.git.files.some((file) => sameFilePath(file.path, context.file.path))
-    if (!context || !fileStillChanged) {
-      menu.hidden = true
-      return
-    }
-    const position = clampContextMenuPosition(
-      context.x,
-      context.y,
-      GIT_CONTEXT_MENU_WIDTH,
-      GIT_CONTEXT_MENU_HEIGHT,
-    )
-    menu.style.left = `${position.x}px`
-    menu.style.top = `${position.y}px`
-    menu.hidden = false
-    const disabled = this.state.busy || this.state.git.busy || this.state.git.loading
-    this.element<HTMLButtonElement>('#git-discard-action').disabled = disabled
-    this.element<HTMLButtonElement>('#git-show-file-action').disabled = disabled
+    renderGitContextMenuView(this.root, {
+      context: this.state.gitContextMenu,
+      files: this.state.git.files,
+      busy: this.state.busy,
+      gitBusy: this.state.git.busy,
+      loading: this.state.git.loading,
+    })
   }
 
   private async showGitFileInManager(): Promise<void> {
@@ -3626,33 +2202,25 @@ export class LeetcoderApp {
     if (!context || !repoPath || !this.state.projectValid || this.state.busy || this.state.git.busy) {
       return
     }
-    const method = (this.backend as unknown as GitBackendClient).showInFileManager
-    if (!method) {
-      this.closeGitContextMenu()
-      this.setMessage('Not available in this build', 'error')
+    const filePath = context.file.path
+    const operation = this.gitController.startOperation('Opening in File Manager…')
+    if (!operation) {
       return
     }
-    const filePath = context.file.path
-    const repositoryGeneration = this.repositoryGeneration
-    const operationId = ++this.gitOperationId
     this.closeGitContextMenu()
-    this.state.git.busy = true
     this.renderAll()
     try {
-      await method(repoPath, filePath)
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      await this.backend.showInFileManager(repoPath, filePath)
+      if (!this.gitController.isCurrentOperation(operation)) {
         return
       }
       this.setMessage(`Opened ${gitFileName(filePath)} in File Manager.`, 'success')
     } catch (error) {
-      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      if (this.gitController.isCurrentOperation(operation)) {
         this.setMessage(`Could not show ${gitFileName(filePath)} in File Manager: ${errorMessage(error)}`, 'error')
       }
     } finally {
-      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        this.state.git.busy = false
-        this.renderAll()
-      }
+      this.gitController.finishOperation(operation)
     }
   }
 
@@ -3670,12 +2238,6 @@ export class LeetcoderApp {
       this.restoreGitDiscardFocus(focusTarget)
       return
     }
-    const method = (this.backend as unknown as GitBackendClient).discardGitChanges
-    if (!method) {
-      this.setMessage('Not available in this build', 'error')
-      this.restoreGitDiscardFocus(focusTarget)
-      return
-    }
     const filePath = file.path
     const targetTab = this.openTabForPath(filePath)
     const targetTabIndex = targetTab ? this.state.openTabs.indexOf(targetTab) : -1
@@ -3685,25 +2247,26 @@ export class LeetcoderApp {
     const restoredPath = file.originalPath && !sameFilePath(file.originalPath, filePath)
       ? file.originalPath
       : null
-    const repositoryGeneration = this.repositoryGeneration
-    const operationId = ++this.gitOperationId
+    const operation = this.gitController.startOperation('Discarding changes…')
+    if (!operation) {
+      this.restoreGitDiscardFocus(focusTarget)
+      return
+    }
     this.closeGitContextMenu()
-    this.state.busy = true
-    this.state.git.busy = true
     this.gitDiscardInProgress = true
     this.renderAll()
     try {
       // Flush the current editor before the destructive backend operation so
       // the discard command always starts from a stable on-disk snapshot.
       if (!(await this.flushPendingSave())
-        || !this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        || !this.gitController.isCurrentOperation(operation)) {
         return
       }
       // The flush above drains the current timer/run. Do not let a queued
       // autosave write the pre-discard source back after Git restores it.
       this.autosave.cancelPending()
-      await method(repoPath, filePath)
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      await this.backend.discardGitChanges(repoPath, filePath)
+      if (!this.gitController.isCurrentOperation(operation)) {
         return
       }
 
@@ -3722,7 +2285,7 @@ export class LeetcoderApp {
         // A tracked file is restored in place. Reload it from disk so the
         // editor cannot continue showing the discarded working-tree source.
         const source = await this.backend.readProblemFile(repoPath, filePath)
-        if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        if (!this.gitController.isCurrentOperation(operation)) {
           return
         }
         this.state.selectedSource = source
@@ -3730,7 +2293,7 @@ export class LeetcoderApp {
         this.state.dirty = false
         this.state.saveError = null
         this.clearSavedFlash()
-        this.resetTestState()
+        this.testRunController.resetTestState()
         this.suppressEditorChange = true
         try {
           this.editor.setValue(source)
@@ -3740,9 +2303,9 @@ export class LeetcoderApp {
         this.element<HTMLElement>('#editor-host').dataset.savedSource = source
       }
 
-      this.markGitStale()
+      this.gitController.markStale()
       await this.refreshFiles()
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      if (!this.gitController.isCurrentOperation(operation)) {
         return
       }
       let restoredRename: ProblemFileEntry | null = null
@@ -3770,7 +2333,7 @@ export class LeetcoderApp {
         this.state.selectedPath = restoredRename.path
         this.state.selectedFqcn = fqcnFromJavaPath(restoredRename.path)
         const source = await this.backend.readProblemFile(repoPath, restoredRename.path)
-        if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        if (!this.gitController.isCurrentOperation(operation)) {
           return
         }
         this.state.selectedSource = source
@@ -3778,7 +2341,7 @@ export class LeetcoderApp {
         this.state.dirty = false
         this.state.saveError = null
         this.clearSavedFlash()
-        this.resetTestState()
+        this.testRunController.resetTestState()
         this.suppressEditorChange = true
         try {
           this.editor.setValue(source)
@@ -3787,8 +2350,8 @@ export class LeetcoderApp {
         }
         this.element<HTMLElement>('#editor-host').dataset.savedSource = source
       }
-      await this.refreshGitStatus(true)
-      if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      await this.gitController.refreshStatus(true)
+      if (!this.gitController.isCurrentOperation(operation)) {
         return
       }
       if (wasActive && replacement) {
@@ -3799,23 +2362,19 @@ export class LeetcoderApp {
       }
       this.setMessage(`Discarded changes to ${gitFileName(filePath)}.`, 'success')
     } catch (error) {
-      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+      if (this.gitController.isCurrentOperation(operation)) {
         // Refresh both views even when the backend reports an error: a Git
         // command can have changed the worktree before surfacing its failure.
         await this.refreshFiles()
-        await this.refreshGitStatus(true)
-        if (!this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
+        await this.gitController.refreshStatus(true)
+        if (!this.gitController.isCurrentOperation(operation)) {
           return
         }
         this.setMessage(`Could not discard changes to ${gitFileName(filePath)}: ${errorMessage(error)}`, 'error')
       }
     } finally {
       this.gitDiscardInProgress = false
-      if (this.isCurrentGitOperation(repoPath, repositoryGeneration, operationId)) {
-        this.state.busy = false
-        this.state.git.busy = false
-        this.renderAll()
-      }
+      this.gitController.finishOperation(operation)
       this.restoreGitDiscardFocus(focusTarget)
     }
   }
@@ -3848,7 +2407,7 @@ export class LeetcoderApp {
       if (wasActive && !targetTab) {
         this.resetCurrentFile()
       }
-      this.markGitStale()
+      this.gitController.markStale()
       await this.refreshFiles()
       if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         return
@@ -3906,7 +2465,7 @@ export class LeetcoderApp {
       if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
-      this.markGitStale()
+      this.gitController.markStale()
       if (!(await this.refreshFiles()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         return
       }
@@ -4022,7 +2581,7 @@ export class LeetcoderApp {
         targetTab.name = newName
         targetTab.packageSegment = file.packageSegment
       }
-      this.markGitStale()
+      this.gitController.markStale()
       const refreshed = await this.refreshFiles()
       if (!refreshed || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
         if (targetTab && !refreshed) {
@@ -4097,36 +2656,24 @@ export class LeetcoderApp {
   }
 
   private renderFileHeading(): void {
-    const selectedFile = this.element<HTMLElement>('#selected-file')
-    const file = this.state.files.find((entry) => sameFilePath(entry.path, this.state.selectedPath ?? ''))
-    selectedFile.textContent = file?.name ?? ''
-    const saveStatus = this.element<HTMLElement>('#save-status')
-    saveStatus.className = 'save-status'
-    saveStatus.innerHTML = ''
-    saveStatus.removeAttribute('title')
-    if (!this.state.selectedPath) {
-      this.element<HTMLElement>('#editor-host').dataset.savedSource = this.state.savedSource
-      return
-    }
-    if (this.state.saveError) {
-      saveStatus.classList.add('is-error')
-      saveStatus.textContent = 'Save failed'
-      saveStatus.title = this.state.saveError
-    } else if (this.saveWriteInFlight) {
-      saveStatus.classList.add('is-saving')
-      saveStatus.textContent = 'Saving…'
-    } else if (this.state.dirty || this.autosave.hasPendingChanges) {
-      saveStatus.classList.add('is-unsaved')
-      const dot = document.createElement('span')
-      dot.className = 'save-dot'
-      dot.setAttribute('aria-hidden', 'true')
-      saveStatus.append(dot, document.createTextNode('Unsaved'))
-      saveStatus.title = `Saves automatically · ${shortcutLabel('save', currentIsMacPlatform())}`
-    } else if (this.savedFlash) {
-      saveStatus.classList.add('is-saved')
-      saveStatus.textContent = 'Saved'
-    }
-    this.element<HTMLElement>('#editor-host').dataset.savedSource = this.state.savedSource
+    renderFileHeadingView(
+      {
+        selectedFile: this.element<HTMLElement>('#selected-file'),
+        saveStatus: this.element<HTMLElement>('#save-status'),
+        editorHost: this.element<HTMLElement>('#editor-host'),
+      },
+      {
+        files: this.state.files,
+        selectedPath: this.state.selectedPath,
+        savedSource: this.state.savedSource,
+        saveError: this.state.saveError,
+        saveWriteInFlight: this.saveWriteInFlight,
+        dirty: this.state.dirty,
+        hasPendingChanges: this.autosave.hasPendingChanges,
+        savedFlash: this.savedFlash,
+        saveShortcutLabel: shortcutLabel('save', currentIsMacPlatform()),
+      },
+    )
   }
 
   private renderResult(): void {
@@ -4143,37 +2690,11 @@ export class LeetcoderApp {
         macPlatform: currentIsMacPlatform(),
       },
       {
-        onSelectTest: (key, focus) => this.selectTestResult(key, focus),
+        onSelectTest: (key, focus) => this.testRunController.selectTestResult(key, focus),
         onRevealLocation: (line, column) => this.editor.revealLine(line, column),
       },
     )
-    if (output.selectedTestKey !== this.state.selectedTestKey) {
-      this.state.selectedTestKey = output.selectedTestKey
-      this.testSelectionExplicit = false
-    }
-  }
-
-  private selectTestResult(key: string, focus = false): void {
-    const nextKey = key === TEST_RUN_ROOT_KEY ? null : key
-    this.testSelectionExplicit = true
-    if (this.state.selectedTestKey === nextKey) {
-      return
-    }
-    this.state.selectedTestKey = nextKey
-    this.renderResult()
-    if (focus) {
-      const item = Array.from(this.root.querySelectorAll<HTMLButtonElement>('.test-tree-item'))
-        .find((entry) => entry.dataset.testKey === key)
-      item?.focus()
-    }
-  }
-
-  private autoSelectFailedTest(result: TestResult): void {
-    this.state.selectedTestKey = autoSelectedTestKey(
-      result.tests,
-      this.state.selectedTestKey,
-      this.testSelectionExplicit,
-    )
+    this.testRunController.acceptRenderedSelection(output.selectedTestKey)
   }
 
   private setMessage(message: string, tone: 'info' | 'success' | 'error'): void {

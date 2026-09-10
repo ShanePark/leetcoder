@@ -10,8 +10,8 @@ below.
 `src/main.ts` starts the Vite frontend and creates `LeetcoderApp` from
 `src/app.ts`. The app owns state, lifecycle, and DOM event orchestration while
 the daily-problem, file-explorer, Git-panel, test-result, and shell views own
-their local rendering through view models and callbacks. Repository, problem,
-Git, and test operations go through the `BackendClient` exposed by
+their local rendering through view models and callbacks. Problem selection,
+repository, Git, and test operations go through the `BackendClient` exposed by
 `src/backend.ts`. The one native picker exception is `defaultDirectoryPicker`
 in `app.ts`, which invokes `choose_repository` directly; the injected
 `directoryPicker` option keeps that UI boundary testable.
@@ -29,13 +29,14 @@ feature crosses the halves.
 | Area | Paths | Responsibility | Depends on |
 | --- | --- | --- | --- |
 | Bootstrap | `src/main.ts`, `src/dev-mock.ts` | Choose native or browser dependencies, install the close handler, and start the app. | App and backend public surfaces |
-| App controller | `src/app.ts` | Own the single-window state machine, lifecycle, async work, DOM event wiring, and integration of view callbacks. `LeetcoderApp` is the application entry class. | App views/helpers, backend, editor, domain, update and diagnostics services |
-| App contracts and helpers | `src/app/types.ts`, `autosave.ts`, `navigation.ts`, `path-helpers.ts`, `file-helpers.ts`, `file-index.ts`, `git-helpers.ts`, `layout.ts`, `test-results.ts` | Hold app state types and keep autosave, navigation, path matching, file indexing, file/Git presentation, layout persistence, and test-result interpretation independently testable. | Backend types, domain types, and small frontend utilities |
-| App views | `src/app/daily-view.ts`, `files-view.ts`, `git-view.ts`, `results-view.ts`, `shell-view.ts` | Render each UI surface from a narrow view model and send user actions to the app through callbacks. `daily-view.ts` retains its sanitized-description DOM cache; `git-view.ts` owns Git row rendering and selection-set construction; `files-view.ts` owns search/group rendering. | App/domain DTOs, app helpers, icons, sanitization, and shortcut labels as appropriate |
+| App controller | `src/app.ts` | Own the single-window state machine, repository/file/editor orchestration, lifecycle, DOM event wiring, and integration of view callbacks. `LeetcoderApp` is the application entry class; problem selection, Git, test-run, pane, and tab lifecycles are delegated to focused controllers/views. | App views/helpers/controllers, backend, editor, domain, update and diagnostics services |
+| App contracts and helpers | `src/app/types.ts`, `autosave.ts`, `navigation.ts`, `path-helpers.ts`, `file-helpers.ts`, `file-index.ts`, `git-helpers.ts`, `layout.ts`, `test-results.ts` | Hold app state types and keep autosave, navigation, path matching, file indexing, Git/file presentation, layout persistence, and test-result interpretation independently testable. | Backend types, domain types, and small frontend utilities |
+| App lifecycle controllers | `src/app/git-controller.ts`, `pane-layout.ts`, `problem-selection-controller.ts`, `test-run-controller.ts` | Own Git status/diff/commit/push request guards, resizable pane persistence, daily/manual problem lookup with date rollover retries, and test-run progress/selection lifecycles behind typed callbacks so `app.ts` remains the repository and file orchestration boundary. | App contracts/helpers, backend contracts, and small DOM callbacks |
+| App views | `src/app/daily-view.ts`, `files-view.ts`, `git-view.ts`, `results-view.ts`, `shell-view.ts`, `dialogs-view.ts`, `tabs-view.ts` | Render each UI surface from a narrow view model and send user actions to the app through callbacks. `daily-view.ts` retains its sanitized-description DOM cache; `git-view.ts` owns Git row rendering and selection-set construction; `files-view.ts` owns search/group rendering; `dialogs-view.ts` owns app-menu, dialog, and context-menu DOM rendering; `tabs-view.ts` owns the open-file tab strip and its short-lived DOM work. | App/domain DTOs, app helpers, icons, sanitization, and shortcut labels as appropriate |
 | Frontend backend boundary | `src/backend.ts`, `src/backend/contracts.ts`, `src/backend/client.ts`, `src/backend/transport.ts`, `src/backend/errors.ts` | Keep `src/backend.ts` as the compatibility barrel; define frontend DTOs and `BackendClient` in `contracts.ts`; compose command calls in `client.ts`; isolate Tauri invoke/listen/channel details in `transport.ts`; keep error classification in `errors.ts`. | Domain `ProblemFilePlan` and Tauri APIs |
 | Backend response adapters | `src/backend/normalizers/{common,problem,files,git,test}.ts` | Convert native and older response shapes into frontend contracts. `common.ts` owns shared guards and primitive coercions. | Backend contracts and common helpers |
 | Problem domain | `src/domain/index.ts`, `class-name.ts`, `method-signature.ts`, `problem-file.ts`, `public.ts`, `template.ts` | Pure naming, difficulty/package mapping, Java method extraction, scaffold planning, and source rendering. | TypeScript standard library only |
-| Editor | `src/editor.ts`, `src/editor/{editing,statement-completion,definition-navigation,theme,test-markers,gutters}.ts` | Keep the `JavaEditor` CodeMirror facade and keymap/wiring in `editor.ts`; separate editing commands, statement completion, definition navigation, theme, diagnostics/gutters, and syntax-based test markers into focused modules. | Completions, Java format/refactor, clipboard, shortcuts, CSS variables |
+| Editor | `src/editor.ts`, `src/editor/{editing,intentions,statement-completion,definition-navigation,theme,test-markers,gutters}.ts` | Keep the `JavaEditor` CodeMirror facade and keymap/wiring in `editor.ts`; separate editing commands, missing-method creation and its action menu, statement completion, definition navigation, theme, diagnostics/gutters, and syntax-based test markers into focused modules. | Completions, Java format/refactor, clipboard, shortcuts, CSS variables |
 | Completions | `src/completions.ts`, `src/completions/{model,source,imports,templates}.ts` | Keep the completion facade and catalog while separating Java metadata, source analysis, import edits, and snippet/template behavior. `source.ts` exposes an internal `JavaSourceAnalysis` so one completion/definition request can reuse its masked source, symbols, and methods. | CodeMirror and Java completion model |
 | Frontend services | `src/problem-generator.ts`, `src/live-diagnostics.ts`, `src/update-controller.ts`, `src/update-progress.ts`, `src/java-format.ts`, `src/java-refactor.ts`, `src/clipboard.ts`, `src/icons.ts`, `src/sanitize.ts` | Coordinate retries, debounced compiler snapshots, updates, Java transformations, clipboard access, icons, and safe problem markup. | Backend/domain/editor boundaries as appropriate |
 | Native wiring and shared models | `src-tauri/src/lib.rs`, `commands.rs`, `models.rs` | Register commands, adapt command arguments, and define serialized native DTOs. Keep this layer thin. | Native feature modules and Tauri |
@@ -56,11 +57,13 @@ flowchart LR
   main --> mock[src/dev-mock.ts]
   app --> appViews[app views]
   app --> appParts[app helpers and contracts]
+  app --> appControllers[app lifecycle controllers]
   app --> backend[src/backend.ts]
   app --> picker[defaultDirectoryPicker]
   app --> editor[src/editor.ts]
   app --> domain[src/domain/index.ts]
   app --> services[frontend services]
+  appControllers --> appParts
   editor --> completion[src/completions.ts]
   editor --> shortcuts[src/shortcuts.ts]
   editor --> editorParts[src/editor/*]
@@ -128,7 +131,7 @@ completion facades remain available for compatibility coverage.
 
 | Feature | Focused tests | Shared fixture/contract notes |
 | --- | --- | --- |
-| App state and views | `tests/frontend/app/{autosave,file-actions,file-index,git-presentation,git-selection,layout,navigation,problem-lifecycle,test-results}.test.ts` | `app.ts` integration changes are owned separately; `file-index.test.ts` and `git-selection.test.ts` exercise their focused modules directly. |
+| App state and views | `tests/frontend/app/{autosave,file-actions,file-index,git-controller,git-presentation,git-progress,git-selection,layout,navigation,pane-layout,problem-lifecycle,problem-selection-controller,tabs-view,test-results,test-run-controller}.test.ts` | `app.ts` integration changes are owned separately; focused controller/view suites exercise Git, problem selection, and test lifecycles, pane persistence, tab rendering, file indexing, and Git selection directly. |
 | Completion catalog and analysis | `tests/frontend/completions/{catalog,source,templates}.test.ts`, `tests/frontend/completions-analysis.test.ts` | `tests/frontend/completions/helpers.ts` is a read-only shared fixture helper. `source.ts` analysis changes and its focused test should be integrated together. |
 | Editor | `tests/frontend/editor/{commands,imports,javadoc,refactoring,shortcuts,templates,test-markers}.test.ts` | `tests/frontend/editor/helpers.ts` is a read-only shared fixture helper. `editor.ts` remains the facade/integration owner. |
 | Backend adapters and transport | `tests/frontend/backend/{files-problem,git,test-results,transport-client}.test.ts` | Assign one adapter owner per normalizer and keep transport/client changes with their focused test. |
@@ -163,7 +166,9 @@ Use these ownership boundaries:
 - A domain owner handles `src/domain/**` and `tests/domain/**`.
 - An app-helper owner handles one or more files under `src/app/**` and the
   focused tests that exercise those helpers. Assign `daily-view.ts`,
-  `files-view.ts`, `git-view.ts`, and `file-index.ts` independently when their
+  `files-view.ts`, `git-view.ts`, `git-controller.ts`, `pane-layout.ts`,
+  `problem-selection-controller.ts`, `tabs-view.ts`, `test-run-controller.ts`, and
+  `file-index.ts` independently when their
   callback/model contracts do not overlap. The app controller and its public
   exports have one integration owner; view wiring and changes to
   `src/app/types.ts` are integrated through that owner.

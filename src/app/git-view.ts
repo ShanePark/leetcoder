@@ -1,4 +1,5 @@
 import type { GitChangedFile, GitState } from './types'
+import { iconFor } from '../icons'
 import {
   defaultGitCommitMessage,
   gitFileName,
@@ -12,6 +13,8 @@ export interface GitPanelViewModel {
   bottomPanelTab: 'tests' | 'git'
   busy: boolean
   git: Readonly<GitState>
+  /** Human-readable progress for a Git mutation, when one is in flight. */
+  operationLabel?: string | null
 }
 
 export interface GitPanelViewCallbacks {
@@ -35,17 +38,27 @@ export function renderGitPanel(
   const panel = requiredElement<HTMLElement>(root, '#git-panel')
   panel.hidden = model.bottomPanelTab !== 'git'
   const { busy, git } = model
+  panel.setAttribute('aria-busy', String(git.busy))
   requiredElement<HTMLElement>(root, '#git-branch').textContent = git.branch ?? ''
   const count = requiredElement<HTMLElement>(root, '#git-file-count')
   count.textContent = git.files.length > 0 ? String(git.files.length) : ''
   count.hidden = git.files.length === 0
   const status = requiredElement<HTMLElement>(root, '#git-status')
+  status.className = 'git-status'
+  status.removeAttribute('aria-busy')
   if (git.error) {
     status.hidden = false
     status.textContent = git.error
   } else {
-    status.hidden = true
+    const operationLabel = model.operationLabel ?? (git.busy ? 'Working…' : null)
+    status.hidden = operationLabel === null
     status.textContent = ''
+    if (operationLabel !== null) {
+      status.classList.add('is-progress')
+      status.setAttribute('aria-busy', 'true')
+      status.append(iconFor('loader', 'git-status-icon is-spinning'))
+      status.append(document.createTextNode(operationLabel))
+    }
   }
 
   const selectedPaths = new Set(git.selectedPaths)

@@ -1,5 +1,69 @@
 import { describe, expect, it, vi } from 'vitest'
+
 import { LeetcoderApp, normalizeProblemNumber, utcDateKey } from '../../../src/app'
+import {
+  ProblemSelectionController,
+  type ProblemSelectionControllerBackend,
+} from '../../../src/app/problem-selection-controller'
+import type { DailyProblem } from '../../../src/backend'
+import type { AppState } from '../../../src/app/types'
+
+type SelectionState = Pick<
+  AppState,
+  | 'dailyProblem'
+  | 'problemSelection'
+  | 'dailyProblemDateKey'
+  | 'dailyRetryPending'
+  | 'dailyError'
+  | 'dailyLoading'
+>
+
+function problem(frontendId: string, date = utcDateKey()): DailyProblem {
+  return {
+    date,
+    frontendId,
+    title: `Problem ${frontendId}`,
+    titleSlug: `problem-${frontendId}`,
+    difficulty: 'Easy',
+    url: `https://leetcode.com/problems/problem-${frontendId}/`,
+    javaSnippet: null,
+    content: null,
+  }
+}
+
+function selectionHarness(overrides: Partial<SelectionState> = {}): {
+  controller: ProblemSelectionController
+  state: SelectionState
+  fetchDailyProblem: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchDailyProblem']>>
+  fetchProblemByNumber: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchProblemByNumber']>>
+  messages: Array<{ message: string; tone: string }>
+} {
+  const state: SelectionState = {
+    dailyProblem: null,
+    problemSelection: 'daily',
+    dailyProblemDateKey: null,
+    dailyRetryPending: false,
+    dailyError: null,
+    dailyLoading: false,
+    ...overrides,
+  }
+  const fetchDailyProblem = vi.fn<ProblemSelectionControllerBackend['fetchDailyProblem']>()
+  const fetchProblemByNumber = vi.fn<ProblemSelectionControllerBackend['fetchProblemByNumber']>()
+  const messages: Array<{ message: string; tone: string }> = []
+  const backend: ProblemSelectionControllerBackend = {
+    fetchDailyProblem,
+    fetchProblemByNumber,
+  }
+  const controller = new ProblemSelectionController({
+    state,
+    backend,
+    render: vi.fn(),
+    setMessage: (message, tone) => messages.push({ message, tone }),
+    isWindowVisible: () => true,
+    isDestroyed: () => false,
+  })
+  return { controller, state, fetchDailyProblem, fetchProblemByNumber, messages }
+}
 
 describe('problem lookup input', () => {
   it('normalizes positive numeric ids without changing large digit strings', () => {
@@ -15,101 +79,65 @@ describe('problem lookup input', () => {
     expect(normalizeProblemNumber('abc')).toBeNull()
   })
 
-  function appHarness(overrides: Record<string, unknown> = {}): any {
-    const app = Object.create(LeetcoderApp.prototype) as any
-    const stateOverrides = (overrides.state ?? {}) as Record<string, unknown>
-    const appOverrides = { ...overrides }
-    delete appOverrides.state
-    app.destroyed = false
-    app.dailyRequestId = 0
-    app.problemNumberDraft = null
-    app.lastProblemRequest = 'daily'
-    app.renderAll = vi.fn()
-    app.scheduleDailyProblemRefresh = vi.fn()
-    app.setMessage = vi.fn()
-    app.state = {
-      dailyProblem: null,
-      problemSelection: 'daily',
-      dailyProblemDateKey: null,
-      dailyRetryPending: false,
-      dailyError: null,
-      dailyLoading: false,
-      busy: false,
-      repoPath: null,
-      projectValid: false,
-      files: [],
-      ...stateOverrides,
-    }
-    Object.assign(app, appOverrides)
-    return app
-  }
-
   it('keeps the displayed problem when a manual lookup fails', async () => {
-    const displayed = {
-      date: '2026-08-23',
-      frontendId: '1',
-      title: 'Two Sum',
-      titleSlug: 'two-sum',
-      difficulty: 'Easy',
-      url: 'https://leetcode.com/problems/two-sum/',
-      javaSnippet: null,
-      content: null,
-    }
-    const app = appHarness({
-      backend: { fetchProblemByNumber: vi.fn().mockRejectedValue(new Error('not found')) },
-      state: { dailyProblem: displayed },
+    const displayed = problem('1', '2026-08-23')
+    const { controller, state, fetchProblemByNumber, messages } = selectionHarness({
+      dailyProblem: displayed,
     })
+    fetchProblemByNumber.mockRejectedValue(new Error('not found'))
 
-    await app.loadProblemByNumber('9999')
+    await controller.loadProblemByNumber('9999')
 
-    expect(app.state.dailyProblem).toBe(displayed)
-    expect(app.problemNumberDraft).toBe('1')
-    expect(app.state.problemSelection).toBe('daily')
-    expect(app.setMessage).toHaveBeenCalledWith(
-      'Could not load problem #9999: not found',
-      'error',
-    )
+    expect(state.dailyProblem).toBe(displayed)
+    expect(controller.problemNumberDraft).toBe('1')
+    expect(state.problemSelection).toBe('daily')
+    expect(messages).toEqual([{
+      message: 'Could not load problem #9999: not found',
+      tone: 'error',
+    }])
+    controller.dispose()
   })
 
   it('does not replace a manual selection during daily refresh checks', () => {
-    const fetchDailyProblem = vi.fn()
-    const app = appHarness({
-      backend: { fetchDailyProblem },
-      state: {
-        dailyProblem: { frontendId: '1' },
-        problemSelection: 'manual',
-      },
+    const { controller, fetchDailyProblem } = selectionHarness({
+      dailyProblem: problem('1'),
+      problemSelection: 'manual',
     })
-    app.isWindowVisible = () => true
 
-    app.refreshDailyProblemIfStale()
+    controller.refreshDailyProblemIfStale()
 
     expect(fetchDailyProblem).not.toHaveBeenCalled()
+    controller.dispose()
   })
 
-  it('recognizes a manually loaded problem when it matches the cached current daily id', () => {
-    const app = appHarness({
-      latestDailyProblem: { frontendId: '3622', dateKey: utcDateKey() },
-      state: {
-        dailyProblem: { frontendId: '3622' },
-        problemSelection: 'manual',
-      },
-    })
+  it('recognizes a manually loaded problem when it matches the cached current daily id', async () => {
+    const { controller, state, fetchDailyProblem } = selectionHarness()
+    const daily = problem('3622')
+    fetchDailyProblem.mockResolvedValue(daily)
+    await controller.loadDailyProblem()
+    state.problemSelection = 'manual'
 
-    expect(app.isViewingTodayProblem({ frontendId: '3622' })).toBe(true)
-    expect(app.isViewingTodayProblem({ frontendId: '1' })).toBe(false)
+    expect(controller.isViewingTodayProblem(daily)).toBe(true)
+    expect(controller.isViewingTodayProblem(problem('1'))).toBe(false)
+    controller.dispose()
   })
 
-  it('does not label an old cached daily id as today', () => {
-    const app = appHarness({
-      latestDailyProblem: { frontendId: '3622', dateKey: '2020-01-01' },
-      state: {
-        dailyProblem: { frontendId: '3622' },
-        problemSelection: 'manual',
-      },
-    })
+  it('does not label an old cached daily id as today', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-09-10T12:00:00.000Z'))
+      const { controller, state, fetchDailyProblem } = selectionHarness()
+      const daily = problem('3622', '2026-09-10')
+      fetchDailyProblem.mockResolvedValue(daily)
+      await controller.loadDailyProblem()
+      vi.setSystemTime(new Date('2026-09-11T12:00:00.000Z'))
+      state.problemSelection = 'manual'
 
-    expect(app.isViewingTodayProblem({ frontendId: '3622' })).toBe(false)
+      expect(controller.isViewingTodayProblem(daily)).toBe(false)
+      controller.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('creates from the problem selected before pending saves finish', async () => {
@@ -126,22 +154,25 @@ describe('problem lookup input', () => {
       javaSnippet: null,
     }
     const createProblemFile = vi.fn().mockResolvedValue(undefined)
-    const app = appHarness({
-      backend: {
-        listProblemFiles: vi.fn().mockResolvedValue([]),
-        createProblemFile,
-      },
-      state: {
-        dailyProblem: selected,
-        repoPath: '/repo',
-        projectValid: true,
-      },
-    })
+    const app = Object.create(LeetcoderApp.prototype) as any
+    app.backend = {
+      listProblemFiles: vi.fn().mockResolvedValue([]),
+      createProblemFile,
+    }
+    app.state = {
+      dailyProblem: selected,
+      repoPath: '/repo',
+      projectValid: true,
+      files: [],
+      busy: false,
+    }
+    app.gitController = { markStale: vi.fn() }
     app.flushPendingSave = vi.fn(async () => {
       app.state.dailyProblem = changedDuringSave
       return true
     })
-    app.markGitStale = vi.fn()
+    app.renderAll = vi.fn()
+    app.setMessage = vi.fn()
     app.refreshFiles = vi.fn().mockResolvedValue(true)
     app.openFile = vi.fn().mockResolvedValue(undefined)
 
