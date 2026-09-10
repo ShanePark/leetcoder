@@ -166,6 +166,7 @@ export class LeetcoderApp {
   private stopWatchingFiles: (() => void) | null = null
   private readonly appListeners: Array<() => void> = []
   private destroyed = false
+  private controlsBusy = false
   private dailyDescriptionOpen = false
   private gitDiscardDialogFile: GitChangedFile | null = null
   private gitDiscardDialogFocusTarget: HTMLElement | null = null
@@ -1140,6 +1141,10 @@ export class LeetcoderApp {
   /** Update controls whose disabled state changes while a file operation runs. */
   private updateBusyControls(): void {
     const busy = this.state.busy
+    if (busy && !this.controlsBusy) {
+      this.documentController.invalidatePendingNavigation()
+    }
+    this.controlsBusy = busy
     this.element<HTMLButtonElement>('#choose-repository').disabled = busy || this.repositoryPicker.isOpen
     this.element<HTMLButtonElement>('#refresh-files').disabled = busy || !this.state.projectValid
     this.root.querySelectorAll<HTMLButtonElement>('.file-item').forEach((button) => {

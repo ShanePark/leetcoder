@@ -86,6 +86,7 @@ export class DocumentController {
   private readonly snapshotGenerations = new WeakMap<AutosaveSnapshot, number>()
   private readonly state: DocumentControllerState
   private nextOpenTabId = 1
+  private nextOpenRequestId = 0
   private closePreparation: Promise<void> | null = null
   private destroyed = false
   private suppressEditorChange = false
@@ -145,34 +146,50 @@ export class DocumentController {
     return this.state.openTabs.find((tab) => sameFilePath(tab.path, path)) ?? null
   }
 
+  /** Cancel a read when another exclusive app operation takes ownership. */
+  invalidatePendingNavigation(): void {
+    this.invalidateOpenFileRequests()
+  }
+
   /** Open a file, reusing its tab when it is already open. */
   async openFile(file: ProblemFileEntry): Promise<void> {
     const repoPath = this.state.repoPath
-    if (!repoPath || this.fileOpenInProgress || !this.isAlive()) {
+    if (!repoPath || !this.isAlive()) {
       return
     }
+    const requestId = ++this.nextOpenRequestId
+    this.fileOpenInProgress = true
     const existing = this.openTabForPath(file.path)
     if (existing && existing.id === this.state.activeTabId
       && sameFilePath(file.path, this.state.selectedPath ?? '')) {
+      this.finishOpenRequest(requestId)
       this.context.revealSelectedFileInExplorer?.()
       this.context.editor.focus()
       return
     }
 
-    const ownsBusy = !this.state.busy
+    // File navigation must not take the whole application offline while the
+    // native bridge reads the next source file. File operations that already
+    // hold the app busy lock still pass that state through unchanged.
+    const startedBusy = this.state.busy
     const repositoryGeneration = this.context.getRepositoryGeneration()
-    if (ownsBusy) {
-      this.fileOpenInProgress = true
-      this.state.busy = true
-      this.context.renderBusyControls?.()
-    }
     try {
       if (!(await this.flushPendingSave())
-        || !this.isCurrentRepository(repoPath, repositoryGeneration)) {
+        || !this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
         return
       }
       const source = await this.context.backend.readProblemFile(repoPath, file.path)
-      if (!this.isCurrentRepository(repoPath, repositoryGeneration)) {
+      if (!this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
+        return
+      }
+      // The user can keep editing the current document while the next file is
+      // being read. Drain those edits before replacing the editor contents so
+      // navigation never strands a change that arrived during the read.
+      if (!(await this.flushPendingSave())
+        || !this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
+        return
+      }
+      if (!this.isOpenTargetCurrent(file, existing, startedBusy)) {
         return
       }
       const tabMetadataChanged = Boolean(existing && (
@@ -201,18 +218,17 @@ export class DocumentController {
         this.context.updateFileTabState()
       }
       this.context.updateEditorVisibility()
+      // Keep controls derived from the selected document (especially Run)
+      // current without using the app-wide busy state during the read.
+      this.context.renderBusyControls?.()
       this.context.editor.focus()
       this.context.scheduleLiveDiagnostics()
     } catch (error) {
-      if (this.isCurrentRepository(repoPath, repositoryGeneration)) {
+      if (this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
         this.context.setMessage(`Could not open ${file.name}: ${errorMessage(error)}`, 'error')
       }
     } finally {
-      if (ownsBusy) {
-        this.state.busy = false
-        this.fileOpenInProgress = false
-        this.context.renderBusyControls?.()
-      }
+      this.finishOpenRequest(requestId)
     }
   }
 
@@ -309,6 +325,7 @@ export class DocumentController {
 
   /** Clear the active document and invalidate its editor/test state. */
   resetCurrentFile(): void {
+    this.invalidateOpenFileRequests()
     this.state.activeTabId = null
     this.state.selectedPath = null
     this.state.selectedSource = ''
@@ -501,6 +518,42 @@ export class DocumentController {
     return this.isAlive()
       && this.state.repoPath === repoPath
       && this.context.getRepositoryGeneration() === repositoryGeneration
+  }
+
+  private isCurrentOpenRequest(
+    requestId: number,
+    repoPath: string,
+    repositoryGeneration: number,
+    startedBusy: boolean,
+  ): boolean {
+    return requestId === this.nextOpenRequestId
+      && this.state.busy === startedBusy
+      && this.isCurrentRepository(repoPath, repositoryGeneration)
+  }
+
+  private isOpenTargetCurrent(
+    file: ProblemFileEntry,
+    existing: OpenFileTab | null,
+    startedBusy: boolean,
+  ): boolean {
+    const existingTabStillOpen = existing ? this.state.openTabs.includes(existing) : false
+    return (!existing || existingTabStillOpen)
+      && (this.state.files.some((entry) => sameFilePath(entry.path, file.path))
+        // File-management callers may supply a still-open fallback tab while
+        // their refresh has not listed the newly created/restored path yet.
+        || existingTabStillOpen
+        || (startedBusy && !existing))
+  }
+
+  private finishOpenRequest(requestId: number): void {
+    if (requestId === this.nextOpenRequestId) {
+      this.fileOpenInProgress = false
+    }
+  }
+
+  private invalidateOpenFileRequests(): void {
+    this.nextOpenRequestId += 1
+    this.fileOpenInProgress = false
   }
 
   private async persistSnapshot(snapshot: AutosaveSnapshot): Promise<void> {

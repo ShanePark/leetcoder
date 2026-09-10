@@ -63,11 +63,18 @@ pub fn list_problem_files(repo_path: String) -> Result<ProblemFileList, String> 
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn read_problem_file(repo_path: String, path: String) -> Result<ProblemFileContent, String> {
-    repository::read_problem_file(ProblemFileArgs {
-        project_root: repo_path,
-        relative_path: path,
+pub async fn read_problem_file(
+    repo_path: String,
+    path: String,
+) -> Result<ProblemFileContent, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        repository::read_problem_file(ProblemFileArgs {
+            project_root: repo_path,
+            relative_path: path,
+        })
     })
+    .await
+    .map_err(|error| format!("Problem file read worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -20,6 +20,20 @@ const fileB: ProblemFileEntry = {
   packageSegment: 'easy',
 }
 
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (error: unknown) => void
+} {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 function createState(overrides: Partial<DocumentControllerState> = {}): DocumentControllerState {
   return {
     repoPath: '/repo',
@@ -172,6 +186,173 @@ describe('DocumentController', () => {
     expect(hooks.resetTestState).toHaveBeenCalledOnce()
     expect(hooks.setSavedSource).toHaveBeenCalledWith('class A {}')
     expect(state.busy).toBe(false)
+    controller.dispose()
+  })
+
+  it('keeps navigation responsive and applies only the newest file read', async () => {
+    const { controller, state, backend, editor, hooks } = createHarness()
+    const reads = new Map<string, ReturnType<typeof deferred<string>>>()
+    backend.readProblemFile.mockImplementation((_repoPath, path) => {
+      const pending = deferred<string>()
+      reads.set(path, pending)
+      return pending.promise
+    })
+
+    const openingA = controller.openFile(fileA)
+    await Promise.resolve()
+    await Promise.resolve()
+    const openingB = controller.openFile(fileB)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(state.busy).toBe(false)
+    expect(hooks.renderBusyControls).not.toHaveBeenCalled()
+    expect(reads.has(fileA.path)).toBe(true)
+    expect(reads.has(fileB.path)).toBe(true)
+
+    reads.get(fileB.path)?.resolve('class B {}')
+    await openingB
+    reads.get(fileA.path)?.resolve('class A {}')
+    await openingA
+
+    expect(state.selectedPath).toBe(fileB.path)
+    expect(hooks.renderBusyControls).toHaveBeenCalledOnce()
+    expect(state.openTabs).toEqual([{
+      id: 1,
+      path: fileB.path,
+      name: fileB.name,
+      packageSegment: fileB.packageSegment,
+    }])
+    expect(editor.value).toBe('class B {}')
+    controller.dispose()
+  })
+
+  it('cancels a pending navigation when the user returns to the active file', async () => {
+    const { controller, state, backend, editor } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+    editor.value = 'class A {}'
+    const pendingRead = deferred<string>()
+    backend.readProblemFile.mockReturnValue(pendingRead.promise)
+
+    const opening = controller.openFile(fileB)
+    await Promise.resolve()
+    await Promise.resolve()
+    await controller.openFile(fileA)
+    pendingRead.resolve('class B {}')
+    await opening
+
+    expect(state.selectedPath).toBe(fileA.path)
+    expect(state.activeTabId).toBe(1)
+    expect(state.openTabs).toEqual([{ id: 1, ...fileA }])
+    expect(editor.value).toBe('class A {}')
+    controller.dispose()
+  })
+
+  it('ignores a read invalidated by an exclusive operation', async () => {
+    const { controller, state, backend, editor } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+    editor.value = 'class A {}'
+    const pendingRead = deferred<string>()
+    backend.readProblemFile.mockReturnValue(pendingRead.promise)
+
+    const opening = controller.openFile(fileB)
+    await Promise.resolve()
+    await Promise.resolve()
+    controller.invalidatePendingNavigation()
+    pendingRead.resolve('class B {}')
+    await opening
+
+    expect(state.selectedPath).toBe(fileA.path)
+    expect(state.activeTabId).toBe(1)
+    expect(editor.value).toBe('class A {}')
+    controller.dispose()
+  })
+
+  it('flushes edits made while reading before replacing the editor', async () => {
+    const { controller, state, backend, editor } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+    editor.value = 'class A {}'
+    const pendingRead = deferred<string>()
+    backend.readProblemFile.mockReturnValue(pendingRead.promise)
+
+    const opening = controller.openFile(fileB)
+    await Promise.resolve()
+    await Promise.resolve()
+    controller.onEditorChange('class A { int changed = 1; }')
+    pendingRead.resolve('class B {}')
+    await opening
+
+    expect(backend.saveProblemFile).toHaveBeenCalledWith(
+      '/repo',
+      fileA.path,
+      'class A { int changed = 1; }',
+    )
+    expect(state.selectedPath).toBe(fileB.path)
+    expect(editor.value).toBe('class B {}')
+    controller.dispose()
+  })
+
+  it('keeps the current file and reports a read failure without a busy flash', async () => {
+    const { controller, state, backend, hooks, editor } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+    editor.value = 'class A {}'
+    backend.readProblemFile.mockRejectedValue(new Error('disk read failed'))
+
+    await controller.openFile(fileB)
+
+    expect(state.selectedPath).toBe(fileA.path)
+    expect(editor.value).toBe('class A {}')
+    expect(state.busy).toBe(false)
+    expect(hooks.renderBusyControls).not.toHaveBeenCalled()
+    expect(hooks.setMessage).toHaveBeenCalledWith(
+      'Could not open Q20ValidParentheses.java: disk read failed',
+      'error',
+    )
+    controller.dispose()
+  })
+
+  it('does not reopen a tab that was closed while its source was pending', async () => {
+    const { controller, state, backend, editor } = createHarness({
+      openTabs: [{ id: 1, ...fileA }, { id: 2, ...fileB }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+    editor.value = 'class A {}'
+    const pendingRead = deferred<string>()
+    backend.readProblemFile.mockReturnValue(pendingRead.promise)
+
+    const opening = controller.openFile(fileB)
+    await Promise.resolve()
+    await Promise.resolve()
+    controller.removeOpenTab(2)
+    pendingRead.resolve('class B {}')
+    await opening
+
+    expect(state.selectedPath).toBe(fileA.path)
+    expect(state.activeTabId).toBe(1)
+    expect(state.openTabs).toEqual([{ id: 1, ...fileA }])
     controller.dispose()
   })
 
