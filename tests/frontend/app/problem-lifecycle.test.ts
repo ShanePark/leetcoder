@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { LeetcoderApp, normalizeProblemNumber, utcDateKey } from '../../../src/app'
+import { normalizeProblemNumber, utcDateKey } from '../../../src/app'
+import {
+  FileOperationsController,
+  type FileOperationsBackend,
+  type FileOperationsDocument,
+  type FileOperationsGit,
+  type FileOperationsState,
+} from '../../../src/app/file-operations-controller'
 import {
   ProblemSelectionController,
   type ProblemSelectionControllerBackend,
@@ -153,35 +160,81 @@ describe('problem lookup input', () => {
       difficulty: 'Medium',
       javaSnippet: null,
     }
-    const createProblemFile = vi.fn().mockResolvedValue(undefined)
-    const app = Object.create(LeetcoderApp.prototype) as any
-    app.backend = {
-      listProblemFiles: vi.fn().mockResolvedValue([]),
-      createProblemFile,
-    }
-    app.state = {
+    const createProblemFile = vi.fn<FileOperationsBackend['createProblemFile']>().mockResolvedValue(undefined)
+    const state: FileOperationsState = {
       dailyProblem: selected,
       repoPath: '/repo',
       projectValid: true,
       files: [],
+      openTabs: [],
+      activeTabId: null,
+      selectedPath: null,
+      selectedFqcn: null,
       busy: false,
     }
-    app.gitController = { markStale: vi.fn() }
-    app.flushPendingSave = vi.fn(async () => {
-      app.state.dailyProblem = changedDuringSave
+    const flushPendingSave = vi.fn(async () => {
+      state.dailyProblem = changedDuringSave
       return true
     })
-    app.renderAll = vi.fn()
-    app.setMessage = vi.fn()
-    app.refreshFiles = vi.fn().mockResolvedValue(true)
-    app.openFile = vi.fn().mockResolvedValue(undefined)
-
-    await app.createFileForToday()
-
-    expect(createProblemFile).toHaveBeenCalledWith('/repo', expect.objectContaining({
-      problemNumber: '1',
-      title: 'Two Sum',
+    const openFile = vi.fn().mockResolvedValue(undefined)
+    const document: FileOperationsDocument = {
+      flushPendingSave,
+      cancelPendingAutosave: vi.fn(),
+      openTabForPath: vi.fn().mockReturnValue(null),
+      removeOpenTab: vi.fn().mockReturnValue(null),
+      resetCurrentFile: vi.fn(),
+      openFile,
+      beginGitDiscard: vi.fn(),
+      endGitDiscard: vi.fn(),
+      applySavedSource: vi.fn(),
+    }
+    const operation = { id: 1, repoPath: '/repo', repositoryGeneration: 1 }
+    const git: FileOperationsGit = {
+      startOperation: vi.fn().mockReturnValue(operation),
+      isCurrentOperation: vi.fn().mockReturnValue(true),
+      finishOperation: vi.fn(),
+      markStale: vi.fn(),
+      refreshStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    const backend: FileOperationsBackend = {
+      listProblemFiles: vi.fn().mockResolvedValue([]),
+      readProblemFile: vi.fn().mockResolvedValue(''),
+      createProblemFile,
+      discardGitChanges: vi.fn().mockResolvedValue(undefined),
+      showInFileManager: vi.fn().mockResolvedValue(undefined),
+    }
+    const createProblem = vi.fn().mockResolvedValue({
+      path: 'easy/Q1TwoSum.java',
+      fileName: 'Q1TwoSum.java',
       packageSegment: 'easy',
+    })
+    const refreshFiles = vi.fn().mockResolvedValue(true)
+    const controller = new FileOperationsController({
+      state,
+      backend,
+      document,
+      git,
+      createProblem,
+      refreshFiles,
+      repositoryGeneration: () => 1,
+      getGitFiles: () => [],
+      setAppBusy: (busy) => { state.busy = busy },
+      render: vi.fn(),
+      setMessage: vi.fn(),
+      isDestroyed: () => false,
+    })
+
+    await controller.createFileForToday()
+
+    expect(createProblem).toHaveBeenCalledWith('/repo', expect.objectContaining({
+      number: '1',
+      title: 'Two Sum',
+      difficulty: 'Easy',
+      javaCodeSnippet: null,
     }))
+    expect(openFile).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'easy/Q1TwoSum.java',
+    }))
+    controller.dispose()
   })
 })

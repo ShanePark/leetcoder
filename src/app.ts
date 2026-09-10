@@ -31,14 +31,12 @@ import {
   type LiveDiagnosticsSnapshot,
 } from './live-diagnostics'
 
-import { AutosaveCoordinator } from './app/autosave'
 import {
   accordionGroupKeys,
   isCloseAllTabsShortcut,
   isCloseTabShortcut,
   isCurrentRepositoryRefresh,
   RepositoryPickerCoordinator,
-  replacementTabIndex,
 } from './app/navigation'
 import {
   collectDiagnosticEditorIssues,
@@ -46,11 +44,12 @@ import {
 } from './app/test-results'
 import {
   gitFileName,
-  isGitNewFile,
 } from './app/git-helpers'
 import { createGitState, GitController } from './app/git-controller'
 import { createPaneLayoutController, type PaneLayoutController } from './app/pane-layout'
 import { ProblemSelectionController } from './app/problem-selection-controller'
+import { DocumentController } from './app/document-controller'
+import { FileOperationsController } from './app/file-operations-controller'
 import {
   createFileTabsView,
   renderFileHeading as renderFileHeadingView,
@@ -58,27 +57,23 @@ import {
   type FileTabsViewModel,
 } from './app/tabs-view'
 import { TestRunController } from './app/test-run-controller'
+import { ToastController } from './app/toast-controller'
+import { OverlayController } from './app/overlay-controller'
 import { findIndexedProblemFile, indexProblemFiles } from './app/file-index'
 import {
   renderGitPanel as renderGitPanelView,
   updateGitCommitControls as updateGitCommitControlsView,
 } from './app/git-view'
 import {
-  findFileAfterDuplicate,
-  findFileAfterRename,
-  findRestoredFileAfterGitRename,
   findTodayProblemFile,
   joinFilePath,
-  fileMutationResultPath,
   normalizeJavaFileName,
 } from './app/file-helpers'
 import {
-  fqcnFromJavaPath,
   gitDirectoryPath,
   sameFilePath,
 } from './app/path-helpers'
 import {
-  applyTheme,
   DEFAULT_GIT_FILE_LIST_WIDTH,
   MAX_BOTTOM_PANEL_HEIGHT,
   MAX_DAILY_DESCRIPTION_HEIGHT,
@@ -88,20 +83,13 @@ import {
   MIN_GIT_DIFF_WIDTH,
   MIN_GIT_FILE_LIST_WIDTH,
   MIN_SIDEBAR_WIDTH,
-  THEME_MODE_KEY,
-  normalizeThemeMode,
-  readThemeMode,
-  defaultShortcutPlatform,
   isMacPlatform,
 } from './app/layout'
 import {
-  renderAboutDialog as renderAboutDialogView,
-  renderAppMenu as renderAppMenuView,
   renderDeleteFileDialog as renderDeleteFileDialogView,
   renderDiscardGitDialog as renderDiscardGitDialogView,
   renderFileContextMenu as renderFileContextMenuView,
   renderGitContextMenu as renderGitContextMenuView,
-  renderSettingsDialog as renderSettingsDialogView,
 } from './app/dialogs-view'
 import { renderShellView } from './app/shell-view'
 import { renderTestResults } from './app/results-view'
@@ -117,22 +105,14 @@ import {
 import type {
   AppOptions,
   AppState,
-  AutosaveSnapshot,
   DirectoryPicker,
-  FileManagementBackend,
   GitChangedFile,
   LiveDiagnosticsBackend,
   OpenFileTab,
-  SettingsSection,
-  ShortcutPlatform,
-  ThemeMode,
 } from './app/types'
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
 const APP_VERSION = '0.1.0'
 const DAILY_DESCRIPTION_KEY = 'leetcoder.daily-description'
-const SAVED_FLASH_MS = 1500
-const TOAST_DISMISS_MS = 3000
-const MAX_VISIBLE_TOASTS = 3
 
 /** The desktop application's single-window state and DOM orchestration. */
 export class LeetcoderApp {
@@ -143,19 +123,11 @@ export class LeetcoderApp {
   private readonly storage: Storage | undefined
   private readonly requestClose: (() => Promise<void>) | undefined
   private readonly updateProgressView = createUpdateProgressView()
+  private readonly toastController: ToastController
+  private readonly overlay: OverlayController
   private updateController: UpdateController
   private updateProgressListenerStop: (() => void) | null = null
   private updateCheckTimer: ReturnType<typeof setInterval> | null = null
-  private themeMode: ThemeMode
-  private appMenuOpen = false
-  private appMenuFocusTarget: HTMLElement | null = null
-  private settingsDialogOpen = false
-  private settingsDialogFocusTarget: HTMLElement | null = null
-  private settingsSection: SettingsSection = 'appearance'
-  private aboutDialogOpen = false
-  private aboutDialogFocusTarget: HTMLElement | null = null
-  private updateAvailable = false
-  private updateBusy = false
   private readonly state: AppState = {
     repoPath: null,
     projectValid: false,
@@ -186,50 +158,40 @@ export class LeetcoderApp {
     git: createGitState(),
   }
   private editor: JavaEditor
-  private readonly autosave: AutosaveCoordinator
   private readonly liveDiagnostics: LiveDiagnosticsScheduler
   private readonly dailyProblemView: DailyProblemViewRenderer
   private readonly problemSelectionController: ProblemSelectionController
-  private suppressEditorChange = false
   private repositoryGeneration = 0
   private refreshRequestId = 0
-  private externalReloadInFlight = false
   private stopWatchingFiles: (() => void) | null = null
-  private shortcutsPlatform: ShortcutPlatform = defaultShortcutPlatform(currentIsMacPlatform())
-  private nextOpenTabId = 1
-  private closePreparation: Promise<void> | null = null
+  private readonly appListeners: Array<() => void> = []
   private destroyed = false
-  private fileOperationId = 0
-  private fileOpenInProgress = false
-  private saveWriteInFlight = false
-  private savedFlash = false
-  private savedFlashTimer: ReturnType<typeof setTimeout> | null = null
   private dailyDescriptionOpen = false
-  private gitDiscardInProgress = false
   private gitDiscardDialogFile: GitChangedFile | null = null
   private gitDiscardDialogFocusTarget: HTMLElement | null = null
   private deleteDialogFile: ProblemFileEntry | null = null
   private deleteDialogFocusTarget: HTMLElement | null = null
   private renameTargetFile: ProblemFileEntry | null = null
-  private errorToastElement: HTMLElement | null = null
   private readonly gitController: GitController
   private readonly paneLayout: PaneLayoutController
   private readonly fileTabsView: FileTabsView
   private readonly testRunController: TestRunController
+  private readonly documentController: DocumentController
+  private readonly fileOperationsController: FileOperationsController
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     accordionGroupKeys('easy', true),
   )
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
     if (isSettingsShortcut(event, currentIsMacPlatform())) {
       event.preventDefault()
-      this.openSettingsDialog('appearance')
+      this.overlay.openSettingsDialog('appearance')
       return
     }
     if (isShortcutHelpAltShortcut(event)) {
       // The keymap has to be reachable from anywhere, including the file
       // explorer and the run panel.
       event.preventDefault()
-      this.openSettingsDialog('keymap')
+      this.overlay.openSettingsDialog('keymap')
       return
     }
     if (isCloseAllTabsShortcut(event, currentIsMacPlatform())) {
@@ -277,37 +239,6 @@ export class LeetcoderApp {
     }
   }
 
-  private readonly handleAppMenuKeydown = (event: KeyboardEvent): void => {
-    if (!this.appMenuOpen) {
-      return
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      this.closeAppMenu()
-      return
-    }
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-      return
-    }
-    const items = Array.from(this.element<HTMLElement>('#app-menu')
-      .querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
-      .filter((item) => !item.hidden && !item.disabled)
-    if (items.length === 0) {
-      return
-    }
-    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement)
-    const nextIndex = event.key === 'Home'
-      ? 0
-      : event.key === 'End'
-        ? items.length - 1
-        : Math.max(0, Math.min(
-          items.length - 1,
-          currentIndex + (event.key === 'ArrowDown' ? 1 : -1),
-        ))
-    event.preventDefault()
-    items[nextIndex]?.focus()
-  }
-
   private readonly handleWindowFocus = (): void => {
     this.handleAppVisibilityReturn()
   }
@@ -326,18 +257,12 @@ export class LeetcoderApp {
   }
 
   private readonly handleContextMenuOutside = (event: PointerEvent): void => {
-    const appMenu = this.root.querySelector<HTMLElement>('#app-menu')
-    const appMenuButton = this.root.querySelector<HTMLElement>('#app-menu-button')
+    this.overlay.handleOutsidePointerDown(event)
     const fileMenu = this.root.querySelector<HTMLElement>('#file-context-menu')
     const gitMenu = this.root.querySelector<HTMLElement>('#git-context-menu')
     const target = event.target instanceof Node ? event.target : null
-    const insideAppMenu = Boolean(appMenu && !appMenu.hidden && target && appMenu.contains(target))
-    const insideAppMenuButton = Boolean(appMenuButton && target && appMenuButton.contains(target))
     const insideFileMenu = Boolean(fileMenu && !fileMenu.hidden && target && fileMenu.contains(target))
     const insideGitMenu = Boolean(gitMenu && !gitMenu.hidden && target && gitMenu.contains(target))
-    if (!insideAppMenu && !insideAppMenuButton) {
-      this.closeAppMenu()
-    }
     if (!insideFileMenu && !insideGitMenu) {
       this.closeFileContextMenu()
       this.closeGitContextMenu()
@@ -345,19 +270,13 @@ export class LeetcoderApp {
   }
 
   private readonly handleContextMenuKeydown = (event: KeyboardEvent): void => {
+    if (this.overlay.handleEscape(event)) {
+      return
+    }
     if (event.key !== 'Escape') {
       return
     }
-    if (this.settingsDialogOpen) {
-      event.preventDefault()
-      this.closeSettingsDialog()
-    } else if (this.aboutDialogOpen) {
-      event.preventDefault()
-      this.closeAboutDialog()
-    } else if (this.appMenuOpen) {
-      event.preventDefault()
-      this.closeAppMenu()
-    } else if (this.gitDiscardDialogFile) {
+    if (this.gitDiscardDialogFile) {
       event.preventDefault()
       this.closeDiscardGitDialog()
     } else if (this.deleteDialogFile) {
@@ -381,8 +300,6 @@ export class LeetcoderApp {
     this.directoryPicker = options.directoryPicker ?? defaultDirectoryPicker
     this.storage = options.storage ?? safeStorage()
     this.requestClose = options.requestClose
-    this.themeMode = readThemeMode(this.storage)
-    applyTheme(this.themeMode)
     this.dailyDescriptionOpen = this.storage?.getItem(DAILY_DESCRIPTION_KEY) === 'open'
     this.gitController = new GitController(this.backend, {
       getContext: () => ({
@@ -403,6 +320,14 @@ export class LeetcoderApp {
       setMessage: (message, tone) => this.setMessage(message, tone),
     }, this.state.git)
     this.renderShell()
+    this.toastController = new ToastController(this.element<HTMLElement>('#toast-stack'))
+    this.overlay = new OverlayController({
+      root: this.root,
+      storage: this.storage,
+      macPlatform: currentIsMacPlatform(),
+      onRequestUpdate: () => this.requestApplicationUpdate(),
+      onRequestClose: () => this.requestApplicationClose(),
+    })
     this.paneLayout = createPaneLayoutController(this.root, { storage: this.storage })
     this.fileTabsView = createFileTabsView(this.element<HTMLElement>('#file-tabs'), {
       onOpenTab: (tabId) => this.openTab(tabId),
@@ -455,13 +380,12 @@ export class LeetcoderApp {
       },
       {
         setUpdateAvailable: (available) => {
-          this.updateAvailable = available
+          this.overlay.setUpdateAvailable(available)
           const button = this.root.querySelector<HTMLButtonElement>('#update-button')
           if (button) button.hidden = !available
-          this.renderAppMenu()
         },
         setUpdateBusy: (busy) => {
-          this.updateBusy = busy
+          this.overlay.setUpdateBusy(busy)
           const button = this.root.querySelector<HTMLButtonElement>('#update-button')
           if (button) {
             button.disabled = busy
@@ -470,24 +394,12 @@ export class LeetcoderApp {
             button.setAttribute('aria-label', busy ? 'Updating leetcoder' : 'Update leetcoder')
             button.title = busy ? 'Updating leetcoder — building and restarting' : 'Update available — build and restart'
           }
-          this.renderAppMenu()
         },
         showUpdateStarted: () => this.updateProgressView.start(),
         showError: (message) => {
           this.updateProgressView.fail()
           this.setMessage(`Update failed: ${message}`, 'error')
         },
-      },
-    )
-    this.autosave = new AutosaveCoordinator(
-      (snapshot) => this.persistSnapshot(snapshot),
-      {
-        onStatusChange: () => {
-          if (this.root.querySelector('#save-status')) {
-            this.renderFileHeading()
-          }
-        },
-        onError: (error) => this.handleSaveError(error),
       },
     )
     this.liveDiagnostics = new LiveDiagnosticsScheduler({
@@ -517,7 +429,9 @@ export class LeetcoderApp {
       isDestroyed: () => this.destroyed,
     })
     this.editor = new JavaEditor(this.element('#editor'), {
-      onChange: (source) => this.onEditorChange(source),
+      // JavaEditor may emit a bootstrap change while it is being constructed;
+      // the document controller is wired immediately afterwards.
+      onChange: (source) => this.documentController?.onEditorChange(source),
       onSave: () => {
         void this.saveCurrentFile()
         return true
@@ -527,10 +441,10 @@ export class LeetcoderApp {
         return true
       },
       onShowShortcuts: () => {
-        this.openSettingsDialog('keymap')
+        this.overlay.openSettingsDialog('keymap')
       },
       onShowSettings: () => {
-        this.openSettingsDialog('appearance')
+        this.overlay.openSettingsDialog('appearance')
       },
       onRefactorError: (message) => this.setMessage(message, 'error'),
       onRunTestAtCursor: (methodName) => {
@@ -539,6 +453,47 @@ export class LeetcoderApp {
         void this.testRunController.runCurrentTest(methodName ?? undefined)
         return true
       },
+    })
+    this.documentController = new DocumentController({
+      state: this.state,
+      backend: this.backend,
+      editor: this.editor,
+      getRepositoryGeneration: () => this.repositoryGeneration,
+      resetTestState: () => this.testRunController.resetTestState(),
+      cancelCurrentRun: () => this.testRunController.cancelCurrentRun(),
+      renderAll: () => this.renderAll(),
+      renderFileHeading: () => this.renderFileHeading(),
+      renderFileTabs: () => this.renderFileTabs(),
+      updateFileTabState: () => this.updateFileTabState(),
+      updateFileExplorerState: () => this.updateFileExplorerState(),
+      updateEditorVisibility: () => this.updateEditorVisibility(),
+      renderResult: () => this.renderResult(),
+      setExpandedGroup: (group, expanded) => this.setExpandedGroup(group, expanded),
+      scheduleLiveDiagnostics: () => this.scheduleLiveDiagnostics(),
+      markGitStale: () => this.gitController.markStale(),
+      setSavedSource: (source) => {
+        this.element<HTMLElement>('#editor-host').dataset.savedSource = source
+      },
+      setMessage: (message, tone) => this.setMessage(message, tone),
+      renderBusyControls: () => this.updateBusyControls(),
+      revealSelectedFileInExplorer: () => this.revealSelectedFileInExplorer(),
+      isDestroyed: () => this.destroyed,
+    })
+    this.fileOperationsController = new FileOperationsController({
+      state: this.state,
+      backend: this.backend,
+      document: this.documentController,
+      git: this.gitController,
+      createProblem: (repoPath, problem) => createProblemWithRetry(this.backend, repoPath, problem),
+      refreshFiles: () => this.refreshFiles(),
+      repositoryGeneration: () => this.repositoryGeneration,
+      getGitFiles: () => this.state.git.files,
+      setAppBusy: (busy) => {
+        this.state.busy = busy
+      },
+      render: () => this.renderAll(),
+      setMessage: (message, tone) => this.setMessage(message, tone),
+      isDestroyed: () => this.destroyed,
     })
     this.bindEvents()
     this.renderAll()
@@ -576,25 +531,7 @@ export class LeetcoderApp {
   }
 
   async prepareToClose(): Promise<void> {
-    if (this.closePreparation) {
-      return this.closePreparation
-    }
-    const preparation = (async (): Promise<void> => {
-      try {
-        await this.autosave.flush()
-      } catch (error) {
-        this.handleSaveError(error)
-        throw error
-      }
-    })()
-    this.closePreparation = preparation
-    try {
-      await preparation
-    } finally {
-      if (this.closePreparation === preparation) {
-        this.closePreparation = null
-      }
-    }
+    await this.documentController.prepareToClose()
   }
 
   async destroy(): Promise<void> {
@@ -602,19 +539,17 @@ export class LeetcoderApp {
       return
     }
     await this.prepareToClose()
+    this.fileOperationsController.dispose()
     this.testRunController.dispose()
     this.liveDiagnostics.dispose()
     this.gitController.dispose()
+    this.documentController.dispose()
     this.fileTabsView.dispose()
     this.paneLayout.destroy()
     this.editor.destroy()
-    this.autosave.dispose()
-    this.element<HTMLElement>('#editor-host').removeEventListener('focusin', this.handleEditorFocus)
-    window.removeEventListener('keydown', this.handleGlobalKeydown)
-    window.removeEventListener('focus', this.handleWindowFocus)
-    document.removeEventListener('visibilitychange', this.handleVisibilityChange)
-    window.removeEventListener('pointerdown', this.handleContextMenuOutside)
-    window.removeEventListener('keydown', this.handleContextMenuKeydown)
+    for (const remove of this.appListeners.splice(0)) {
+      remove()
+    }
     this.problemSelectionController.dispose()
     if (this.updateCheckTimer !== null) {
       clearInterval(this.updateCheckTimer)
@@ -623,7 +558,8 @@ export class LeetcoderApp {
     this.updateProgressListenerStop?.()
     this.updateProgressListenerStop = null
     this.updateProgressView.fail()
-    this.clearSavedFlash()
+    this.toastController.dispose()
+    this.overlay.dispose()
     this.stopWatchingFiles?.()
     this.stopWatchingFiles = null
     void this.backend.stopWatchingRepository().catch(() => {})
@@ -684,43 +620,24 @@ export class LeetcoderApp {
 
 
   private bindEvents(): void {
-    this.element<HTMLButtonElement>('#app-menu-button').addEventListener('click', () => {
-      this.toggleAppMenu()
-    })
-    this.element<HTMLElement>('#app-menu').addEventListener('keydown', this.handleAppMenuKeydown)
-    this.element<HTMLButtonElement>('#update-menu-action').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#update-button'), 'click', () => {
       void this.requestApplicationUpdate()
     })
-    this.element<HTMLButtonElement>('#settings-menu-action').addEventListener('click', () => {
-      this.closeAppMenu(false)
-      this.openSettingsDialog('appearance')
-    })
-    this.element<HTMLButtonElement>('#about-menu-action').addEventListener('click', () => {
-      this.closeAppMenu(false)
-      this.openAboutDialog()
-    })
-    this.element<HTMLButtonElement>('#exit-menu-action').addEventListener('click', () => {
-      this.closeAppMenu(false)
-      void this.requestApplicationClose()
-    })
-    this.element<HTMLButtonElement>('#update-button').addEventListener('click', () => {
-      void this.requestApplicationUpdate()
-    })
-    this.element<HTMLButtonElement>('#choose-repository').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#choose-repository'), 'click', () => {
       void this.chooseRepository()
     })
-    this.element<HTMLButtonElement>('#refresh-files').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#refresh-files'), 'click', () => {
       if (!this.state.busy) {
         void this.refreshFiles()
       }
     })
-    this.element<HTMLElement>('#editor-host').addEventListener('focusin', this.handleEditorFocus)
-    this.element<HTMLInputElement>('#file-search').addEventListener('input', (event) => {
+    this.listen(this.element<HTMLElement>('#editor-host'), 'focusin', this.handleEditorFocus)
+    this.listen(this.element<HTMLInputElement>('#file-search'), 'input', (event) => {
       this.closeFileContextMenu()
       this.state.fileSearch = (event.target as HTMLInputElement).value
       this.renderFiles()
     })
-    this.element<HTMLInputElement>('#file-search').addEventListener('keydown', (event) => {
+    this.listen(this.element<HTMLInputElement>('#file-search'), 'keydown', (event) => {
       if (event.key === 'Escape') {
         event.preventDefault()
         const input = event.currentTarget as HTMLInputElement
@@ -731,20 +648,20 @@ export class LeetcoderApp {
         }
       }
     })
-    this.element<HTMLButtonElement>('#run-test').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#run-test'), 'click', () => {
       void this.testRunController.runCurrentTest()
     })
-    this.element<HTMLButtonElement>('#tests-tab').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#tests-tab'), 'click', () => {
       this.selectBottomPanelTab('tests')
     })
-    this.element<HTMLButtonElement>('#git-tab').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#git-tab'), 'click', () => {
       this.selectBottomPanelTab('git')
     })
     for (const tab of [
       this.element<HTMLButtonElement>('#tests-tab'),
       this.element<HTMLButtonElement>('#git-tab'),
     ]) {
-      tab.addEventListener('keydown', (event) => {
+      this.listen(tab, 'keydown', (event) => {
         if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') {
           return
         }
@@ -757,149 +674,81 @@ export class LeetcoderApp {
         this.selectBottomPanelTab(nextTab, true)
       })
     }
-    this.element<HTMLButtonElement>('#git-select-all').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#git-select-all'), 'click', () => {
       this.gitController.selectAllFiles()
     })
-    this.element<HTMLButtonElement>('#git-select-none').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#git-select-none'), 'click', () => {
       this.gitController.selectNoFiles()
     })
-    this.element<HTMLInputElement>('#git-commit-message').addEventListener('input', (event) => {
+    this.listen(this.element<HTMLInputElement>('#git-commit-message'), 'input', (event) => {
       // Typing must not re-render the panel — a rerender would fight the
       // caret. Only the commit-control enablement updates directly.
       this.state.git.commitMessage = (event.target as HTMLInputElement).value
       this.state.git.commitMessageEdited = this.state.git.commitMessage.trim().length > 0
       this.updateGitCommitControls()
     })
-    this.element<HTMLButtonElement>('#git-commit').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#git-commit'), 'click', () => {
       void this.gitController.commitSelectedFiles(false)
     })
-    this.element<HTMLButtonElement>('#git-commit-push').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#git-commit-push'), 'click', () => {
       void this.gitController.commitSelectedFiles(true)
     })
-    this.element<HTMLButtonElement>('#delete-file-action').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#delete-file-action'), 'click', () => {
       this.openDeleteFileDialog()
     })
-    this.element<HTMLButtonElement>('#git-discard-action').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#git-discard-action'), 'click', () => {
       this.openDiscardGitDialog()
     })
-    this.element<HTMLButtonElement>('#git-show-file-action').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#git-show-file-action'), 'click', () => {
       void this.showGitFileInManager()
     })
-    this.element<HTMLButtonElement>('#duplicate-file-action').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#duplicate-file-action'), 'click', () => {
       void this.duplicateContextMenuFile()
     })
-    this.element<HTMLButtonElement>('#rename-file-action').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#rename-file-action'), 'click', () => {
       this.openRenameDialog()
     })
-    this.element<HTMLFormElement>('#rename-file-form').addEventListener('submit', (event) => {
+    this.listen(this.element<HTMLFormElement>('#rename-file-form'), 'submit', (event) => {
       event.preventDefault()
       void this.renameDialogFile()
     })
-    this.element<HTMLButtonElement>('#cancel-rename-file').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#cancel-rename-file'), 'click', () => {
       this.closeRenameDialog()
     })
-    this.element<HTMLElement>('#rename-file-dialog').addEventListener('pointerdown', (event) => {
+    this.listen(this.element<HTMLElement>('#rename-file-dialog'), 'pointerdown', (event) => {
       if (event.target === event.currentTarget) {
         this.closeRenameDialog()
       }
     })
-    this.element<HTMLFormElement>('#discard-git-form').addEventListener('submit', (event) => {
+    this.listen(this.element<HTMLFormElement>('#discard-git-form'), 'submit', (event) => {
       event.preventDefault()
       this.confirmDiscardGitDialog()
     })
-    this.element<HTMLButtonElement>('#cancel-discard-git').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#cancel-discard-git'), 'click', () => {
       this.closeDiscardGitDialog()
     })
-    const shortcutPlatformTabs = [
-      this.element<HTMLButtonElement>('#shortcuts-linux-tab'),
-      this.element<HTMLButtonElement>('#shortcuts-macos-tab'),
-    ]
-    for (const tab of shortcutPlatformTabs) {
-      tab.addEventListener('click', () => {
-        this.setShortcutsPlatform(tab.id === 'shortcuts-macos-tab' ? 'macos' : 'linux')
-      })
-      tab.addEventListener('keydown', (event) => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-          return
-        }
-        event.preventDefault()
-        const platform: ShortcutPlatform = event.key === 'Home' || event.key === 'ArrowLeft'
-          ? 'linux'
-          : 'macos'
-        this.setShortcutsPlatform(platform, true)
-      })
-    }
-    for (const [section, id] of [
-      ['appearance', '#settings-appearance-nav'],
-      ['keymap', '#settings-keymap-nav'],
-    ] as const) {
-      this.element<HTMLButtonElement>(id).addEventListener('click', () => {
-        this.setSettingsSection(section)
-      })
-    }
-    const settingsNavItems = [
-      this.element<HTMLButtonElement>('#settings-appearance-nav'),
-      this.element<HTMLButtonElement>('#settings-keymap-nav'),
-    ]
-    for (const tab of settingsNavItems) {
-      tab.addEventListener('keydown', (event) => {
-        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-          return
-        }
-        event.preventDefault()
-        const section: SettingsSection = event.key === 'Home'
-          || event.key === 'ArrowUp'
-          || event.key === 'ArrowLeft'
-          ? 'appearance'
-          : 'keymap'
-        this.setSettingsSection(section, true)
-      })
-    }
-    this.element<HTMLButtonElement>('#close-settings').addEventListener('click', () => {
-      this.closeSettingsDialog()
-    })
-    this.element<HTMLElement>('#settings-dialog').addEventListener('pointerdown', (event) => {
-      if (event.target === event.currentTarget) {
-        this.closeSettingsDialog()
-      }
-    })
-    this.element<HTMLFormElement>('#settings-form').addEventListener('change', (event) => {
-      const target = event.target
-      if (!(target instanceof HTMLInputElement) || target.name !== 'theme-mode' || !target.checked) {
-        return
-      }
-      this.setThemeMode(target.value)
-    })
-    this.element<HTMLButtonElement>('#close-about').addEventListener('click', () => {
-      this.closeAboutDialog()
-    })
-    this.element<HTMLElement>('#about-dialog').addEventListener('pointerdown', (event) => {
-      if (event.target === event.currentTarget) {
-        this.closeAboutDialog()
-      }
-    })
-    this.element<HTMLElement>('#discard-git-dialog').addEventListener('pointerdown', (event) => {
+    this.listen(this.element<HTMLElement>('#discard-git-dialog'), 'pointerdown', (event) => {
       if (event.target === event.currentTarget) {
         this.closeDiscardGitDialog()
       }
     })
-    this.element<HTMLFormElement>('#delete-file-form').addEventListener('submit', (event) => {
+    this.listen(this.element<HTMLFormElement>('#delete-file-form'), 'submit', (event) => {
       event.preventDefault()
       this.confirmDeleteFileDialog()
     })
-    this.element<HTMLButtonElement>('#cancel-delete-file').addEventListener('click', () => {
+    this.listen(this.element<HTMLButtonElement>('#cancel-delete-file'), 'click', () => {
       this.closeDeleteFileDialog()
     })
-    this.element<HTMLElement>('#delete-file-dialog').addEventListener('pointerdown', (event) => {
+    this.listen(this.element<HTMLElement>('#delete-file-dialog'), 'pointerdown', (event) => {
       if (event.target === event.currentTarget) {
         this.closeDeleteFileDialog()
       }
     })
-    window.addEventListener('pointerdown', this.handleContextMenuOutside)
-    window.addEventListener('keydown', this.handleContextMenuKeydown)
-    window.addEventListener('keydown', this.handleGlobalKeydown)
-    window.addEventListener('focus', this.handleWindowFocus)
-    document.addEventListener('visibilitychange', this.handleVisibilityChange)
+    this.listen(window, 'pointerdown', this.handleContextMenuOutside)
+    this.listen(window, 'keydown', this.handleContextMenuKeydown)
+    this.listen(window, 'keydown', this.handleGlobalKeydown)
+    this.listen(window, 'focus', this.handleWindowFocus)
+    this.listen(document, 'visibilitychange', this.handleVisibilityChange)
   }
 
   private async chooseRepository(): Promise<void> {
@@ -1048,23 +897,11 @@ export class LeetcoderApp {
   }
 
   private activeOpenTab(): OpenFileTab | null {
-    if (this.state.activeTabId === null) {
-      return null
-    }
-    return this.state.openTabs.find((tab) => tab.id === this.state.activeTabId) ?? null
+    return this.documentController.activeOpenTab()
   }
 
   private openTabForPath(path: string): OpenFileTab | null {
-    return this.state.openTabs.find((tab) => sameFilePath(tab.path, path)) ?? null
-  }
-
-  private createOpenTab(file: ProblemFileEntry): OpenFileTab {
-    return {
-      id: this.nextOpenTabId++,
-      path: file.path,
-      name: file.name,
-      packageSegment: file.packageSegment,
-    }
+    return this.documentController.openTabForPath(path)
   }
 
   private liveDiagnosticsSnapshot(): LiveDiagnosticsSnapshot | null {
@@ -1140,116 +977,24 @@ export class LeetcoderApp {
     this.renderResult()
   }
 
-  private async openFile(file: ProblemFileEntry): Promise<void> {
-    if (!this.state.repoPath || this.fileOpenInProgress) {
-      return
-    }
-    const existing = this.openTabForPath(file.path)
-    if (existing && existing.id === this.state.activeTabId && sameFilePath(file.path, this.state.selectedPath ?? '')) {
-      this.revealSelectedFileInExplorer()
-      this.editor.focus()
-      return
-    }
+  private openFile(file: ProblemFileEntry): Promise<void> {
+    return this.documentController.openFile(file)
+  }
 
-    const ownsBusy = !this.state.busy
-    const repoPath = this.state.repoPath
-    const repositoryGeneration = this.repositoryGeneration
-    if (ownsBusy) {
-      this.fileOpenInProgress = true
-      this.state.busy = true
-    }
-    try {
-      if (!(await this.flushPendingSave())) {
-        return
-      }
-      const source = await this.backend.readProblemFile(repoPath, file.path)
-      if (this.state.repoPath !== repoPath || this.repositoryGeneration !== repositoryGeneration) {
-        return
-      }
-      const tabMetadataChanged = Boolean(existing && (
-        existing.path !== file.path
-        || existing.name !== file.name
-        || existing.packageSegment !== file.packageSegment
-      ))
-      const tab = existing ?? this.createOpenTab(file)
-      tab.path = file.path
-      tab.name = file.name
-      tab.packageSegment = file.packageSegment
-      if (!existing) {
-        this.state.openTabs.push(tab)
-      }
-      this.state.activeTabId = tab.id
-      this.testRunController.resetTestState()
-      this.state.selectedPath = file.path
-      this.state.selectedSource = source
-      this.state.savedSource = source
-      this.state.selectedFqcn = fqcnFromJavaPath(file.path)
-      this.state.dirty = false
-      this.state.saveError = null
-      this.clearSavedFlash()
-      this.suppressEditorChange = true
-      try {
-        this.editor.setValue(source)
-      } finally {
-        this.suppressEditorChange = false
-      }
-      // Opening a file reveals only its group; the accordion closes the other
-      // groups so the selected row has the full available viewport.
-      this.setExpandedGroup(file.packageSegment, true)
-      this.renderFileHeading()
-      this.renderResult()
-      this.updateFileExplorerState()
-      if (!existing || tabMetadataChanged) {
-        this.renderFileTabs()
-      } else {
-        this.updateFileTabState()
-      }
-      this.updateEditorVisibility()
-      this.editor.focus()
-      this.scheduleLiveDiagnostics()
-    } catch (error) {
-      this.setMessage(`Could not open ${file.name}: ${errorMessage(error)}`, 'error')
-    } finally {
-      if (ownsBusy) {
-        this.state.busy = false
-        this.fileOpenInProgress = false
-        this.updateBusyControls()
-      }
-    }
+  private openTab(tabId: number): Promise<void> {
+    return this.documentController.openTab(tabId)
+  }
+
+  private closeOpenTab(tabId: number): Promise<void> {
+    return this.documentController.closeOpenTab(tabId)
   }
 
   private removeOpenTab(tabId: number): OpenFileTab | null {
-    const index = this.state.openTabs.findIndex((tab) => tab.id === tabId)
-    if (index < 0) {
-      return null
-    }
-    const wasActive = this.state.activeTabId === tabId
-    this.state.openTabs.splice(index, 1)
-    if (!wasActive) {
-      return null
-    }
-    const replacementIndex = replacementTabIndex(this.state.openTabs.length, index)
-    const replacement = replacementIndex === null ? null : this.state.openTabs[replacementIndex]
-    this.resetCurrentFile()
-    return replacement ?? null
+    return this.documentController.removeOpenTab(tabId)
   }
 
-  private async closeAllOpenTabs(): Promise<void> {
-    if (this.state.busy || this.state.openTabs.length === 0) {
-      return
-    }
-    this.state.busy = true
-    this.updateBusyControls()
-    try {
-      if (!(await this.flushPendingSave())) {
-        return
-      }
-      this.state.openTabs = []
-      this.resetCurrentFile()
-    } finally {
-      this.state.busy = false
-      this.renderAll()
-    }
+  private closeAllOpenTabs(): Promise<void> {
+    return this.documentController.closeAllOpenTabs()
   }
 
   private setExpandedGroup(
@@ -1262,152 +1007,24 @@ export class LeetcoderApp {
     }
   }
 
-  private async createFileForToday(): Promise<void> {
-    if (this.state.busy) {
-      return
-    }
-    const problem = this.state.dailyProblem
-    if (!this.state.repoPath || !this.state.projectValid || !problem) {
-      this.setMessage('Choose a repository first', 'error')
-      return
-    }
-    this.state.busy = true
-    this.renderAll()
-    try {
-      if (!(await this.flushPendingSave())) {
-        return
-      }
-      const plan = await createProblemWithRetry(this.backend, this.state.repoPath, {
-        number: problem.frontendId,
-        title: problem.title,
-        difficulty: problem.difficulty,
-        javaCodeSnippet: problem.javaSnippet,
-      })
-      this.gitController.markStale()
-      await this.refreshFiles()
-      const createdFile = this.state.files.find((file) => file.path === plan.path) ?? {
-        path: plan.path,
-        name: plan.fileName,
-        packageSegment: plan.packageSegment,
-      }
-      await this.openFile(createdFile)
-      this.setMessage(`Created ${plan.fileName}.`, 'success')
-    } catch (error) {
-      this.setMessage(`Could not create the problem file: ${errorMessage(error)}`, 'error')
-    } finally {
-      this.state.busy = false
-      this.renderAll()
-    }
+  private createFileForToday(): Promise<void> {
+    return this.fileOperationsController.createFileForToday()
   }
 
   private onEditorChange(source: string): void {
-    if (this.suppressEditorChange || !this.state.selectedPath || !this.state.repoPath) {
-      return
-    }
-    this.editor.setIssues([])
-    this.state.selectedSource = source
-    this.state.dirty = source !== this.state.savedSource
-    this.state.saveError = null
-    this.clearSavedFlash()
-    if (this.state.testRun?.status === 'running') {
-      this.testRunController.cancelCurrentRun()
-      this.renderResult()
-    }
-    if (!this.gitDiscardInProgress) {
-      this.autosave.schedule({
-        repoPath: this.state.repoPath,
-        filePath: this.state.selectedPath,
-        source,
-      })
-    }
-    this.renderFileHeading()
-    this.updateFileTabState()
-    this.scheduleLiveDiagnostics()
+    this.documentController.onEditorChange(source)
   }
 
   private resetCurrentFile(): void {
-    this.state.activeTabId = null
-    this.state.selectedPath = null
-    this.state.selectedSource = ''
-    this.state.savedSource = ''
-    this.state.selectedFqcn = null
-    this.state.dirty = false
-    this.state.saveError = null
-    this.testRunController.resetTestState()
-    this.suppressEditorChange = true
-    try {
-      this.editor.setValue('')
-    } finally {
-      this.suppressEditorChange = false
-    }
+    this.documentController.resetCurrentFile()
   }
 
-  private async saveCurrentFile(): Promise<boolean> {
-    if (!this.state.repoPath || !this.state.selectedPath) {
-      return true
-    }
-    return this.flushPendingSave()
+  private saveCurrentFile(): Promise<boolean> {
+    return this.documentController.saveCurrentFile()
   }
 
-  private async flushPendingSave(): Promise<boolean> {
-    try {
-      await this.autosave.flush()
-      return !this.autosave.hasPendingChanges
-    } catch (error) {
-      this.handleSaveError(error)
-      return false
-    }
-  }
-
-  private async persistSnapshot(snapshot: AutosaveSnapshot): Promise<void> {
-    this.saveWriteInFlight = true
-    this.renderFileHeading()
-    try {
-      await this.backend.saveProblemFile(snapshot.repoPath, snapshot.filePath, snapshot.source)
-    } finally {
-      this.saveWriteInFlight = false
-    }
-    if (snapshot.repoPath !== this.state.repoPath || snapshot.filePath !== this.state.selectedPath) {
-      return
-    }
-    this.state.savedSource = snapshot.source
-    this.state.dirty = this.state.selectedSource !== this.state.savedSource
-    this.state.saveError = null
-    this.element<HTMLElement>('#editor-host').dataset.savedSource = snapshot.source
-    this.gitController.markStale()
-    if (!this.state.dirty) {
-      this.flashSavedIndicator()
-    }
-    this.renderFileHeading()
-    this.updateFileTabState()
-  }
-
-  /** Briefly surface "Saved" after a successful write, then clear it. */
-  private flashSavedIndicator(): void {
-    this.clearSavedFlash()
-    this.savedFlash = true
-    this.savedFlashTimer = setTimeout(() => {
-      this.savedFlashTimer = null
-      this.savedFlash = false
-      if (!this.destroyed && this.root.querySelector('#save-status')) {
-        this.renderFileHeading()
-      }
-    }, SAVED_FLASH_MS)
-  }
-
-  private clearSavedFlash(): void {
-    if (this.savedFlashTimer !== null) {
-      clearTimeout(this.savedFlashTimer)
-      this.savedFlashTimer = null
-    }
-    this.savedFlash = false
-  }
-
-  private handleSaveError(error: unknown): void {
-    this.state.saveError = errorMessage(error)
-    this.state.dirty = this.state.selectedSource !== this.state.savedSource
-    this.setMessage(`Could not save the file: ${this.state.saveError}`, 'error')
-    this.renderAll()
+  private flushPendingSave(): Promise<boolean> {
+    return this.documentController.flushPendingSave()
   }
 
   private selectBottomPanelTab(tab: 'tests' | 'git', focus = false): void {
@@ -1446,17 +1063,6 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#run-test').hidden = !testsSelected
   }
 
-  private isCurrentFileOperation(
-    repoPath: string,
-    repositoryGeneration: number,
-    operationId: number,
-  ): boolean {
-    return this.state.projectValid
-      && this.state.repoPath === repoPath
-      && this.repositoryGeneration === repositoryGeneration
-      && this.fileOperationId === operationId
-  }
-
   private readonly handleRepositoryFilesChanged = (change: RepositoryFilesChanged): void => {
     if (this.destroyed || !this.state.repoPath || !this.state.projectValid) {
       return
@@ -1478,55 +1084,8 @@ export class LeetcoderApp {
    * have not reached disk the local version wins: silently replacing unsaved
    * work cannot be undone by the user, while a stale buffer can be refreshed.
    */
-  private async reloadOpenFileFromDisk(path: string): Promise<void> {
-    const repoPath = this.state.repoPath
-    if (!repoPath
-      || this.destroyed
-      || this.externalReloadInFlight
-      || this.saveWriteInFlight
-      || this.fileOpenInProgress) {
-      return
-    }
-    this.externalReloadInFlight = true
-    const repositoryGeneration = this.repositoryGeneration
-    try {
-      const source = await this.backend.readProblemFile(repoPath, path)
-      if (this.destroyed
-        || this.repositoryGeneration !== repositoryGeneration
-        || this.state.repoPath !== repoPath
-        || this.state.selectedPath !== path
-        || source === this.state.savedSource) {
-        return
-      }
-      if (this.state.dirty || this.autosave.hasPendingChanges) {
-        this.setMessage(
-          `${gitFileName(path)} changed on disk. Your unsaved edits were kept.`,
-          'info',
-        )
-        return
-      }
-      this.state.savedSource = source
-      this.state.selectedSource = source
-      this.state.dirty = false
-      this.state.saveError = null
-      this.element<HTMLElement>('#editor-host').dataset.savedSource = source
-      this.suppressEditorChange = true
-      try {
-        this.editor.reloadExternalValue(source)
-      } finally {
-        this.suppressEditorChange = false
-      }
-      this.editor.setIssues([])
-      this.gitController.markStale()
-      this.scheduleLiveDiagnostics()
-      this.renderFileHeading()
-      this.updateFileTabState()
-    } catch {
-      // A file that was deleted or moved is reconciled by the file-list
-      // refresh that the same watcher event triggers.
-    } finally {
-      this.externalReloadInFlight = false
-    }
+  private reloadOpenFileFromDisk(path: string): Promise<void> {
+    return this.documentController.reloadOpenFileFromDisk(path)
   }
 
   private handleAppVisibilityReturn(): void {
@@ -1672,7 +1231,7 @@ export class LeetcoderApp {
       openTabs: this.state.openTabs,
       activeTabId: this.state.activeTabId,
       dirty: this.state.dirty,
-      hasPendingChanges: this.autosave.hasPendingChanges,
+      hasPendingChanges: this.documentController.hasPendingChanges,
       busy: this.state.busy,
     }
   }
@@ -1685,9 +1244,7 @@ export class LeetcoderApp {
   private renderAll(): void {
     this.paneLayout.apply()
     this.renderHeader()
-    this.renderAppMenu()
-    this.renderSettingsDialog()
-    this.renderAboutDialog()
+    this.overlay.render()
     this.renderShortcutLabels()
     this.renderDailyProblem()
     this.renderFiles()
@@ -1750,56 +1307,6 @@ export class LeetcoderApp {
 
   private renderFileTabs(): void {
     this.fileTabsView.render(this.fileTabsModel())
-  }
-
-  private async openTab(tabId: number): Promise<void> {
-    if (this.state.busy) {
-      return
-    }
-    const tab = this.state.openTabs.find((entry) => entry.id === tabId)
-    if (!tab) {
-      return
-    }
-    const file = this.state.files.find((entry) => sameFilePath(entry.path, tab.path))
-    if (!file) {
-      this.state.openTabs = this.state.openTabs.filter((entry) => entry.id !== tabId)
-      if (this.state.activeTabId === tabId) {
-        this.resetCurrentFile()
-      }
-      this.renderAll()
-      return
-    }
-    await this.openFile(file)
-  }
-
-  private async closeOpenTab(tabId: number): Promise<void> {
-    if (this.state.busy) {
-      return
-    }
-    const target = this.state.openTabs.find((tab) => tab.id === tabId)
-    if (!target) {
-      return
-    }
-    const wasActive = target.id === this.state.activeTabId
-    this.state.busy = true
-    this.renderAll()
-    try {
-      if (!(await this.flushPendingSave())) {
-        return
-      }
-      const replacement = this.removeOpenTab(tabId)
-      if (wasActive && replacement) {
-        const file = this.state.files.find((entry) => sameFilePath(entry.path, replacement.path)) ?? {
-          path: replacement.path,
-          name: replacement.name,
-          packageSegment: replacement.packageSegment,
-        }
-        await this.openFile(file)
-      }
-    } finally {
-      this.state.busy = false
-      this.renderAll()
-    }
   }
 
   private renderFiles(): void {
@@ -1898,93 +1405,6 @@ export class LeetcoderApp {
     this.element<HTMLButtonElement>('#git-tab').focus()
   }
 
-  private toggleAppMenu(): void {
-    if (this.appMenuOpen) {
-      this.closeAppMenu()
-    } else {
-      this.openAppMenu()
-    }
-  }
-
-  private openAppMenu(): void {
-    if (this.appMenuOpen) {
-      return
-    }
-    const active = document.activeElement
-    this.appMenuFocusTarget = active instanceof HTMLElement ? active : null
-    this.appMenuOpen = true
-    this.renderAppMenu()
-    queueMicrotask(() => {
-      if (!this.appMenuOpen) {
-        return
-      }
-      this.root.querySelector<HTMLButtonElement>('#app-menu [role="menuitem"]:not([hidden]):not(:disabled)')?.focus()
-    })
-  }
-
-  private closeAppMenu(restoreFocus = true): void {
-    if (!this.appMenuOpen) {
-      return
-    }
-    this.appMenuOpen = false
-    const target = this.appMenuFocusTarget
-    this.appMenuFocusTarget = null
-    this.renderAppMenu()
-    if (restoreFocus && target && target.isConnected && !target.closest('[hidden]')) {
-      target.focus()
-    }
-  }
-
-  private renderAppMenu(): void {
-    renderAppMenuView(this.root, {
-      open: this.appMenuOpen,
-      updateAvailable: this.updateAvailable,
-      updateBusy: this.updateBusy,
-      settingsShortcutLabel: shortcutLabel('open-settings', currentIsMacPlatform()),
-    })
-  }
-
-  private setThemeMode(mode: string): void {
-    this.themeMode = normalizeThemeMode(mode)
-    applyTheme(this.themeMode)
-    this.storage?.setItem(THEME_MODE_KEY, this.themeMode)
-    this.renderSettingsDialog()
-  }
-
-  private openAboutDialog(): void {
-    if (this.aboutDialogOpen) {
-      return
-    }
-    const active = document.activeElement
-    this.aboutDialogFocusTarget = active instanceof HTMLElement ? active : null
-    this.aboutDialogOpen = true
-    this.renderAboutDialog()
-    queueMicrotask(() => {
-      if (this.aboutDialogOpen) {
-        this.element<HTMLButtonElement>('#close-about').focus()
-      }
-    })
-  }
-
-  private closeAboutDialog(): void {
-    if (!this.aboutDialogOpen) {
-      return
-    }
-    this.aboutDialogOpen = false
-    const target = this.aboutDialogFocusTarget
-    this.aboutDialogFocusTarget = null
-    this.renderAboutDialog()
-    if (target && target.isConnected && !target.closest('[hidden]')) {
-      target.focus()
-    } else {
-      this.element<HTMLButtonElement>('#app-menu-button').focus()
-    }
-  }
-
-  private renderAboutDialog(): void {
-    renderAboutDialogView(this.root, this.aboutDialogOpen)
-  }
-
   private async requestApplicationClose(): Promise<void> {
     try {
       if (this.requestClose) {
@@ -1998,8 +1418,8 @@ export class LeetcoderApp {
   }
 
   private async requestApplicationUpdate(): Promise<void> {
-    this.closeAppMenu(false)
-    if (!this.updateAvailable || this.updateBusy) {
+    this.overlay.closeAppMenu(false)
+    if (!this.overlay.isUpdateAvailable || this.overlay.isUpdateBusy) {
       return
     }
     try {
@@ -2009,76 +1429,6 @@ export class LeetcoderApp {
       return
     }
     await this.updateController.updateAndRestart()
-  }
-
-  private setShortcutsPlatform(platform: ShortcutPlatform, focus = false): void {
-    if (this.shortcutsPlatform === platform && !focus) {
-      return
-    }
-    this.shortcutsPlatform = platform
-    this.renderSettingsDialog()
-    if (focus) {
-      this.element<HTMLButtonElement>(platform === 'macos' ? '#shortcuts-macos-tab' : '#shortcuts-linux-tab').focus()
-    }
-  }
-
-  private openSettingsDialog(section: SettingsSection = 'appearance'): void {
-    if (!this.settingsDialogOpen) {
-      const active = document.activeElement
-      this.settingsDialogFocusTarget = active instanceof HTMLElement ? active : null
-      this.settingsDialogOpen = true
-    }
-    this.settingsSection = section
-    this.renderSettingsDialog()
-    queueMicrotask(() => {
-      if (!this.settingsDialogOpen) {
-        return
-      }
-      if (this.settingsSection === 'keymap') {
-        this.element<HTMLButtonElement>(this.shortcutsPlatform === 'macos'
-          ? '#shortcuts-macos-tab'
-          : '#shortcuts-linux-tab').focus()
-      } else {
-        this.root.querySelector<HTMLInputElement>('#settings-form input:checked')?.focus()
-      }
-    })
-  }
-
-  private closeSettingsDialog(): void {
-    if (!this.settingsDialogOpen) {
-      return
-    }
-    this.settingsDialogOpen = false
-    const target = this.settingsDialogFocusTarget
-    this.settingsDialogFocusTarget = null
-    this.renderSettingsDialog()
-    if (target && target.isConnected && !target.closest('[hidden]')) {
-      target.focus()
-    } else {
-      this.element<HTMLButtonElement>('#app-menu-button').focus()
-    }
-  }
-
-  private setSettingsSection(section: SettingsSection, focus = false): void {
-    if (this.settingsSection === section && !focus) {
-      return
-    }
-    this.settingsSection = section
-    this.renderSettingsDialog()
-    if (focus) {
-      this.element<HTMLButtonElement>(section === 'keymap'
-        ? '#settings-keymap-nav'
-        : '#settings-appearance-nav').focus()
-    }
-  }
-
-  private renderSettingsDialog(): void {
-    renderSettingsDialogView(this.root, {
-      open: this.settingsDialogOpen,
-      section: this.settingsSection,
-      platform: this.shortcutsPlatform,
-      themeMode: this.themeMode,
-    })
   }
 
   private openDiscardGitDialog(): void {
@@ -2198,311 +1548,36 @@ export class LeetcoderApp {
 
   private async showGitFileInManager(): Promise<void> {
     const context = this.state.gitContextMenu
-    const repoPath = this.state.repoPath
-    if (!context || !repoPath || !this.state.projectValid || this.state.busy || this.state.git.busy) {
-      return
-    }
-    const filePath = context.file.path
-    const operation = this.gitController.startOperation('Opening in File Manager…')
-    if (!operation) {
+    if (!context || this.state.busy || this.state.git.busy) {
       return
     }
     this.closeGitContextMenu()
-    this.renderAll()
-    try {
-      await this.backend.showInFileManager(repoPath, filePath)
-      if (!this.gitController.isCurrentOperation(operation)) {
-        return
-      }
-      this.setMessage(`Opened ${gitFileName(filePath)} in File Manager.`, 'success')
-    } catch (error) {
-      if (this.gitController.isCurrentOperation(operation)) {
-        this.setMessage(`Could not show ${gitFileName(filePath)} in File Manager: ${errorMessage(error)}`, 'error')
-      }
-    } finally {
-      this.gitController.finishOperation(operation)
-    }
+    return this.fileOperationsController.showGitFileInManager(context.file.path)
   }
 
   private async discardGitChangesAfterConfirmation(
     file: GitChangedFile,
     focusTarget: HTMLElement | null,
   ): Promise<void> {
-    const repoPath = this.state.repoPath
-    if (!repoPath || !this.state.projectValid || this.state.busy || this.state.git.busy) {
-      this.restoreGitDiscardFocus(focusTarget)
-      return
-    }
-    if (!this.state.git.files.some((entry) => sameFilePath(entry.path, file.path))) {
-      this.setMessage(`The Git change for ${gitFileName(file.path)} is no longer available.`, 'info')
-      this.restoreGitDiscardFocus(focusTarget)
-      return
-    }
-    const filePath = file.path
-    const targetTab = this.openTabForPath(filePath)
-    const targetTabIndex = targetTab ? this.state.openTabs.indexOf(targetTab) : -1
-    const wasActive = targetTab?.id === this.state.activeTabId
-    const wasSelected = sameFilePath(this.state.selectedPath ?? '', filePath)
-    const removesFile = isGitNewFile(file.status)
-    const restoredPath = file.originalPath && !sameFilePath(file.originalPath, filePath)
-      ? file.originalPath
-      : null
-    const operation = this.gitController.startOperation('Discarding changes…')
-    if (!operation) {
-      this.restoreGitDiscardFocus(focusTarget)
-      return
-    }
-    this.closeGitContextMenu()
-    this.gitDiscardInProgress = true
-    this.renderAll()
     try {
-      // Flush the current editor before the destructive backend operation so
-      // the discard command always starts from a stable on-disk snapshot.
-      if (!(await this.flushPendingSave())
-        || !this.gitController.isCurrentOperation(operation)) {
-        return
-      }
-      // The flush above drains the current timer/run. Do not let a queued
-      // autosave write the pre-discard source back after Git restores it.
-      this.autosave.cancelPending()
-      await this.backend.discardGitChanges(repoPath, filePath)
-      if (!this.gitController.isCurrentOperation(operation)) {
-        return
-      }
-
-      let replacement: OpenFileTab | null = null
-      if (removesFile && targetTab) {
-        if (wasActive) {
-          replacement = this.removeOpenTab(targetTab.id)
-        } else {
-          this.state.openTabs = this.state.openTabs.filter((tab) => tab.id !== targetTab.id)
-        }
-      } else if (removesFile && wasSelected) {
-        this.resetCurrentFile()
-      }
-
-      if (!removesFile && wasSelected && !restoredPath) {
-        // A tracked file is restored in place. Reload it from disk so the
-        // editor cannot continue showing the discarded working-tree source.
-        const source = await this.backend.readProblemFile(repoPath, filePath)
-        if (!this.gitController.isCurrentOperation(operation)) {
-          return
-        }
-        this.state.selectedSource = source
-        this.state.savedSource = source
-        this.state.dirty = false
-        this.state.saveError = null
-        this.clearSavedFlash()
-        this.testRunController.resetTestState()
-        this.suppressEditorChange = true
-        try {
-          this.editor.setValue(source)
-        } finally {
-          this.suppressEditorChange = false
-        }
-        this.element<HTMLElement>('#editor-host').dataset.savedSource = source
-      }
-
-      this.gitController.markStale()
-      await this.refreshFiles()
-      if (!this.gitController.isCurrentOperation(operation)) {
-        return
-      }
-      let restoredRename: ProblemFileEntry | null = null
-      if (restoredPath && !this.state.files.some((entry) => sameFilePath(entry.path, filePath))) {
-        restoredRename = findRestoredFileAfterGitRename(this.state.files, file)
-        if (restoredRename && targetTab) {
-          targetTab.path = restoredRename.path
-          targetTab.name = restoredRename.name
-          targetTab.packageSegment = restoredRename.packageSegment
-          if (!this.state.openTabs.includes(targetTab)) {
-            const insertionIndex = targetTabIndex < 0
-              ? this.state.openTabs.length
-              : Math.min(targetTabIndex, this.state.openTabs.length)
-            this.state.openTabs.splice(insertionIndex, 0, targetTab)
-          }
-          if (wasActive) {
-            this.state.activeTabId = targetTab.id
-          }
-        }
-      }
-      if (restoredRename && wasSelected) {
-        // The destination of a staged rename disappears after discard. Keep
-        // its existing tab identity, point it at the restored source path,
-        // and load the restored content into the active editor.
-        this.state.selectedPath = restoredRename.path
-        this.state.selectedFqcn = fqcnFromJavaPath(restoredRename.path)
-        const source = await this.backend.readProblemFile(repoPath, restoredRename.path)
-        if (!this.gitController.isCurrentOperation(operation)) {
-          return
-        }
-        this.state.selectedSource = source
-        this.state.savedSource = source
-        this.state.dirty = false
-        this.state.saveError = null
-        this.clearSavedFlash()
-        this.testRunController.resetTestState()
-        this.suppressEditorChange = true
-        try {
-          this.editor.setValue(source)
-        } finally {
-          this.suppressEditorChange = false
-        }
-        this.element<HTMLElement>('#editor-host').dataset.savedSource = source
-      }
-      await this.gitController.refreshStatus(true)
-      if (!this.gitController.isCurrentOperation(operation)) {
-        return
-      }
-      if (wasActive && replacement) {
-        const replacementFile = this.state.files.find((entry) => sameFilePath(entry.path, replacement!.path))
-        if (replacementFile) {
-          await this.openFile(replacementFile)
-        }
-      }
-      this.setMessage(`Discarded changes to ${gitFileName(filePath)}.`, 'success')
-    } catch (error) {
-      if (this.gitController.isCurrentOperation(operation)) {
-        // Refresh both views even when the backend reports an error: a Git
-        // command can have changed the worktree before surfacing its failure.
-        await this.refreshFiles()
-        await this.gitController.refreshStatus(true)
-        if (!this.gitController.isCurrentOperation(operation)) {
-          return
-        }
-        this.setMessage(`Could not discard changes to ${gitFileName(filePath)}: ${errorMessage(error)}`, 'error')
-      }
+      await this.fileOperationsController.discardGitChanges(file)
     } finally {
-      this.gitDiscardInProgress = false
-      this.gitController.finishOperation(operation)
       this.restoreGitDiscardFocus(focusTarget)
     }
   }
 
   private async deleteFileAfterConfirmation(file: ProblemFileEntry): Promise<void> {
-    const repoPath = this.state.repoPath
-    if (!repoPath || !this.state.projectValid || this.state.busy) {
-      return
-    }
-    const method = (this.backend as unknown as FileManagementBackend).deleteProblemFile
-    if (!method) {
-      this.setMessage('Not available in this build', 'error')
-      return
-    }
-    const repositoryGeneration = this.repositoryGeneration
-    const operationId = ++this.fileOperationId
-    this.state.busy = true
-    this.renderAll()
-    try {
-      if (!(await this.flushPendingSave()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      await method(repoPath, file.path)
-      if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      const targetTab = this.openTabForPath(file.path)
-      const wasActive = targetTab?.id === this.state.activeTabId
-      const replacement = targetTab ? this.removeOpenTab(targetTab.id) : null
-      if (wasActive && !targetTab) {
-        this.resetCurrentFile()
-      }
-      this.gitController.markStale()
-      await this.refreshFiles()
-      if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      if (wasActive && replacement) {
-        const replacementFile = this.state.files.find((entry) => sameFilePath(entry.path, replacement.path))
-        if (replacementFile) {
-          await this.openFile(replacementFile)
-        }
-      }
-      this.setMessage(`Deleted ${file.name}.`, 'success')
-    } catch (error) {
-      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        // A backend can report an error after the filesystem mutation has
-        // already completed. Re-list files before reporting so the explorer
-        // reflects the actual repository state.
-        await this.refreshFiles()
-        if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-          return
-        }
-        this.setMessage(`Could not delete ${file.name}: ${errorMessage(error)}`, 'error')
-      }
-    } finally {
-      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        this.state.busy = false
-        this.renderAll()
-      }
-    }
+    await this.fileOperationsController.deleteFile(file)
   }
 
   private async duplicateContextMenuFile(): Promise<void> {
     const context = this.state.contextMenu
-    const repoPath = this.state.repoPath
-    if (!context || !repoPath || !this.state.projectValid || this.state.busy) {
-      return
-    }
-    const method = (this.backend as unknown as FileManagementBackend).duplicateProblemFile
-    if (!method) {
-      this.closeFileContextMenu()
-      this.setMessage('Not available in this build', 'error')
+    if (!context || this.state.busy) {
       return
     }
     const file = context.file
-    const existingPaths = new Set(this.state.files.map((entry) => entry.path))
-    const repositoryGeneration = this.repositoryGeneration
-    const operationId = ++this.fileOperationId
     this.closeFileContextMenu()
-    this.state.busy = true
-    this.renderAll()
-    try {
-      if (!(await this.flushPendingSave()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      const result = await method(repoPath, file.path)
-      if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      this.gitController.markStale()
-      if (!(await this.refreshFiles()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      const duplicate = findFileAfterDuplicate(
-        this.state.files,
-        existingPaths,
-        file,
-        result,
-      )
-      if (duplicate) {
-        // Open the actual newly-created entry so the editor, selected path,
-        // and test FQCN all follow the duplicate immediately.
-        await this.openFile(duplicate)
-        if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-          return
-        }
-      }
-      this.setMessage(
-        duplicate ? `Duplicated ${file.name} as ${duplicate.name}.` : `Duplicated ${file.name}.`,
-        'success',
-      )
-    } catch (error) {
-      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        // Re-list after a failed mutation because a backend can report an
-        // error after the filesystem operation has already completed.
-        await this.refreshFiles()
-        if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-          return
-        }
-        this.setMessage(`Could not duplicate ${file.name}: ${errorMessage(error)}`, 'error')
-      }
-    } finally {
-      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        this.state.busy = false
-        this.renderAll()
-      }
-    }
+    await this.fileOperationsController.duplicateFile(file)
   }
 
   private openRenameDialog(): void {
@@ -2536,14 +1611,6 @@ export class LeetcoderApp {
     if (!file || !repoPath || !this.state.projectValid || this.state.busy) {
       return
     }
-    const method = (this.backend as unknown as FileManagementBackend).renameProblemFile
-    if (!method) {
-      this.closeRenameDialog()
-      this.setMessage('Not available in this build', 'error')
-      return
-    }
-    const targetTab = this.openTabForPath(file.path)
-    const wasSelected = targetTab?.id === this.state.activeTabId
     const promptedName = this.element<HTMLInputElement>('#rename-file-input').value
     const newName = normalizeJavaFileName(promptedName)
     if (!newName) {
@@ -2562,59 +1629,8 @@ export class LeetcoderApp {
       this.element<HTMLInputElement>('#rename-file-input').focus()
       return
     }
-    const repositoryGeneration = this.repositoryGeneration
-    const operationId = ++this.fileOperationId
     this.closeRenameDialog()
-    this.state.busy = true
-    this.renderAll()
-    try {
-      if (!(await this.flushPendingSave()) || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      const result = await method(repoPath, file.path, newName)
-      if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        return
-      }
-      const requestedRenamedPath = fileMutationResultPath(result, file.path) ?? requestedPath
-      if (targetTab) {
-        targetTab.path = requestedRenamedPath
-        targetTab.name = newName
-        targetTab.packageSegment = file.packageSegment
-      }
-      this.gitController.markStale()
-      const refreshed = await this.refreshFiles()
-      if (!refreshed || !this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        if (targetTab && !refreshed) {
-          targetTab.path = file.path
-          targetTab.name = file.name
-          targetTab.packageSegment = file.packageSegment
-        }
-        return
-      }
-      const renamed = findFileAfterRename(this.state.files, file, newName, result)
-      if (targetTab && renamed) {
-        targetTab.path = renamed.path
-        targetTab.name = renamed.name
-        targetTab.packageSegment = renamed.packageSegment
-      }
-      if (wasSelected && renamed) {
-        await this.openFile(renamed)
-      }
-      this.setMessage(`Renamed ${file.name} to ${renamed?.name ?? newName}.`, 'success')
-    } catch (error) {
-      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        await this.refreshFiles()
-        if (!this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-          return
-        }
-        this.setMessage(`Could not rename ${file.name}: ${errorMessage(error)}`, 'error')
-      }
-    } finally {
-      if (this.isCurrentFileOperation(repoPath, repositoryGeneration, operationId)) {
-        this.state.busy = false
-        this.renderAll()
-      }
-    }
+    await this.fileOperationsController.renameFile(file, newName)
   }
 
   private scrollActiveFileIntoView(): void {
@@ -2667,10 +1683,10 @@ export class LeetcoderApp {
         selectedPath: this.state.selectedPath,
         savedSource: this.state.savedSource,
         saveError: this.state.saveError,
-        saveWriteInFlight: this.saveWriteInFlight,
+        saveWriteInFlight: this.documentController.saveWriteInFlight,
         dirty: this.state.dirty,
-        hasPendingChanges: this.autosave.hasPendingChanges,
-        savedFlash: this.savedFlash,
+        hasPendingChanges: this.documentController.hasPendingChanges,
+        savedFlash: this.documentController.savedFlash,
         saveShortcutLabel: shortcutLabel('save', currentIsMacPlatform()),
       },
     )
@@ -2698,55 +1714,32 @@ export class LeetcoderApp {
   }
 
   private setMessage(message: string, tone: 'info' | 'success' | 'error'): void {
-    const stack = this.element<HTMLElement>('#toast-stack')
-    if (tone === 'error' && this.errorToastElement) {
-      // A newer error replaces the previous one instead of stacking.
-      this.errorToastElement.remove()
-      this.errorToastElement = null
-    }
-    const toast = document.createElement('div')
-    toast.className = `toast toast-${tone}`
-    toast.append(iconFor(tone === 'success' ? 'check' : tone === 'error' ? 'alert' : 'info', 'toast-icon'))
-    const copy = document.createElement('span')
-    copy.className = 'toast-copy'
-    const firstLine = message.split(/\r?\n/, 1)[0]
-    copy.textContent = tone === 'error' ? firstLine : message
-    if (tone === 'error' && firstLine !== message) {
-      toast.title = message
-    }
-    toast.append(copy)
-    if (tone === 'error') {
-      toast.setAttribute('role', 'alert')
-      const close = document.createElement('button')
-      close.type = 'button'
-      close.className = 'toast-close'
-      close.setAttribute('aria-label', 'Dismiss')
-      close.append(iconFor('close', 'toast-close-icon'))
-      close.addEventListener('click', () => {
-        toast.remove()
-        if (this.errorToastElement === toast) {
-          this.errorToastElement = null
-        }
-      })
-      toast.append(close)
-      this.errorToastElement = toast
-    }
-    stack.append(toast)
-    while (stack.children.length > MAX_VISIBLE_TOASTS) {
-      const oldest = stack.firstElementChild
-      if (!oldest) {
-        break
-      }
-      if (oldest === this.errorToastElement) {
-        this.errorToastElement = null
-      }
-      oldest.remove()
-    }
-    if (tone !== 'error') {
-      setTimeout(() => {
-        toast.remove()
-      }, TOAST_DISMISS_MS)
-    }
+    this.toastController.show(message, tone)
+  }
+
+  private listen<K extends keyof HTMLElementEventMap>(
+    target: HTMLElement,
+    type: K,
+    listener: (event: HTMLElementEventMap[K]) => void,
+  ): void
+  private listen<K extends keyof DocumentEventMap>(
+    target: Document,
+    type: K,
+    listener: (event: DocumentEventMap[K]) => void,
+  ): void
+  private listen<K extends keyof WindowEventMap>(
+    target: Window,
+    type: K,
+    listener: (event: WindowEventMap[K]) => void,
+  ): void
+  private listen(
+    target: EventTarget,
+    type: string,
+    listener: (event: Event) => void,
+  ): void {
+    const bound = listener as EventListener
+    target.addEventListener(type, bound)
+    this.appListeners.push(() => target.removeEventListener(type, bound))
   }
 
   private element<T extends HTMLElement>(selector: string): T {
