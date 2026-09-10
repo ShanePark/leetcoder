@@ -53,6 +53,7 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
       { id: 'select-all', bindings: ['Mod-a', 'Alt-a'], description: 'Select all' },
       { id: 'insert-javadoc', bindings: ['Shift-Mod-j', 'Shift-Alt-j'], description: 'Insert JavaDoc', hint: true },
       { id: 'complete-statement', bindings: ['Shift-Mod-Enter', 'Shift-Alt-Enter'], description: 'Complete current statement' },
+      { id: 'show-intentions', bindings: ['Mod-Enter', 'Alt-Enter'], description: 'Show code actions' },
       { id: 'complete', bindings: ['Ctrl-Space'], description: 'Complete', hint: true },
       { id: 'toggle-comment', bindings: ['Mod-/', 'Alt-/'], description: 'Toggle line comment' },
       { id: 'undo', bindings: ['Mod-z', 'Alt-z'], description: 'Undo' },

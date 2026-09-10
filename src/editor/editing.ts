@@ -19,7 +19,10 @@ import type { ClipboardBridge } from '../clipboard'
 import {
   formatJavaSource,
 } from '../java-format'
-import { planJavaMethodExtraction } from '../java-refactor'
+import {
+  findJavaRefactorSelection,
+  planJavaMethodExtraction,
+} from '../java-refactor'
 import {
   balancedJavaDelimiters,
   isInsideCommentOrString,
@@ -226,11 +229,19 @@ export function planJavaVariableInsertion(
 export function introduceJavaVariable(view: EditorView): boolean {
   const { state } = view
   const selection = state.selection.main
-  if (state.selection.ranges.length !== 1 || selection.empty) {
+  if (state.selection.ranges.length !== 1) {
     return false
   }
-  const from = Math.min(selection.from, selection.to)
-  const to = Math.max(selection.from, selection.to)
+  const source = state.doc.toString()
+  let from = Math.min(selection.from, selection.to)
+  let to = Math.max(selection.from, selection.to)
+  if (selection.empty) {
+    if (isInsideCommentOrString(source, selection.head)) return false
+    const inferred = findJavaRefactorSelection(source, selection.head, 'expression')
+    if (!inferred) return false
+    from = inferred.from
+    to = inferred.to
+  }
   const plan = planJavaVariableInsertion(state.doc.toString(), from, to)
   if (!plan || !allowsJavaExpressionSelection(state, from, from + plan.selected.length)) {
     return false
@@ -275,22 +286,50 @@ export function introduceJavaVariable(view: EditorView): boolean {
 /** Extract a selected expression or complete statement range into a helper. */
 export function extractJavaMethod(view: EditorView, onError?: (message: string) => void): boolean {
   const { state } = view
-  if (state.selection.ranges.length !== 1 || state.selection.main.empty) {
+  if (state.selection.ranges.length !== 1) {
     onError?.('Select an expression or complete statements to extract a method.')
     return true
   }
   const selection = state.selection.main
-  const plan = planJavaMethodExtraction(state.doc.toString(), selection.from, selection.to)
-  if ('reason' in plan) {
-    onError?.(plan.reason)
+  const source = state.doc.toString()
+  const candidates: Array<{ from: number; to: number }> = []
+  if (selection.empty) {
+    if (isInsideCommentOrString(source, selection.head)) {
+      onError?.('Select an expression or complete statements to extract a method.')
+      return true
+    }
+    for (const preference of ['expression', 'statement'] as const) {
+      const inferred = findJavaRefactorSelection(source, selection.head, preference)
+      if (inferred && !candidates.some((candidate) => (
+        candidate.from === inferred.from && candidate.to === inferred.to
+      ))) {
+        candidates.push({ from: inferred.from, to: inferred.to })
+      }
+    }
+    if (candidates.length === 0) {
+      onError?.('Select an expression or complete statements to extract a method.')
+      return true
+    }
+  } else {
+    candidates.push({ from: selection.from, to: selection.to })
+  }
+
+  let failure: string | null = null
+  for (const candidate of candidates) {
+    const plan = planJavaMethodExtraction(source, candidate.from, candidate.to)
+    if ('reason' in plan) {
+      failure = plan.reason
+      continue
+    }
+    view.dispatch({
+      changes: plan.changes,
+      selection: EditorSelection.create(plan.nameRanges.map((range) => EditorSelection.range(range.from, range.to))),
+      scrollIntoView: true,
+      userEvent: 'input.extractMethod',
+    })
     return true
   }
-  view.dispatch({
-    changes: plan.changes,
-    selection: EditorSelection.create(plan.nameRanges.map((range) => EditorSelection.range(range.from, range.to))),
-    scrollIntoView: true,
-    userEvent: 'input.extractMethod',
-  })
+  if (failure) onError?.(failure)
   return true
 }
 

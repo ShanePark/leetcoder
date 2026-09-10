@@ -10,6 +10,7 @@ import {
   isReformatShortcut,
   isSaveAltShortcut,
   isSelectAllAltShortcut,
+  isShowIntentionsAltShortcut,
   isSettingsAltShortcut,
   isShortcutHelpAltShortcut,
   isToggleCommentAltShortcut,
@@ -29,6 +30,14 @@ describe('Option shortcut matchers', () => {
     expect(isSettingsAltShortcut({ ...base, code: 'Comma' })).toBe(true)
     expect(isShortcutHelpAltShortcut({ ...base, code: 'Slash', shiftKey: true })).toBe(true)
     expect(isLineCutAltShortcut({ ...base, code: 'KeyV' })).toBe(false)
+  })
+
+  it('matches the plain Option+Enter intentions shortcut by physical key', () => {
+    expect(isShowIntentionsAltShortcut({ ...base, code: 'Enter' })).toBe(true)
+    expect(isShowIntentionsAltShortcut({ ...base, code: 'NumpadEnter' })).toBe(false)
+    expect(isShowIntentionsAltShortcut({ ...base, code: 'Enter', shiftKey: true })).toBe(false)
+    expect(isShowIntentionsAltShortcut({ ...base, code: 'Enter', metaKey: true })).toBe(false)
+    expect(isShowIntentionsAltShortcut({ ...base, code: 'Enter', ctrlKey: true })).toBe(false)
   })
 
   it('ignores the same keys with extra modifiers', () => {

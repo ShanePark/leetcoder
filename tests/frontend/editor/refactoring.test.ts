@@ -147,6 +147,86 @@ describe('Introduce Variable', () => {
     expect(isIntroduceVariableShortcut({ ...base, ctrlKey: true, shiftKey: true })).toBe(false)
     expect(isIntroduceVariableShortcut({ ...base, ctrlKey: true, code: 'KeyC' })).toBe(false)
   })
+
+  it('infers a call at the caret after its closing parenthesis or semicolon', () => {
+    const expression = 'Math.max(0, 1)'
+    const source = `class S {
+    void f() {
+        ${expression};${' '.repeat(3)}
+    }
+}`
+    const expressionFrom = source.indexOf(expression)
+    const positions = [
+      expressionFrom + expression.length,
+      expressionFrom + expression.length + 1,
+      expressionFrom + expression.length + 4,
+    ]
+
+    for (const position of positions) {
+      const state = runEditorCommand(
+        javaState(source).update({ selection: { anchor: position } }).state,
+        introduceJavaVariable,
+      )
+      expect(state.doc.toString()).toBe(`class S {
+    void f() {
+        var max = ${expression};
+    }
+}`)
+    }
+  })
+
+  it('keeps an enclosing call together when the caret follows it', () => {
+    const expression = 'consume(Math.max(0, 1))'
+    const source = `class S {
+    void f() {
+        ${expression};
+    }
+}`
+    const position = source.indexOf(expression) + expression.length
+    const state = runEditorCommand(
+      javaState(source).update({ selection: { anchor: position } }).state,
+      introduceJavaVariable,
+    )
+
+    expect(state.doc.toString()).toBe(`class S {
+    void f() {
+        var consume = ${expression};
+    }
+}`)
+  })
+
+  it('does nothing for a caret inside a comment or unsupported bare expression', () => {
+    const commented = 'class S { void f() { // Math.max(0, 1);\n } }'
+    const commentPosition = commented.indexOf('Math.max') + 3
+    const commentHarness = mutableEditorView(
+      javaState(commented).update({ selection: { anchor: commentPosition } }).state,
+    )
+    expect(introduceJavaVariable(commentHarness.view)).toBe(false)
+    expect(commentHarness.state().doc.toString()).toBe(commented)
+
+    const stringSource = 'class S { void f() { String text = "Math.max(0, 1);"; } }'
+    const stringPosition = stringSource.indexOf('Math.max') + 3
+    const stringHarness = mutableEditorView(
+      javaState(stringSource).update({ selection: { anchor: stringPosition } }).state,
+    )
+    expect(introduceJavaVariable(stringHarness.view)).toBe(false)
+    expect(stringHarness.state().doc.toString()).toBe(stringSource)
+
+    const bare = 'class S { void f() { value; } }'
+    const barePosition = bare.indexOf('value') + 'value'.length
+    const bareHarness = mutableEditorView(
+      javaState(bare).update({ selection: { anchor: barePosition } }).state,
+    )
+    expect(introduceJavaVariable(bareHarness.view)).toBe(false)
+    expect(bareHarness.state().doc.toString()).toBe(bare)
+
+    const empty = 'class S { void f() { ; } }'
+    const emptyHarness = mutableEditorView(
+      javaState(empty).update({ selection: { anchor: empty.indexOf(';') + 1 } }).state,
+    )
+    expect(extractJavaMethod(emptyHarness.view)).toBe(true)
+    expect(emptyHarness.state().doc.toString()).toBe(empty)
+  })
 })
 
 describe('Extract Method command', () => {
@@ -170,6 +250,7 @@ describe('Extract Method command', () => {
     int f(int[] nums) {
         return extractedMethod(nums);
     }
+
     private int extractedMethod(int[] nums) {
         return nums[nums.length - 1];
     }
@@ -181,6 +262,82 @@ describe('Extract Method command', () => {
     const source = 'class S {\n    void f() { }\n}'
     const harness = mutableEditorView(
       javaState(source, true).update({ selection: { anchor: source.indexOf('{', source.indexOf('f')) + 1 } }).state,
+    )
+    const errors: string[] = []
+
+    expect(extractJavaMethod(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual(['Select an expression or complete statements to extract a method.'])
+    expect(harness.state().doc.toString()).toBe(source)
+  })
+
+  it('infers a complete expression statement at the caret after `)` or `;`', () => {
+    const expression = 'Math.max(0, 1)'
+    const source = `class S {
+    void f() {
+        ${expression};${' '.repeat(3)}
+    }
+}`
+    const expressionFrom = source.indexOf(expression)
+    const positions = [
+      expressionFrom + expression.length,
+      expressionFrom + expression.length + 1,
+      expressionFrom + expression.length + 4,
+    ]
+
+    for (const position of positions) {
+      const harness = mutableEditorView(
+        javaState(source).update({ selection: { anchor: position } }).state,
+      )
+      const errors: string[] = []
+
+      expect(extractJavaMethod(harness.view, (message) => errors.push(message))).toBe(true)
+      expect(errors).toEqual([])
+      expect(harness.state().doc.toString()).toContain('extractedMethod();')
+      expect(harness.state().doc.toString()).toContain('private int extractedMethod()')
+    }
+  })
+
+  it('uses the expression inside a return statement when the caret follows the call', () => {
+    const expression = 'compute(1)'
+    const source = `class S {
+    int compute(int value) { return value + 1; }
+    int f() {
+        return ${expression};
+    }
+}`
+    const position = source.indexOf(expression) + expression.length + 1
+    const harness = mutableEditorView(
+      javaState(source).update({ selection: { anchor: position } }).state,
+    )
+
+    expect(extractJavaMethod(harness.view)).toBe(true)
+    expect(harness.state().doc.toString()).toContain('return extractedMethod();')
+    expect(harness.state().doc.toString()).toContain('private int extractedMethod()')
+  })
+
+  it('falls back to the complete statement when an enclosing call has no known return type', () => {
+    const expression = 'consume(Math.max(0, 1))'
+    const source = `class S {
+    void f() {
+        ${expression};
+    }
+}`
+    const position = source.indexOf(expression) + expression.length
+    const harness = mutableEditorView(
+      javaState(source).update({ selection: { anchor: position } }).state,
+    )
+
+    expect(extractJavaMethod(harness.view)).toBe(true)
+    expect(harness.state().doc.toString()).toContain('extractedMethod();')
+    expect(harness.state().doc.toString()).toContain('private void extractedMethod()')
+    expect(harness.state().doc.toString()).toContain(expression)
+  })
+
+  it('does nothing for a caret inside a string or comment', () => {
+    const source = 'class S { void f() { String text = "Math.max(0, 1);"; } }'
+    const position = source.indexOf('Math.max') + 3
+    const harness = mutableEditorView(
+      javaState(source).update({ selection: { anchor: position } }).state,
     )
     const errors: string[] = []
 

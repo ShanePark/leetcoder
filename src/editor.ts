@@ -59,7 +59,7 @@ import {
 } from './completions'
 import type { ClipboardBridge } from './clipboard'
 import { createClipboardBridge } from './clipboard'
-import { platformShortcutBindings, shortcutLabel } from './shortcuts'
+import { platformShortcutBindings, shortcutBindings, shortcutLabel } from './shortcuts'
 import {
   importBlockRange,
   removeUnusedJavaTypeImports,
@@ -101,6 +101,16 @@ import {
   javaDefinitionHoverRange,
   setDefinitionHover,
 } from './editor/definition-navigation'
+import {
+  applySelectedJavaIntention,
+  applyJavaMethodCreation,
+  dismissJavaIntentions,
+  javaIntentionsExtension,
+  javaIntentionsAt,
+  javaIntentionsState,
+  planJavaMethodCreation,
+  showJavaIntentions,
+} from './editor/intentions'
 
 export {
   expandJavaTemplateOnTab,
@@ -124,6 +134,23 @@ export type {
   JavaMethodRenameResult,
 } from './editor/rename'
 export type { JavaDocInsertion, JavaVariableInsertion } from './editor/editing'
+export {
+  applySelectedJavaIntention,
+  applyJavaMethodCreation,
+  dismissJavaIntentions,
+  javaIntentionsExtension,
+  javaIntentionsAt,
+  javaIntentionsState,
+  planJavaMethodCreation,
+  showJavaIntentions,
+} from './editor/intentions'
+export type {
+  JavaIntention,
+  JavaIntentionsMenuState,
+  JavaIntentionChange,
+  JavaMethodCreationPlan,
+  JavaMethodParameter,
+} from './editor/intentions'
 export {
   completeJavaStatement,
   moveToJavaLineEnd,
@@ -428,6 +455,15 @@ export function isCompleteStatementAltShortcut(event: JavaDocAltShortcutEvent): 
     && !event.ctrlKey
 }
 
+/** Match the plain Option+Enter form of the editor intentions menu. */
+export function isShowIntentionsAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'Enter'
+    && event.altKey
+    && !event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
 /** Match the Option+Right Arrow form of Move to Line End. */
 export function isLineEndAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'ArrowRight'
@@ -644,10 +680,12 @@ export class JavaEditor {
     const extractMethodShortcuts = bindings('extract-method')
     const renameMethodShortcuts = bindings('rename-method')
     const finishTemplateShortcuts = bindings('finish-template')
+    const showIntentionsShortcuts = shortcutBindings('show-intentions')
     const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
     const renameMethod = (view: EditorView): boolean => renameJavaMethod(view, callbacks.onRefactorError)
+    const showIntentions = (view: EditorView): boolean => showJavaIntentions(view)
     const showShortcuts = (): boolean => {
       callbacks.onShowShortcuts?.()
       return true
@@ -781,6 +819,7 @@ export class JavaEditor {
         [isRedoAltShortcut, redo],
         [isUndoAltShortcut, undo],
         [isCompleteStatementAltShortcut, completeJavaStatement],
+        [isShowIntentionsAltShortcut, showIntentions],
         [isLineEndAltShortcut, moveToJavaLineEnd],
         [isMoveLineUpAltShortcut, moveLineUp],
         [isMoveLineDownAltShortcut, moveLineDown],
@@ -858,12 +897,14 @@ export class JavaEditor {
         EditorState.tabSize.of(4),
         EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
+        javaIntentionsExtension,
         // Consume the printable opening parenthesis before the browser can
         // emit a second input event with the stale selection range.
         javaIdentifierCallKeymap,
         // Run before autocompletion's own Prec.highest Enter binding so an
         // accepted completion can also finish an already active live
         // template in the same key press.
+        Prec.highest(keymap.of(commandBindings(showIntentionsShortcuts, showIntentions))),
         Prec.highest(keymap.of(commandBindings(finishTemplateShortcuts, finishJavaTemplate, false))),
         keymap.of([
           ...closeBracketsKeymap,
