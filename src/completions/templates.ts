@@ -7,7 +7,7 @@ import {
   nextSnippetField,
   selectedCompletion,
   snippet,
-  startCompletion,
+  closeCompletion,
   type Completion,
 } from '@codemirror/autocomplete'
 import {
@@ -227,6 +227,8 @@ interface JavaIterTemplateSession {
   targetTo: number
   typeFrom: number
   typeTo: number
+  variableFrom: number
+  variableTo: number
   loopFrom: number
   loopTo: number
   bodyFrom: number
@@ -254,15 +256,18 @@ function mapJavaIterTemplateSession(
 ): JavaIterTemplateSession | null {
   const target = mapIterTemplateRange(session.targetFrom, session.targetTo, changes)
   const type = mapIterTemplateRange(session.typeFrom, session.typeTo, changes)
+  const variable = mapIterTemplateRange(session.variableFrom, session.variableTo, changes)
   const loop = mapIterTemplateRange(session.loopFrom, session.loopTo, changes)
   const body = mapIterTemplateRange(session.bodyFrom, session.bodyTo, changes)
-  if (!target || !type || !loop || !body) return null
+  if (!target || !type || !variable || !loop || !body) return null
   return {
     ...session,
     targetFrom: target.from,
     targetTo: target.to,
     typeFrom: type.from,
     typeTo: type.to,
+    variableFrom: variable.from,
+    variableTo: variable.to,
     loopFrom: loop.from,
     loopTo: loop.to,
     bodyFrom: body.from,
@@ -275,6 +280,28 @@ function selectionInsideIterLoop(
   session: JavaIterTemplateSession,
 ): boolean {
   return selection.ranges.every((range) => range.from >= session.loopFrom && range.to <= session.loopTo)
+}
+
+function selectionInsideIterVariable(
+  selection: { ranges: readonly { from: number, to: number }[] },
+  session: JavaIterTemplateSession,
+): boolean {
+  return selection.ranges.length === 1
+    && selection.ranges.every((range) => range.from >= session.variableFrom && range.to <= session.variableTo)
+}
+
+/** Whether the active iter snippet is editing its loop variable name. */
+export function isJavaIterVariableNameField(
+  state: EditorState,
+  position = state.selection.main.head,
+): boolean {
+  const session = state.field(javaIterTemplateState, false)
+  if (!session
+    || (!hasNextSnippetField(state) && !hasPrevSnippetField(state))
+    || !selectionInsideIterVariable(state.selection, session)) {
+    return false
+  }
+  return position >= session.variableFrom && position <= session.variableTo
 }
 
 function javaIterTemplateTransactionFilter(tr: Transaction): TransactionSpec | readonly TransactionSpec[] | Transaction {
@@ -417,15 +444,42 @@ function finishActiveJavaTemplate(view: EditorView): boolean {
   return true
 }
 
+function selectionInsideJavaIterTarget(
+  selection: { ranges: readonly { from: number, to: number }[] },
+  session: JavaIterTemplateSession,
+): boolean {
+  return selection.ranges.length === 1
+    && selection.ranges.every((range) => range.from >= session.targetFrom && range.to <= session.targetTo)
+}
+
+function isJavaIterCompletion(completion: Completion | null): boolean {
+  return completion?.label === 'iter' || completion?.label.startsWith('iter (') === true
+}
+
 export function finishJavaTemplate(view: EditorView): boolean {
   const iterSessionBeforeAccept = view.state.field(javaIterTemplateState, false)
   const hadActiveSnippetBeforeAccept = hasNextSnippetField(view.state) || hasPrevSnippetField(view.state)
+  if (iterSessionBeforeAccept
+    && hadActiveSnippetBeforeAccept
+    && selectionInsideIterVariable(view.state.selection, iterSessionBeforeAccept)) {
+    closeCompletion(view)
+    return finishActiveJavaTemplate(view)
+  }
+  const iterTargetBeforeAccept = iterSessionBeforeAccept
+    && selectionInsideJavaIterTarget(view.state.selection, iterSessionBeforeAccept)
+  const selectedBeforeAccept = selectedCompletion(view.state)
   if (acceptCompletion(view)) {
-    // Accepting a completion that expands a fresh template should leave its
-    // first field active. Existing iter templates retain their historical
-    // Enter behavior as well; a pre-existing print/test template is the case
-    // that needs to finish after replacing its active field.
-    if (hadActiveSnippetBeforeAccept && !iterSessionBeforeAccept) {
+    // The target expression is the first stop when an iter template is
+    // expanded. Once the user accepts a completion while editing that target,
+    // skip the inferred type and select the editable loop variable instead.
+    // Keep a newly inserted iter completion on its first target stop so a
+    // nested template does not skip its own expression field.
+    if (hadActiveSnippetBeforeAccept
+      && iterTargetBeforeAccept
+      && !isJavaIterCompletion(selectedBeforeAccept)) {
+      nextSnippetField(view)
+      nextSnippetField(view)
+    } else if (hadActiveSnippetBeforeAccept && !iterSessionBeforeAccept) {
       finishActiveJavaTemplate(view)
     }
     return true
@@ -461,10 +515,12 @@ function registerJavaIterTemplateSession(view: EditorView, from: number): void {
   if (loopFrom < 0) return
   const lineEnd = source.indexOf('\n', loopFrom)
   const header = source.slice(loopFrom, lineEnd < 0 ? source.length : lineEnd)
-  const headerMatch = /^for \((.+?)\s+[A-Za-z_$][\w$]*\s*:\s*(.+?)\)\s*\{/.exec(header)
+  const headerMatch = /^for \((.+?)\s+([A-Za-z_$][\w$]*)\s*:\s*(.+?)\)\s*\{/.exec(header)
   if (!headerMatch) return
   const parsedTypeFrom = loopFrom + 'for ('.length
   const parsedTypeTo = parsedTypeFrom + headerMatch[1].length
+  const variableFrom = parsedTypeTo + (/^[\t ]*/.exec(source.slice(parsedTypeTo))?.[0].length ?? 0)
+  const variableTo = variableFrom + headerMatch[2].length
   const bodyLineStart = source.indexOf('\n', loopFrom) + 1
   const bodyIndent = /^[\t ]*/.exec(source.slice(bodyLineStart))?.[0].length ?? 0
   const effects: StateEffect<unknown>[] = [setJavaIterTemplateSession.of({
@@ -472,6 +528,8 @@ function registerJavaIterTemplateSession(view: EditorView, from: number): void {
     targetTo: targetSelection.to,
     typeFrom: parsedTypeFrom,
     typeTo: parsedTypeTo,
+    variableFrom,
+    variableTo,
     loopFrom,
     loopTo: matchingLoopEnd(source, loopFrom),
     bodyFrom: bodyLineStart + bodyIndent,
@@ -598,10 +656,6 @@ export function expandJavaPrintTemplate(view: EditorView): boolean {
   const linePrefix = source.slice(lineStart, abbreviation.from)
   if (!/^[\t ]*$/.test(linePrefix)) {
     return false
-  }
-
-  if (abbreviation.kind === 'iter' && javaIterableCandidates(source, position).length > 1 && startCompletion(view)) {
-    return true
   }
 
   applyJavaPrintTemplate(view, abbreviation.kind, abbreviation.from, position, null)

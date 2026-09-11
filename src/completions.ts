@@ -18,6 +18,7 @@ import {
   javaTestCompletion,
   javaIterCompletions,
   javaPrintCompletion,
+  isJavaIterVariableNameField,
 } from './completions/templates'
 
 export type {
@@ -49,6 +50,7 @@ export {
   finishJavaIterTemplate,
   javaTestCompletion,
   javaIterTemplateExtension,
+  isJavaIterVariableNameField,
 } from './completions/templates'
 
 interface MethodSpec {
@@ -498,9 +500,19 @@ function uniqueOptions(options: Completion[]): Completion[] {
   })
 }
 
+function javaCompletionValidFor(
+  text: string,
+  _from: number,
+  _to: number,
+  state: CompletionContext['state'],
+): boolean {
+  return /^[\w$]*$/.test(text) && !isJavaIterVariableNameField(state)
+}
+
 export function javaCompletions(context: CompletionContext): CompletionResult | null {
   const source = context.state.doc.toString()
   const position = context.pos
+  if (isJavaIterVariableNameField(context.state, position)) return null
   const dot = findDotContext(source, position)
   const analysis = analyzeJavaSource(source, position)
   const { symbols, methods } = analysis
@@ -509,14 +521,14 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
       return {
         from: dot.from,
         options: thisMemberCompletions(symbols, methods),
-        validFor: /^[\w$]*$/,
+        validFor: javaCompletionValidFor,
       }
     }
     const resolution = receiverResolution(dot.receiver, position, symbols)
     return {
       from: dot.from,
       options: methodOptions(resolution, dot.assertJ),
-      validFor: /^[\w$]*$/,
+      validFor: javaCompletionValidFor,
     }
   }
   const word = context.matchBefore(/[\w$]*/)
@@ -529,7 +541,7 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
       ...javaIterCompletions(source, position, analysis),
       ...JAVA_COMPLETIONS,
     ]),
-    validFor: /^[\w$]*$/,
+    validFor: javaCompletionValidFor,
   }
 }
 

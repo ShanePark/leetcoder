@@ -4,20 +4,32 @@ import {
   completionStatus,
   hasNextSnippetField,
   hasPrevSnippetField,
+  startCompletion,
+  CompletionContext,
 } from '@codemirror/autocomplete'
 import { defaultKeymap, history } from '@codemirror/commands'
 import { java } from '@codemirror/lang-java'
 import { indentUnit } from '@codemirror/language'
 import { EditorState, Prec, type TransactionSpec } from '@codemirror/state'
 import { keymap, runScopeHandlers, type EditorView } from '@codemirror/view'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+const acceptCompletionMock = vi.hoisted(() => vi.fn())
+vi.mock('@codemirror/autocomplete', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@codemirror/autocomplete')>()
+  acceptCompletionMock.mockImplementation((view: EditorView) => actual.acceptCompletion(view))
+  return { ...actual, acceptCompletion: acceptCompletionMock }
+})
+
 import { expandJavaTemplateOnTab } from '../../../src/editor'
 import {
   finishJavaIterTemplate,
   finishJavaTemplate,
   javaCompletions,
   javaIterTemplateExtension,
+  isJavaIterVariableNameField,
 } from '../../../src/completions'
+import { javaIterCompletion } from '../../../src/completions/templates'
 import { runEditorCommand, mutableEditorView, javaState, applyUndo } from './helpers'
 
 describe('Java template Tab command', () => {
@@ -254,7 +266,7 @@ class S {
     ].join('\n'))
   })
 
-  it('opens completion choices before expanding a multi-target iter', () => {
+  it('expands a multi-target iter immediately on Tab', () => {
     const source = `class S {
     void f(List<Integer> nums, String[] names) {
         iter
@@ -269,8 +281,123 @@ class S {
     const harness = mutableEditorView(initial)
 
     expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
-    expect(harness.state().doc.toString()).toBe(source)
+    expect(harness.state().doc.toString()).toContain('for (String name : names)')
+  })
+
+  it('expands the first iter target when Tab arrives while choices are still pending', () => {
+    const source = `class S {
+    void f(List<Integer> nums, String[] names) {
+        iter
+    }
+}`
+    const cursor = source.indexOf('iter') + 'iter'.length
+    const initial = EditorState.create({
+      doc: source,
+      extensions: [
+        java(),
+        javaIterTemplateExtension,
+        autocompletion({ override: [javaCompletions] }),
+      ],
+      selection: { anchor: cursor },
+    })
+    const harness = mutableEditorView(initial)
+
+    expect(startCompletion(harness.view)).toBe(true)
     expect(completionStatus(harness.state())).toBe('pending')
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    expect(harness.state().doc.toString()).toContain('for (String name : names)')
+  })
+
+  it('suppresses target completions and finishes an iter variable field on Enter', () => {
+    const source = `class S {
+    void f(int[] digits) {
+        iter
+    }
+}`
+    const cursor = source.indexOf('iter') + 'iter'.length
+    const harness = mutableEditorView(EditorState.create({
+      doc: source,
+      extensions: [
+        java(),
+        javaIterTemplateExtension,
+        autocompletion({ override: [javaCompletions] }),
+      ],
+      selection: { anchor: cursor },
+    }))
+    const completion = javaIterCompletion({ name: 'digits', elementType: 'int', variableName: 'item' })
+    if (typeof completion.apply !== 'function') throw new Error('iter completion must expand as a snippet')
+    completion.apply(harness.view, completion, cursor - 'iter'.length, cursor)
+
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    const variable = harness.state().selection.main
+    harness.view.dispatch({
+      changes: { from: variable.from, to: variable.to, insert: 'digit' },
+      selection: { anchor: variable.from + 'digit'.length },
+      userEvent: 'input.type',
+    })
+    const state = harness.state()
+    expect(isJavaIterVariableNameField(state)).toBe(true)
+    expect(javaCompletions(new CompletionContext(state, state.selection.main.head, false))).toBeNull()
+
+    acceptCompletionMock.mockClear()
+    expect(finishJavaTemplate(harness.view)).toBe(true)
+    expect(acceptCompletionMock).not.toHaveBeenCalled()
+    expect(harness.state().doc.toString()).toContain('for (int digit : digits)')
+  })
+
+  it('moves to an editable item after changing an inferred iter target and accepting completion', () => {
+    const source = `class S {
+    void f(boolean[] appear, int[] digits) {
+        iter
+    }
+}`
+    const cursor = source.indexOf('iter') + 'iter'.length
+    const harness = mutableEditorView(
+      javaState(source, true).update({ selection: { anchor: cursor } }).state,
+    )
+    const completion = javaIterCompletion({ name: 'appear', elementType: 'boolean', variableName: 'item' })
+
+    expect(typeof completion.apply).toBe('function')
+    if (typeof completion.apply !== 'function') throw new Error('iter completion must expand as a snippet')
+    completion.apply(harness.view, completion, cursor - 'iter'.length, cursor)
+    expect(harness.state().doc.toString()).toContain('for (boolean item : appear)')
+
+    const target = harness.state().selection.main
+    harness.view.dispatch({
+      changes: { from: target.from, to: target.to, insert: 'digits' },
+      selection: { anchor: target.from + 'digits'.length },
+      userEvent: 'input.type',
+    })
+    expect(harness.state().doc.toString()).toContain('for (int item : digits)')
+
+    acceptCompletionMock.mockImplementationOnce((view: EditorView) => {
+      const targetFrom = view.state.doc.toString().indexOf('digits', view.state.doc.toString().indexOf('for ('))
+      view.dispatch({
+        changes: { from: targetFrom, to: targetFrom + 'digits'.length, insert: 'digits' },
+        selection: { anchor: targetFrom + 'digits'.length },
+        userEvent: 'input.complete',
+      })
+      return true
+    })
+
+    expect(finishJavaTemplate(harness.view)).toBe(true)
+    const moved = harness.state()
+    expect(moved.sliceDoc(moved.selection.main.from, moved.selection.main.to)).toBe('item')
+
+    const item = moved.selection.main
+    harness.view.dispatch({
+      changes: { from: item.from, to: item.to, insert: 'digit' },
+      selection: { anchor: item.from + 'digit'.length },
+      userEvent: 'input.type',
+    })
+    expect(finishJavaIterTemplate(harness.view)).toBe(true)
+    const finished = harness.state()
+    const loopFrom = finished.doc.toString().indexOf('for (int digit : digits)')
+    const bodyPosition = finished.doc.toString().indexOf('\n', loopFrom) + 1 + 12
+    expect(finished.selection.main.from).toBe(bodyPosition)
+    harness.view.dispatch(finished.replaceSelection('return;'))
+    expect(harness.state().doc.toString()).toContain('            return;')
   })
 
   it('keeps iter snippet fields editable as Tab advances through them', () => {
