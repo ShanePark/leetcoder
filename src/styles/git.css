@@ -82,6 +82,258 @@
   flex: none;
 }
 
+/* ---------------------------------------------------------------- */
+/* Commit & Push progress                                           */
+/* ---------------------------------------------------------------- */
+
+.is-git-progress .app-shell {
+  pointer-events: none;
+  user-select: none;
+}
+
+.git-progress-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 8, 15, 0.74);
+  backdrop-filter: blur(4px);
+}
+
+.git-progress-dialog {
+  width: min(540px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 28px;
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  animation: git-progress-dialog-in 180ms ease-out both;
+}
+
+.git-progress-dialog:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.git-progress-intro {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.git-progress-spinner {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: git-progress-spin 850ms linear infinite;
+}
+
+.git-progress-heading {
+  min-width: 0;
+}
+
+.git-progress-kicker {
+  margin: 0 0 6px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .13em;
+}
+
+.git-progress-heading h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 21px;
+  letter-spacing: -.02em;
+}
+
+.git-progress-heading p:last-child {
+  margin: 7px 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-progress-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 28px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.git-progress-step-label {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.git-progress-track {
+  position: relative;
+  height: 8px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.git-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 25%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #79b0ff);
+  box-shadow: 0 0 14px rgba(91, 157, 255, .46);
+  transition: width 260ms ease;
+}
+
+.git-progress-shimmer {
+  position: absolute;
+  inset: 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .46), transparent);
+  opacity: .45;
+  animation: git-progress-shimmer 1.5s ease-in-out infinite;
+}
+
+.git-progress-stages {
+  display: grid;
+  gap: 2px;
+  margin: 22px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.git-progress-stage {
+  position: relative;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  color: var(--text-faint);
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.git-progress-stage[data-state='current'] {
+  border-color: rgba(91, 157, 255, .28);
+  background: rgba(91, 157, 255, .08);
+  color: var(--text);
+}
+
+.git-progress-stage[data-state='complete'] {
+  color: var(--text-dim);
+}
+
+.git-progress-stage-mark {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  flex: 0 0 27px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.git-progress-stage[data-state='current'] .git-progress-stage-mark {
+  border-color: var(--accent);
+  background: rgba(91, 157, 255, .17);
+  color: var(--accent);
+  box-shadow: 0 0 0 4px rgba(91, 157, 255, .09);
+}
+
+.git-progress-stage[data-state='complete'] .git-progress-stage-mark {
+  border-color: rgba(77, 210, 148, .55);
+  background: rgba(77, 210, 148, .17);
+  color: var(--green);
+  font-size: 14px;
+}
+
+.git-progress-stage-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.git-progress-stage-copy strong {
+  color: inherit;
+  font-size: 12px;
+}
+
+.git-progress-stage-copy small {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-progress-footnote {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 22px 0 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.git-progress-footnote-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(91, 157, 255, .12);
+}
+
+@keyframes git-progress-dialog-in {
+  from { opacity: 0; transform: translateY(7px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes git-progress-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes git-progress-shimmer {
+  0% { transform: translateX(-130%); }
+  55%, 100% { transform: translateX(310%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .git-progress-dialog,
+  .git-progress-spinner,
+  .git-progress-shimmer {
+    animation: none;
+  }
+
+  .git-progress-fill {
+    transition: none;
+  }
+}
+
 .git-workspace {
   display: grid;
   flex: 1;

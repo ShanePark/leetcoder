@@ -26,6 +26,7 @@ import {
   createUpdateProgressView,
   listenForUpdateProgress,
 } from './update-progress'
+import { clearGitProgressOverlay } from './app/git-progress'
 import {
   LiveDiagnosticsScheduler,
   type LiveDiagnosticsSnapshot,
@@ -183,6 +184,10 @@ export class LeetcoderApp {
     accordionGroupKeys('easy', true),
   )
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
+    if (this.gitController.commitPushInProgress) {
+      event.preventDefault()
+      return
+    }
     if (isSettingsShortcut(event, currentIsMacPlatform())) {
       event.preventDefault()
       this.overlay.openSettingsDialog('appearance')
@@ -258,6 +263,10 @@ export class LeetcoderApp {
   }
 
   private readonly handleContextMenuOutside = (event: PointerEvent): void => {
+    if (this.gitController.commitPushInProgress) {
+      event.preventDefault()
+      return
+    }
     this.overlay.handleOutsidePointerDown(event)
     const fileMenu = this.root.querySelector<HTMLElement>('#file-context-menu')
     const gitMenu = this.root.querySelector<HTMLElement>('#git-context-menu')
@@ -271,6 +280,10 @@ export class LeetcoderApp {
   }
 
   private readonly handleContextMenuKeydown = (event: KeyboardEvent): void => {
+    if (this.gitController.commitPushInProgress) {
+      event.preventDefault()
+      return
+    }
     if (this.overlay.handleEscape(event)) {
       return
     }
@@ -544,6 +557,7 @@ export class LeetcoderApp {
     this.testRunController.dispose()
     this.liveDiagnostics.dispose()
     this.gitController.dispose()
+    clearGitProgressOverlay(this.root)
     this.documentController.dispose()
     this.fileTabsView.dispose()
     this.paneLayout.destroy()
@@ -1114,6 +1128,7 @@ export class LeetcoderApp {
         busy: this.state.busy,
         git: this.state.git,
         operationLabel: this.gitController.progressLabel,
+        commitPushInProgress: this.gitController.commitPushInProgress,
       },
       {
         onToggleFile: (path, selected) => this.gitController.toggleFile(path, selected),

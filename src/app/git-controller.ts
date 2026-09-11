@@ -86,6 +86,7 @@ export class GitController {
   private diffRequestId = 0
   private operationId = 0
   private operationLabel: string | null = null
+  private operationKind: 'commit-push' | null = null
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private pendingDiffPath: string | null = null
   private disposed = false
@@ -104,6 +105,10 @@ export class GitController {
     return this.operationLabel
   }
 
+  get commitPushInProgress(): boolean {
+    return this.operationKind === 'commit-push'
+  }
+
   /** Invalidate all work tied to the previous repository and clear its view. */
   reset(): void {
     if (this.disposed) {
@@ -114,6 +119,7 @@ export class GitController {
     this.diffRequestId += 1
     this.operationId += 1
     this.operationLabel = null
+    this.operationKind = null
     this.pendingDiffPath = null
     Object.assign(this.state, createGitState())
   }
@@ -129,6 +135,7 @@ export class GitController {
     this.diffRequestId += 1
     this.operationId += 1
     this.operationLabel = null
+    this.operationKind = null
     this.pendingDiffPath = null
   }
 
@@ -387,7 +394,10 @@ export class GitController {
   }
 
   /** Start an app-level Git operation and return the identity guard for it. */
-  startOperation(label: string | null = null): GitOperationToken | null {
+  startOperation(
+    label: string | null = null,
+    kind: 'commit-push' | null = null,
+  ): GitOperationToken | null {
     if (!this.isAlive()) {
       return null
     }
@@ -403,6 +413,7 @@ export class GitController {
     this.state.busy = true
     this.state.error = null
     this.operationLabel = label
+    this.operationKind = kind
     this.hooks.setAppBusy(true)
     return token
   }
@@ -420,6 +431,7 @@ export class GitController {
       return
     }
     this.operationLabel = null
+    this.operationKind = null
     this.state.busy = false
     this.hooks.setAppBusy(false)
     this.hooks.render()
@@ -472,7 +484,10 @@ export class GitController {
     const selectedPathSet = new Set(paths)
     const selectedFiles = this.state.files.filter((file) => selectedPathSet.has(file.path))
     const message = this.state.commitMessage.trim() || defaultGitCommitMessage(selectedFiles)
-    const token = this.startOperation(pushAfterCommit ? 'Preparing commit and push…' : 'Preparing commit…')
+    const token = this.startOperation(
+      pushAfterCommit ? 'Preparing commit and push…' : 'Preparing commit…',
+      pushAfterCommit ? 'commit-push' : null,
+    )
     if (!token) {
       return
     }

@@ -7,6 +7,7 @@ import {
   normalizeGitStatusLabel,
   parseUnifiedDiffLines,
 } from './git-helpers'
+import { syncGitProgressOverlay } from './git-progress'
 import { gitDirectoryPath } from './path-helpers'
 
 export interface GitPanelViewModel {
@@ -15,6 +16,8 @@ export interface GitPanelViewModel {
   git: Readonly<GitState>
   /** Human-readable progress for a Git mutation, when one is in flight. */
   operationLabel?: string | null
+  /** Whether the current operation is the blocking Commit & Push flow. */
+  commitPushInProgress?: boolean
 }
 
 export interface GitPanelViewCallbacks {
@@ -177,6 +180,7 @@ export function renderGitPanel(
     input.value = git.commitMessage
   }
   updateGitCommitControls(root, model, selectedPaths)
+  syncGitProgressOverlay(root, model.commitPushInProgress === true, model.operationLabel)
 }
 
 /** Update commit controls without rebuilding the file list or diff. */

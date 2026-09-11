@@ -8,6 +8,11 @@ import {
 } from '../../../src/app/git-controller'
 import type { GitBackendClient } from '../../../src/app/types'
 import { updateGitCommitControls } from '../../../src/app/git-view'
+import {
+  GIT_PROGRESS_STAGES,
+  gitProgressStageIndex,
+  renderGitProgressOverlay,
+} from '../../../src/app/git-progress'
 
 interface Deferred<T> {
   promise: Promise<T>
@@ -60,6 +65,7 @@ function controlsRoot(): {
 function appHarness(options: {
   commit: () => Promise<unknown>
   push?: () => Promise<unknown>
+  flushPendingSave?: () => Promise<boolean>
 }): {
   controller: GitController
   controls: ReturnType<typeof controlsRoot>
@@ -95,7 +101,7 @@ function appHarness(options: {
   }
   const hooks: GitControllerHooks = {
     getContext: () => context,
-    flushPendingSave: vi.fn().mockResolvedValue(true),
+    flushPendingSave: options.flushPendingSave ?? vi.fn().mockResolvedValue(true),
     setAppBusy: (busy) => {
       context.appBusy = busy
     },
@@ -128,6 +134,20 @@ function appHarness(options: {
 }
 
 describe('Git commit progress', () => {
+  it('renders an accessible blocking overlay with each commit-and-push phase', () => {
+    const overlay = renderGitProgressOverlay()
+
+    expect(overlay).toContain('data-git-progress-overlay')
+    expect(overlay).toContain('role="dialog" aria-modal="true"')
+    expect(overlay).toContain('COMMIT &amp; PUSH')
+    for (const stage of GIT_PROGRESS_STAGES) {
+      expect(overlay).toContain(`data-git-stage="${stage.id}"`)
+      expect(overlay).toContain(stage.label)
+    }
+    expect(gitProgressStageIndex('Preparing commit and push…')).toBe(0)
+    expect(gitProgressStageIndex('Pushing changes…')).toBe(2)
+  })
+
   it('disables commit controls immediately and reports each commit-and-push phase', async () => {
     const commit = deferred<unknown>()
     const push = deferred<unknown>()
@@ -138,6 +158,7 @@ describe('Git commit progress', () => {
     const operation = controller.commitSelectedFiles(true)
 
     expect(controller.state.busy).toBe(true)
+    expect(controller.commitPushInProgress).toBe(true)
     expect(controller.progressLabel).toBe('Preparing commit and push…')
     expect(controls.input.disabled).toBe(true)
     expect(controls.commit.disabled).toBe(true)
@@ -168,6 +189,7 @@ describe('Git commit progress', () => {
     ])
     expect(controller.state.busy).toBe(false)
     expect(controller.progressLabel).toBeNull()
+    expect(controller.commitPushInProgress).toBe(false)
     expect(controls.input.disabled).toBe(false)
     expect(controls.commit.disabled).toBe(false)
     expect(controls.commitPush.disabled).toBe(false)
@@ -184,6 +206,7 @@ describe('Git commit progress', () => {
 
     expect(controller.state.busy).toBe(false)
     expect(controller.progressLabel).toBeNull()
+    expect(controller.commitPushInProgress).toBe(false)
     expect(controller.state.error).toBe('remote rejected the update')
     expect(controls.input.disabled).toBe(false)
     expect(controls.commit.disabled).toBe(false)
@@ -194,5 +217,36 @@ describe('Git commit progress', () => {
     })
     expect(progress).toContain('Pushing changes…')
     expect(progress.at(-1)).toBeNull()
+  })
+
+  it('releases the blocking operation after a save failure', async () => {
+    const { controller, controls, messages } = appHarness({
+      commit: vi.fn(),
+      flushPendingSave: vi.fn().mockResolvedValue(false),
+    })
+
+    await controller.commitSelectedFiles(true)
+
+    expect(controller.commitPushInProgress).toBe(false)
+    expect(controller.state.busy).toBe(false)
+    expect(controls.commitPush.disabled).toBe(false)
+    expect(messages).toEqual([])
+  })
+
+  it('releases the blocking operation after a commit failure', async () => {
+    const { controller, controls, messages } = appHarness({
+      commit: vi.fn().mockRejectedValue(new Error('commit failed')),
+      push: vi.fn(),
+    })
+
+    await controller.commitSelectedFiles(true)
+
+    expect(controller.commitPushInProgress).toBe(false)
+    expect(controller.state.busy).toBe(false)
+    expect(controls.commitPush.disabled).toBe(false)
+    expect(messages).toContainEqual({
+      message: 'Could not commit changes: commit failed',
+      tone: 'error',
+    })
   })
 })
