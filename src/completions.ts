@@ -1,46 +1,57 @@
-import { pickedCompletion, snippet, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
-import type { EditorView } from '@codemirror/view'
+import { snippet, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
 
-/**
- * This is intentionally a small, source-text based completion provider.  It is
- * not intended to replace a Java language server.  The editor only needs the
- * handful of JDK/AssertJ APIs used repeatedly while solving LeetCode problems.
- */
+import {
+  applyJavaType,
+  JAVA_TYPE_IMPORTS,
+} from './completions/imports'
+import {
+  JAVA_KEYWORDS,
+  JAVA_TYPES,
+  TYPE_GROUPS,
+  type JavaMethod,
+  type JavaSymbol,
+} from './completions/model'
+import {
+  analyzeJavaSource,
+} from './completions/source'
+import {
+  javaTestCompletion,
+  javaIterCompletions,
+  javaPrintCompletion,
+  isJavaIterVariableNameField,
+} from './completions/templates'
 
-export interface JavaSymbol {
-  name: string
-  /** All useful views of a value.  For example `List` declared with
-   * `new ArrayList<>()` has both `List` and `ArrayList` here. */
-  bases: string[]
-  kind: 'field' | 'parameter' | 'local'
-  declaredAt: number
-  scopeStart: number
-  scopeEnd: number
-}
-
-export interface JavaMethod {
-  name: string
-  parameters: string[]
-  declaredAt: number
-  /** Exact source range of the method name, used by definition navigation. */
-  nameStart: number
-  nameEnd: number
-}
-
-export interface JavaIdentifier {
-  name: string
-  from: number
-  to: number
-}
-
-export interface JavaDefinition {
-  name: string
-  /** Exact source range of the declaration name. */
-  from: number
-  to: number
-  parameters: string[]
-  declaredAt: number
-}
+export type {
+  JavaDefinition,
+  JavaIdentifier,
+  JavaMethod,
+  JavaSymbol,
+  ImportLine,
+  JavaIterableCandidate,
+  JavaPrintTemplateKind,
+} from './completions/model'
+export {
+  addJavaTypeImports,
+  JAVA_TYPE_IMPORTS,
+  importLines,
+} from './completions/imports'
+export {
+  collectJavaMethods,
+  collectJavaSymbols,
+  javaIterableCandidates,
+  javaIdentifierAt,
+  maskJavaCommentsAndLiterals,
+  resolveJavaDefinition,
+} from './completions/source'
+export {
+  expandJavaPrintTemplate,
+  expandJavaTestTemplate,
+  finishJavaTemplate,
+  finishJavaIterTemplate,
+  javaTestCompletion,
+  javaIterTemplateExtension,
+  isJavaIterVariableNameField,
+} from './completions/templates'
 
 interface MethodSpec {
   name: string
@@ -63,272 +74,6 @@ interface ReceiverResolution {
   thisReceiver: boolean
 }
 
-const JAVA_KEYWORDS = [
-  'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class', 'const',
-  'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final', 'finally', 'float',
-  'for', 'if', 'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'new', 'null',
-  'package', 'private', 'protected', 'public', 'record', 'return', 'short', 'static', 'strictfp',
-  'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'transient', 'try', 'var', 'void',
-  'volatile', 'while',
-]
-
-const JAVA_TYPES = [
-  'ArrayDeque', 'ArrayList', 'Arrays', 'BigDecimal', 'BigInteger', 'Boolean', 'Byte', 'Character',
-  'Collections', 'Comparator', 'Deque', 'Double', 'Float', 'HashMap', 'HashSet', 'Integer',
-  'InputStream', 'Iterable', 'Iterator', 'LinkedHashMap', 'LinkedHashSet', 'LinkedList', 'List', 'Long', 'Map',
-  'Math', 'Object', 'PrintStream', 'PriorityQueue', 'Queue', 'Set', 'Short', 'Stack', 'String', 'StringBuilder',
-  'StringBuffer', 'System', 'TreeMap', 'TreeSet',
-]
-
-export const JAVA_TYPE_IMPORTS: Readonly<Record<string, string>> = {
-  ArrayDeque: 'java.util.ArrayDeque',
-  ArrayList: 'java.util.ArrayList',
-  Arrays: 'java.util.Arrays',
-  BigDecimal: 'java.math.BigDecimal',
-  BigInteger: 'java.math.BigInteger',
-  Collections: 'java.util.Collections',
-  Comparator: 'java.util.Comparator',
-  Deque: 'java.util.Deque',
-  HashMap: 'java.util.HashMap',
-  HashSet: 'java.util.HashSet',
-  InputStream: 'java.io.InputStream',
-  Iterator: 'java.util.Iterator',
-  LinkedHashMap: 'java.util.LinkedHashMap',
-  LinkedHashSet: 'java.util.LinkedHashSet',
-  LinkedList: 'java.util.LinkedList',
-  List: 'java.util.List',
-  Map: 'java.util.Map',
-  PrintStream: 'java.io.PrintStream',
-  PriorityQueue: 'java.util.PriorityQueue',
-  Queue: 'java.util.Queue',
-  Set: 'java.util.Set',
-  Stack: 'java.util.Stack',
-  TreeMap: 'java.util.TreeMap',
-  TreeSet: 'java.util.TreeSet',
-}
-
-export interface ImportLine {
-  name: string
-  static: boolean
-  from: number
-  to: number
-}
-
-export function importLines(source: string): ImportLine[] {
-  const lines: ImportLine[] = []
-  const pattern = /^[\t ]*import[\t ]+(static[\t ]+)?([\w.*]+)[\t ]*;[^\S\r\n]*(?:\r?\n|$)/gm
-  let match: RegExpExecArray | null
-  while ((match = pattern.exec(source)) !== null) {
-    lines.push({
-      name: match[2],
-      static: Boolean(match[1]),
-      from: match.index,
-      to: match.index + match[0].length,
-    })
-  }
-  return lines
-}
-
-function localTypeDeclared(source: string, typeName: string): boolean {
-  const escaped = typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`\\b(?:class|interface|enum|record)\\s+${escaped}\\b`).test(maskJavaCommentsAndLiterals(source))
-}
-
-function importInsertion(source: string, fullyQualifiedName: string): { from: number, insert: string } | null {
-  const packageName = fullyQualifiedName.slice(0, fullyQualifiedName.lastIndexOf('.'))
-  const typeName = fullyQualifiedName.slice(fullyQualifiedName.lastIndexOf('.') + 1)
-  const imports = importLines(source)
-  if (imports.some((line) => !line.static && (line.name === fullyQualifiedName || line.name === `${packageName}.*`))) {
-    return null
-  }
-  if (imports.some((line) => !line.static && !line.name.endsWith('.*') && line.name.split('.').at(-1) === typeName)) {
-    return null
-  }
-
-  const newline = source.includes('\r\n') ? '\r\n' : '\n'
-  const ordinaryImports = imports.filter((line) => !line.static)
-  const followingImport = ordinaryImports.find((line) => line.name.localeCompare(fullyQualifiedName) > 0)
-  if (followingImport) {
-    return { from: followingImport.from, insert: `import ${fullyQualifiedName};${newline}` }
-  }
-  if (ordinaryImports.length > 0) {
-    const lastImport = ordinaryImports.at(-1)!
-    const prefix = lastImport.to === source.length || !source.slice(lastImport.from, lastImport.to).endsWith('\n') ? newline : ''
-    return { from: lastImport.to, insert: `${prefix}import ${fullyQualifiedName};${newline}` }
-  }
-
-  const firstStaticImport = imports.find((line) => line.static)
-  if (firstStaticImport) {
-    return { from: firstStaticImport.from, insert: `import ${fullyQualifiedName};${newline}${newline}` }
-  }
-
-  const packageMatch = /^[\t ]*package[\t ]+[\w.]+[\t ]*;[^\S\r\n]*(?:\r?\n|$)/m.exec(source)
-  if (packageMatch) {
-    const afterPackage = packageMatch.index + packageMatch[0].length
-    let firstCode = afterPackage
-    while (firstCode < source.length && /\s/.test(source[firstCode])) firstCode += 1
-    const separator = source.slice(afterPackage, firstCode).includes('\n') ? '' : newline
-    return { from: firstCode, insert: `${separator}import ${fullyQualifiedName};${newline}${newline}` }
-  }
-  return { from: 0, insert: `import ${fullyQualifiedName};${newline}${newline}` }
-}
-
-export function addJavaTypeImports(source: string, typeNames: Iterable<string>): string {
-  const imports = [...new Set(typeNames)]
-    .map((typeName) => ({ typeName, fullyQualifiedName: JAVA_TYPE_IMPORTS[typeName] }))
-    .filter((candidate): candidate is { typeName: string; fullyQualifiedName: string } => Boolean(candidate.fullyQualifiedName))
-    .sort((left, right) => left.fullyQualifiedName.localeCompare(right.fullyQualifiedName))
-
-  let updated = source
-  for (const { typeName, fullyQualifiedName } of imports) {
-    if (localTypeDeclared(updated, typeName)) continue
-    const insertion = importInsertion(updated, fullyQualifiedName)
-    if (!insertion) continue
-    updated = `${updated.slice(0, insertion.from)}${insertion.insert}${updated.slice(insertion.from)}`
-  }
-  return updated
-}
-
-function applyJavaType(fullyQualifiedName: string): Completion['apply'] {
-  return (view: EditorView, completion: Completion, from: number, to: number) => {
-    const source = view.state.doc.toString()
-    const typeName = fullyQualifiedName.slice(fullyQualifiedName.lastIndexOf('.') + 1)
-    const maskedSelection = maskJavaCommentsAndLiterals(source).slice(from, to)
-    const selectionIsCode = maskedSelection === source.slice(from, to)
-    const insertion = selectionIsCode && !localTypeDeclared(source, typeName)
-      ? importInsertion(source, fullyQualifiedName)
-      : null
-    const changes = insertion
-      ? [{ from: insertion.from, insert: insertion.insert }, { from, to, insert: completion.label }]
-      : [{ from, to, insert: completion.label }]
-    const importOffset = insertion && insertion.from <= from ? insertion.insert.length : 0
-    view.dispatch({
-      changes,
-      selection: { anchor: from + completion.label.length + importOffset },
-      annotations: pickedCompletion.of(completion),
-      scrollIntoView: true,
-      userEvent: 'input.complete',
-    })
-  }
-}
-
-export type JavaPrintTemplateKind = 'sout' | 'soutv' | 'serr' | 'serrv'
-
-const JAVA_PRINT_TEMPLATE_KINDS = new Set<JavaPrintTemplateKind>(['sout', 'soutv', 'serr', 'serrv'])
-
-function isJavaPrintTemplateKind(value: string): value is JavaPrintTemplateKind {
-  return JAVA_PRINT_TEMPLATE_KINDS.has(value as JavaPrintTemplateKind)
-}
-
-function javaPrintVariable(source: string, position: number): string {
-  const symbols = collectJavaSymbols(source, position)
-  const visible = symbols
-    .filter((symbol) => symbol.scopeStart <= position
-      && position <= symbol.scopeEnd
-      && (symbol.kind === 'field' || symbol.declaredAt <= position))
-    .sort((left, right) => {
-      // A local or parameter is more useful to print than a field. Among
-      // equally useful symbols the latest declaration is the best default.
-      const leftKind = left.kind === 'field' ? 0 : 1
-      const rightKind = right.kind === 'field' ? 0 : 1
-      return rightKind - leftKind || right.declaredAt - left.declaredAt
-    })
-  return visible[0]?.name ?? 'value'
-}
-
-function javaPrintTemplateBody(
-  kind: JavaPrintTemplateKind,
-  variable: string,
-  includeSemicolon: boolean,
-): string {
-  const stream = kind.startsWith('sout') ? 'out' : 'err'
-  const suffix = includeSemicolon ? ';' : ''
-  if (!kind.endsWith('v')) {
-    return `System.${stream}.println(\${})${suffix}`
-  }
-
-  // The two occurrences share snippet field 1. CodeMirror selects the first
-  // field on activation, so the inferred variable can be replaced while the
-  // string label and the expression stay in sync.
-  const field = `\${1:${variable}}`
-  return `System.${stream}.println("${field} = " + ${field})${suffix}\${0}`
-}
-
-function followingJavaSemicolon(source: string, position: number): boolean {
-  return /^[\t ]*;/.test(source.slice(position))
-}
-
-function applyJavaPrintTemplate(
-  view: EditorView,
-  kind: JavaPrintTemplateKind,
-  from: number,
-  to: number,
-  completion: Completion | null,
-): void {
-  const source = view.state.doc.toString()
-  const variable = javaPrintVariable(source, to)
-  const body = javaPrintTemplateBody(kind, variable, !followingJavaSemicolon(source, to))
-  snippet(body)(view, completion, from, to)
-}
-
-function javaPrintCompletion(kind: JavaPrintTemplateKind): Completion {
-  const stream = kind.startsWith('sout') ? 'out' : 'err'
-  const detail = kind.endsWith('v')
-    ? `Prints a value to System.${stream}`
-    : `Prints a string to System.${stream}`
-  return {
-    label: kind,
-    type: 'snippet',
-    detail,
-    apply: (view, completion, from, to) => applyJavaPrintTemplate(view, kind, from, to, completion),
-  }
-}
-
-function javaPrintAbbreviation(source: string, position: number): { kind: JavaPrintTemplateKind, from: number } | null {
-  const before = source.slice(0, position)
-  const match = /(?:^|[^A-Za-z0-9_$])((?:soutv|serrv|sout|serr))$/.exec(before)
-  if (!match || !isJavaPrintTemplateKind(match[1])) {
-    return null
-  }
-  return { kind: match[1], from: position - match[1].length }
-}
-
-/** Expand a Java print live-template abbreviation at the current cursor. */
-export function expandJavaPrintTemplate(view: EditorView): boolean {
-  const { state } = view
-  if (state.selection.ranges.length !== 1 || !state.selection.main.empty) {
-    return false
-  }
-  const position = state.selection.main.head
-  const source = state.doc.toString()
-  const abbreviation = javaPrintAbbreviation(source, position)
-  if (!abbreviation) {
-    return false
-  }
-
-  // Keep abbreviations in comments and literals inert. Masking preserves
-  // source offsets, which lets the same range be passed to the snippet API.
-  const masked = maskJavaCommentsAndLiterals(source)
-  if (masked.slice(abbreviation.from, position) !== source.slice(abbreviation.from, position)) {
-    return false
-  }
-  if (/[A-Za-z0-9_$]/.test(source[position] ?? '')) {
-    return false
-  }
-
-  // Live templates produce a statement. Requiring the abbreviation to be the
-  // only code on its line prevents accidental expansion of `return sout` or a
-  // property-like expression while retaining normal indentation.
-  const lineStart = source.lastIndexOf('\n', abbreviation.from - 1) + 1
-  const linePrefix = source.slice(lineStart, abbreviation.from)
-  if (!/^[\t ]*$/.test(linePrefix)) {
-    return false
-  }
-
-  applyJavaPrintTemplate(view, abbreviation.kind, abbreviation.from, position, null)
-  return true
-}
-
 const JAVA_COMPLETIONS: Completion[] = [
   ...JAVA_KEYWORDS.map((label) => ({ label, type: 'keyword' as const })),
   ...JAVA_TYPES.map((label) => ({
@@ -347,6 +92,8 @@ const JAVA_COMPLETIONS: Completion[] = [
   javaPrintCompletion('soutv'),
   javaPrintCompletion('serr'),
   javaPrintCompletion('serrv'),
+  javaPrintCompletion('mod'),
+  javaTestCompletion(),
   snippetCompletion('new ArrayList<>()', 'ArrayList', 'new ArrayList<>()'),
   snippetCompletion('new HashMap<>()', 'HashMap', 'new HashMap<>()'),
   snippetCompletion('for (int i = 0; i < ...; i++)', 'loop', 'for (int ${i} = 0; ${i} < ${length}; ${i}++) {\n    ${}\n}'),
@@ -447,18 +194,6 @@ const CATALOG: Record<string, MethodSpec[]> = {
     ['read', ['buffer', 'offset', 'length']], ['readAllBytes'], ['readNBytes', ['length']],
     ['readNBytes', ['buffer', 'offset', 'length']], ['reset'], ['skip', ['count']], ['transferTo', ['out']],
   ]),
-}
-
-const TYPE_GROUPS: Record<string, string[]> = {
-  ArrayList: ['ArrayList', 'List', 'Collection', 'Iterable'],
-  LinkedList: ['LinkedList', 'List', 'Deque', 'Queue', 'Collection', 'Iterable'],
-  Stack: ['Stack', 'List', 'Collection', 'Iterable'],
-  HashMap: ['HashMap', 'Map'], LinkedHashMap: ['LinkedHashMap', 'HashMap', 'Map'], TreeMap: ['TreeMap', 'Map'],
-  HashSet: ['HashSet', 'Set', 'Collection', 'Iterable'], LinkedHashSet: ['LinkedHashSet', 'HashSet', 'Set', 'Collection', 'Iterable'],
-  TreeSet: ['TreeSet', 'Set', 'Collection', 'Iterable'],
-  ArrayDeque: ['ArrayDeque', 'Deque', 'Queue', 'Collection', 'Iterable'], PriorityQueue: ['PriorityQueue', 'Queue', 'Collection', 'Iterable'],
-  List: ['List', 'Collection', 'Iterable'], Set: ['Set', 'Collection', 'Iterable'], Queue: ['Queue', 'Collection', 'Iterable'],
-  Deque: ['Deque', 'Queue', 'Collection', 'Iterable'],
 }
 
 const STATIC_CATALOG: Record<string, MethodSpec[]> = {
@@ -594,563 +329,6 @@ function methodCompletion(spec: MethodSpec, type: Completion['type'] = 'method')
 
 function snippetCompletion(label: string, detail: string | undefined, body: string): Completion {
   return { label, type: 'snippet', detail, apply: snippet(body) }
-}
-
-function normalizeType(raw: string): string {
-  return raw
-    .replace(/@\w+(?:\([^)]*\))?\s*/g, '')
-    .replace(/\b(?:final|volatile|transient)\s+/g, '')
-    .replace(/\s+/g, '')
-    .replace(/\.\.\./g, '[]')
-}
-
-function baseType(raw: string): string {
-  const normalized = normalizeType(raw).replace(/\[\]/g, '')
-  const generic = normalized.indexOf('<')
-  return (generic >= 0 ? normalized.slice(0, generic) : normalized).replace(/^\?extends/, '')
-}
-
-function inferBases(typeText: string, initializer: string | undefined): string[] {
-  const normalized = normalizeType(typeText)
-  const declared = baseType(normalized)
-  const bases = new Set<string>()
-  if (declared && declared !== 'var') {
-    bases.add(declared)
-  }
-  if (initializer) {
-    const newMatch = /\bnew\s+([A-Za-z_$][\w$]*(?:\s*<[^;{}()]*>)?)/.exec(initializer)
-    if (newMatch) {
-      bases.add(baseType(newMatch[1]))
-    }
-    if (/^\s*"(?:[^"\\]|\\.)*"/.test(initializer) || /^\s*'/.test(initializer)) bases.add('String')
-    if (/\b(?:Arrays\s*\.\s*asList|List\s*\.\s*of)\s*\(/.test(initializer)) bases.add('List')
-    if (/\b(?:Set\s*\.\s*of)\s*\(/.test(initializer)) bases.add('Set')
-    if (/\bMap\s*\.\s*of(?:Entries)?\s*\(/.test(initializer)) bases.add('Map')
-    if (/^\s*new\s+[A-Za-z_$][\w$]*\s*\[/.test(initializer)) bases.add('array')
-  }
-  if (normalized.endsWith('[]')) bases.add('array')
-  const expanded = new Set<string>()
-  for (const base of bases) {
-    for (const group of TYPE_GROUPS[base] ?? [base]) expanded.add(group)
-  }
-  return [...expanded]
-}
-
-function matchingBraces(source: string): { openToClose: Map<number, number>; closeToOpen: Map<number, number> } {
-  const openToClose = new Map<number, number>()
-  const closeToOpen = new Map<number, number>()
-  const stack: number[] = []
-  let quote = ''
-  let escaped = false
-  let lineComment = false
-  let blockComment = false
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i]
-    const next = source[i + 1]
-    if (lineComment) {
-      if (char === '\n') lineComment = false
-      continue
-    }
-    if (blockComment) {
-      if (char === '*' && next === '/') {
-        blockComment = false
-        i += 1
-      }
-      continue
-    }
-    if (quote) {
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === quote) quote = ''
-      continue
-    }
-    if (char === '/' && next === '/') {
-      lineComment = true
-      i += 1
-      continue
-    }
-    if (char === '/' && next === '*') {
-      blockComment = true
-      i += 1
-      continue
-    }
-    if (char === '"' || char === '\'') {
-      quote = char
-      continue
-    }
-    if (char === '{') stack.push(i)
-    if (char === '}') {
-      const open = stack.pop()
-      if (open !== undefined) {
-        openToClose.set(open, i)
-        closeToOpen.set(i, open)
-      }
-    }
-  }
-  return { openToClose, closeToOpen }
-}
-
-function enclosingScope(position: number, braces: ReturnType<typeof matchingBraces>): { start: number; end: number; depth: number } {
-  const containing = [...braces.openToClose.entries()]
-    .filter(([open, close]) => open < position && position < close)
-  if (containing.length === 0) return { start: 0, end: Number.MAX_SAFE_INTEGER, depth: 0 }
-  // The map is populated as closing braces are found, so insertion order is
-  // innermost-first. Select the narrowest scope explicitly and count all
-  // containing blocks for reliable field-vs-local classification.
-  const [open, close] = containing.reduce((best, current) => {
-    const bestWidth = best[1] - best[0]
-    const currentWidth = current[1] - current[0]
-    return currentWidth < bestWidth ? current : best
-  })
-  return { start: open + 1, end: close, depth: containing.length }
-}
-
-function splitTopLevel(value: string): string[] {
-  const result: string[] = []
-  let start = 0
-  let angle = 0
-  let paren = 0
-  let bracket = 0
-  let quote = ''
-  let escaped = false
-  for (let i = 0; i < value.length; i += 1) {
-    const char = value[i]
-    if (quote) {
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === quote) quote = ''
-      continue
-    }
-    if (char === '"' || char === '\'') {
-      quote = char
-      continue
-    }
-    if (char === '<') angle += 1
-    else if (char === '>' && angle > 0) angle -= 1
-    else if (char === '(') paren += 1
-    else if (char === ')' && paren > 0) paren -= 1
-    else if (char === '[') bracket += 1
-    else if (char === ']' && bracket > 0) bracket -= 1
-    else if (char === ',' && angle === 0 && paren === 0 && bracket === 0) {
-      result.push(value.slice(start, i).trim())
-      start = i + 1
-    }
-  }
-  result.push(value.slice(start).trim())
-  return result.filter(Boolean)
-}
-
-function parameterNameAndType(parameter: string): { name: string; type: string } | null {
-  const clean = parameter
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/\/\/.*$/g, ' ')
-    .replace(/@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*/g, '')
-    .replace(/\bfinal\s+/g, '')
-    .trim()
-  const match = /^(.*?)\s+([A-Za-z_$][\w$]*)$/.exec(clean)
-  if (!match) return null
-  if (/^(?:if|while|switch|catch|for)$/.test(match[1].trim())) return null
-  return { type: match[1].trim(), name: match[2] }
-}
-
-function extractParameters(source: string, position: number, braces: ReturnType<typeof matchingBraces>): JavaSymbol[] {
-  const result: JavaSymbol[] = []
-  const methodBody = /\(([^(){}]*)\)\s*(?:throws\s+[^{}]+)?\{/g
-  let match: RegExpExecArray | null
-  while ((match = methodBody.exec(source))) {
-    const openBrace = methodBody.lastIndex - 1
-    const closeBrace = braces.openToClose.get(openBrace) ?? source.length
-    if (!(openBrace < position && position < closeBrace)) continue
-    const parameters = splitTopLevel(match[1])
-    for (const parameter of parameters) {
-      const parsed = parameterNameAndType(parameter)
-      if (!parsed) continue
-      const nameStart = match.index + match[0].indexOf(parsed.name)
-      result.push({
-        name: parsed.name,
-        bases: inferBases(parsed.type, undefined),
-        kind: 'parameter',
-        declaredAt: nameStart,
-        scopeStart: openBrace + 1,
-        scopeEnd: closeBrace,
-      })
-    }
-  }
-  return result
-}
-
-function extractDeclarations(source: string, position: number, braces: ReturnType<typeof matchingBraces>): JavaSymbol[] {
-  const result: JavaSymbol[] = []
-  // A declaration starts after a statement/block boundary.  Keeping the
-  // boundary in the expression avoids treating method calls as declarations.
-  const declaration = /(?:^|[;{}])\s*(?:(?:public|private|protected|static|final|volatile|transient|synchronized)\s+)*([A-Za-z_$][\w$]*(?:\s*<[^;{}=]*?>)?\s*(?:\[\s*\])*)\s+([^;{}]+);/gm
-  // Primitive names are legal declaration types even though Java classifies
-  // them as keywords.  Only these statement/control-flow words invalidate the
-  // first token of a declaration match.
-  const reserved = new Set(['return', 'throw', 'new', 'case', 'default', 'if', 'for', 'while', 'switch', 'do', 'else', 'try', 'catch'])
-  let match: RegExpExecArray | null
-  while ((match = declaration.exec(source))) {
-    const typeText = match[1].trim()
-    const typeBase = baseType(typeText)
-    if (reserved.has(typeBase) || typeBase === 'void') continue
-    const declarators = splitTopLevel(match[2])
-    const boundaryOffset = match[0].indexOf(typeText)
-    const declarationStart = match.index + Math.max(0, boundaryOffset)
-    const scope = enclosingScope(declarationStart, braces)
-    for (const declarator of declarators) {
-      const variable = /^([A-Za-z_$][\w$]*)(?:\s*=\s*([\s\S]*))?$/.exec(declarator)
-      if (!variable) continue
-      const declaredAt = match.index + match[0].indexOf(variable[1], boundaryOffset)
-      const isField = scope.depth <= 1
-      // Fields are visible throughout the class, including from methods
-      // written before the field declaration. Local variables still obey the
-      // normal declaration-before-use rule.
-      if (declaredAt > position && !isField) continue
-      result.push({
-        name: variable[1],
-        bases: inferBases(typeText, variable[2]),
-        kind: isField ? 'field' : 'local',
-        declaredAt,
-        scopeStart: scope.start,
-        scopeEnd: scope.end,
-      })
-    }
-  }
-  // `for (int i = 0; ...` has a parenthesis boundary rather than a statement
-  // boundary.  It is common enough in LeetCode solutions to handle separately.
-  const forDeclaration = /\bfor\s*\(\s*(?:final\s+)?([A-Za-z_$][\w$]*(?:\s*<[^;(){}]*?>)?\s*(?:\[\s*\])?)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*)/g
-  while ((match = forDeclaration.exec(source))) {
-    const declaredAt = match.index + match[0].lastIndexOf(match[2])
-    if (declaredAt > position) continue
-    const scope = enclosingScope(match.index, braces)
-    result.push({
-      name: match[2], bases: inferBases(match[1], match[3]), kind: 'local', declaredAt,
-      scopeStart: scope.start, scopeEnd: scope.end,
-    })
-  }
-  return result
-}
-
-export function collectJavaSymbols(source: string, position = source.length): JavaSymbol[] {
-  const braces = matchingBraces(source)
-  return [...extractDeclarations(source, position, braces), ...extractParameters(source, position, braces)]
-}
-
-/**
- * Keep source offsets stable while hiding comments and literals from the
- * lightweight Java scanners below.  This prevents a string such as
- * `"helper() {"` from looking like a declaration or a clickable call.
- */
-export function maskJavaCommentsAndLiterals(source: string): string {
-  // `split('')` intentionally keeps UTF-16 code-unit indexing. CodeMirror
-  // positions are UTF-16 offsets, while spreading a string would collapse
-  // astral characters and shift every later source range.
-  const chars = source.split('')
-  let state: 'normal' | 'lineComment' | 'blockComment' | 'string' | 'char' | 'textBlock' = 'normal'
-  for (let index = 0; index < chars.length; index += 1) {
-    const current = chars[index]
-    const next = chars[index + 1]
-    if (state === 'lineComment') {
-      if (current === '\n' || current === '\r') {
-        state = 'normal'
-      } else {
-        chars[index] = ' '
-      }
-      continue
-    }
-    if (state === 'blockComment') {
-      if (current === '*' && next === '/') {
-        chars[index] = ' '
-        chars[index + 1] = ' '
-        index += 1
-        state = 'normal'
-      } else if (current !== '\n' && current !== '\r') {
-        chars[index] = ' '
-      }
-      continue
-    }
-    if (state === 'string' || state === 'char') {
-      if (current === '\\') {
-        chars[index] = ' '
-        if (index + 1 < chars.length && chars[index + 1] !== '\n' && chars[index + 1] !== '\r') {
-          chars[index + 1] = ' '
-          index += 1
-        }
-      } else if ((state === 'string' && current === '"') || (state === 'char' && current === "'")) {
-        chars[index] = ' '
-        state = 'normal'
-      } else if (current !== '\n' && current !== '\r') {
-        chars[index] = ' '
-      }
-      continue
-    }
-    if (state === 'textBlock') {
-      if (current === '\\') {
-        chars[index] = ' '
-        if (index + 1 < chars.length && chars[index + 1] !== '\n' && chars[index + 1] !== '\r') {
-          chars[index + 1] = ' '
-          index += 1
-        }
-      } else if (current === '"' && next === '"' && chars[index + 2] === '"') {
-        chars[index] = ' '
-        chars[index + 1] = ' '
-        chars[index + 2] = ' '
-        index += 2
-        state = 'normal'
-      } else if (current !== '\n' && current !== '\r') {
-        chars[index] = ' '
-      }
-      continue
-    }
-    if (current === '/' && next === '/') {
-      chars[index] = ' '
-      chars[index + 1] = ' '
-      index += 1
-      state = 'lineComment'
-    } else if (current === '/' && next === '*') {
-      chars[index] = ' '
-      chars[index + 1] = ' '
-      index += 1
-      state = 'blockComment'
-    } else if (current === '"' && next === '"' && chars[index + 2] === '"') {
-      // Keep one non-whitespace placeholder so a literal counts as an
-      // argument even when its contents are masked.
-      chars[index] = '\u0001'
-      chars[index + 1] = ' '
-      chars[index + 2] = ' '
-      index += 2
-      state = 'textBlock'
-    } else if (current === '"') {
-      chars[index] = '\u0001'
-      state = 'string'
-    } else if (current === "'") {
-      chars[index] = '\u0001'
-      state = 'char'
-    }
-  }
-  return chars.join('')
-}
-
-function javaClassNames(maskedSource: string): Set<string> {
-  const names = new Set<string>()
-  const classPattern = /\b(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)/g
-  let match: RegExpExecArray | null
-  while ((match = classPattern.exec(maskedSource))) {
-    names.add(match[1])
-  }
-  return names
-}
-
-function methodHasReturnType(match: RegExpExecArray, nameStartInMatch: number): boolean {
-  let prefix = match[0].slice(0, nameStartInMatch)
-  const boundary = Math.max(prefix.lastIndexOf('{'), prefix.lastIndexOf('}'), prefix.lastIndexOf(';'))
-  if (boundary >= 0) {
-    prefix = prefix.slice(boundary + 1)
-  }
-  const normalized = prefix
-    .replace(/(?:@(?:[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*(?:\([^)]*\))?\s*)+/g, ' ')
-    .replace(/\b(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\b/g, ' ')
-    .replace(/<[^<>]*>/g, ' ')
-    .trim()
-  return normalized.length > 0
-}
-
-export function collectJavaMethods(source: string): JavaMethod[] {
-  const maskedSource = maskJavaCommentsAndLiterals(source)
-  const classNames = javaClassNames(maskedSource)
-  const result: JavaMethod[] = []
-  const method = /(?:^|[;{}])\s*(?:(?:@(?:[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*(?:\([^)]*\))?\s*)+)?(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>{}]+>\s*)?(?:(?:[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)(?:\s*<[^>{}]*>)?\s*(?:\[\s*\])*\s+)?([A-Za-z_$][\w$]*)\s*\(([^(){}]*)\)\s*(?:throws\s+[^{}]+)?\{/gm
-  let match: RegExpExecArray | null
-  while ((match = method.exec(maskedSource))) {
-    const name = match[1]
-    if (/^(?:if|for|while|switch|catch|try|synchronized)$/.test(name)) continue
-    // Constructors have the class name but no return type.  They are not
-    // method definitions for the editor's same-file navigation feature.
-    const signatureOpenParen = match[0].lastIndexOf('(')
-    const nameStartInMatch = match[0].lastIndexOf(name, signatureOpenParen)
-    const hasReturnType = methodHasReturnType(match, nameStartInMatch)
-    if (!hasReturnType && classNames.has(name)) continue
-    const nameStart = match.index + nameStartInMatch
-    const parameters = splitTopLevel(match[2]).map(parameterNameAndType).filter((value): value is { name: string; type: string } => value !== null).map((value) => value.name)
-    result.push({ name, parameters, declaredAt: match.index, nameStart, nameEnd: nameStart + name.length })
-  }
-  return result
-}
-
-/** Return the Java identifier under a source position, if it is code. */
-export function javaIdentifierAt(source: string, position: number): JavaIdentifier | null {
-  const maskedSource = maskJavaCommentsAndLiterals(source)
-  let cursor = Math.max(0, Math.min(Math.trunc(position), source.length))
-  if (cursor === source.length || !/[A-Za-z0-9_$]/.test(maskedSource[cursor] ?? '')) {
-    cursor -= 1
-  }
-  if (cursor < 0 || !/[A-Za-z_$]/.test(maskedSource[cursor] ?? '')) {
-    return null
-  }
-  let from = cursor
-  let to = cursor + 1
-  while (from > 0 && /[A-Za-z0-9_$]/.test(maskedSource[from - 1])) from -= 1
-  while (to < maskedSource.length && /[A-Za-z0-9_$]/.test(maskedSource[to])) to += 1
-  const name = source.slice(from, to)
-  if (!name || maskedSource.slice(from, to) !== name) {
-    return null
-  }
-  return { name, from, to }
-}
-
-function previousIdentifier(maskedSource: string, from: number): string | null {
-  let cursor = from - 1
-  while (cursor >= 0 && /\s/.test(maskedSource[cursor])) cursor -= 1
-  const end = cursor + 1
-  while (cursor >= 0 && /[A-Za-z0-9_$]/.test(maskedSource[cursor])) cursor -= 1
-  const start = cursor + 1
-  return start < end ? maskedSource.slice(start, end) : null
-}
-
-function callOpenParen(maskedSource: string, end: number): number | null {
-  let cursor = end
-  while (cursor < maskedSource.length && /\s/.test(maskedSource[cursor])) cursor += 1
-  return maskedSource[cursor] === '(' ? cursor : null
-}
-
-function isGenericAngleOpen(maskedSource: string, index: number): boolean {
-  let previous = index - 1
-  while (previous >= 0 && /\s/.test(maskedSource[previous])) previous -= 1
-  let next = index + 1
-  while (next < maskedSource.length && /\s/.test(maskedSource[next])) next += 1
-  if (previous < 0 || next >= maskedSource.length) return false
-  const before = maskedSource.slice(0, index)
-  const explicitTypeArguments = /\.\s*$/.test(before)
-  if (!explicitTypeArguments && !/[A-Za-z0-9_$>\]]/.test(maskedSource[previous])) return false
-  if (!/[A-Za-z0-9_$?@]/.test(maskedSource[next])) return false
-
-  let previousStart = previous
-  while (previousStart >= 0 && /[A-Za-z0-9_$]/.test(maskedSource[previousStart])) previousStart -= 1
-  const previousToken = maskedSource.slice(previousStart + 1, previous + 1)
-  const typeName = /^[A-Z_$]/.test(previousToken)
-  const constructedType = /\bnew\s+[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*$/.test(before)
-  if (!explicitTypeArguments && !typeName && !constructedType) return false
-
-  // A comparison (`left < right`) has no closing angle before the current
-  // call's argument boundary. Generic types do, including nested `>>`.
-  let depth = 1
-  let nestedParen = 0
-  for (let cursor = next; cursor < maskedSource.length; cursor += 1) {
-    const current = maskedSource[cursor]
-    if (current === '<') {
-      depth += 1
-    } else if (current === '>') {
-      depth -= 1
-      if (depth === 0) {
-        if (explicitTypeArguments || constructedType) return true
-        let after = cursor + 1
-        while (after < maskedSource.length && /\s/.test(maskedSource[after])) after += 1
-        return after >= maskedSource.length || /[,)\]}.(]/.test(maskedSource[after] ?? '')
-      }
-    } else if (current === '(') {
-      nestedParen += 1
-    } else if (current === ')') {
-      if (nestedParen > 0) {
-        nestedParen -= 1
-      } else {
-        return false
-      }
-    } else if (depth === 1 && current === ';') {
-      return false
-    }
-  }
-  return false
-}
-
-function callArgumentCount(maskedSource: string, openParen: number): number | null {
-  let paren = 0
-  let bracket = 0
-  let brace = 0
-  let angle = 0
-  let commas = 0
-  let hasValue = false
-  for (let index = openParen + 1; index < maskedSource.length; index += 1) {
-    const current = maskedSource[index]
-    if (current === '<' && isGenericAngleOpen(maskedSource, index)) {
-      angle += 1
-    } else if (current === '>' && angle > 0) {
-      angle -= 1
-    } else if (current === '(') {
-      paren += 1
-      hasValue = true
-    } else if (current === ')') {
-      if (paren > 0) {
-        paren -= 1
-        hasValue = true
-      } else if (bracket === 0 && brace === 0 && angle === 0) {
-        return hasValue ? commas + 1 : commas
-      }
-    } else if (current === '[') {
-      bracket += 1
-      hasValue = true
-    } else if (current === ']') {
-      bracket = Math.max(0, bracket - 1)
-      hasValue = true
-    } else if (current === '{') {
-      brace += 1
-      hasValue = true
-    } else if (current === '}') {
-      brace = Math.max(0, brace - 1)
-      hasValue = true
-    } else if (current === ',' && paren === 0 && bracket === 0 && brace === 0 && angle === 0) {
-      commas += 1
-      hasValue = false
-    } else if (!/\s/.test(current)) {
-      hasValue = true
-    }
-  }
-  return null
-}
-
-/**
- * Resolve a same-file method call to the exact declaration name range.
- *
- * This deliberately stays conservative: only unqualified/`this.` calls are
- * considered, constructors and control-flow keywords are ignored, and an
- * unresolved overload falls back to the first declaration in source order.
- */
-export function resolveJavaDefinition(source: string, position: number): JavaDefinition | null {
-  const identifier = javaIdentifierAt(source, position)
-  if (!identifier) return null
-  const methods = collectJavaMethods(source)
-  const declaration = methods.find((method) => identifier.from === method.nameStart && identifier.to === method.nameEnd)
-  if (declaration) {
-    return {
-      name: declaration.name,
-      from: declaration.nameStart,
-      to: declaration.nameEnd,
-      parameters: declaration.parameters,
-      declaredAt: declaration.declaredAt,
-    }
-  }
-
-  const maskedSource = maskJavaCommentsAndLiterals(source)
-  const openParen = callOpenParen(maskedSource, identifier.to)
-  if (openParen === null) return null
-  if (previousIdentifier(maskedSource, identifier.from) === 'new') return null
-  const beforeIdentifier = maskedSource.slice(0, identifier.from)
-  if (/\.\s*$/.test(beforeIdentifier) && !/(?:^|[^\w$.])this\s*\.\s*$/.test(beforeIdentifier)) {
-    return null
-  }
-
-  const candidates = methods.filter((method) => method.name === identifier.name)
-  if (candidates.length === 0) return null
-  const argumentCount = callArgumentCount(maskedSource, openParen)
-  const selected = argumentCount === null
-    ? candidates[0]
-    : candidates.find((method) => method.parameters.length === argumentCount) ?? candidates[0]
-  return {
-    name: selected.name,
-    from: selected.nameStart,
-    to: selected.nameEnd,
-    parameters: selected.parameters,
-    declaredAt: selected.declaredAt,
-  }
 }
 
 function findDotContext(source: string, position: number): DotContext | null {
@@ -1322,33 +500,48 @@ function uniqueOptions(options: Completion[]): Completion[] {
   })
 }
 
+function javaCompletionValidFor(
+  text: string,
+  _from: number,
+  _to: number,
+  state: CompletionContext['state'],
+): boolean {
+  return /^[\w$]*$/.test(text) && !isJavaIterVariableNameField(state)
+}
+
 export function javaCompletions(context: CompletionContext): CompletionResult | null {
   const source = context.state.doc.toString()
   const position = context.pos
+  if (isJavaIterVariableNameField(context.state, position)) return null
   const dot = findDotContext(source, position)
-  const symbols = collectJavaSymbols(source, position)
-  const methods = collectJavaMethods(source)
+  const analysis = analyzeJavaSource(source, position)
+  const { symbols, methods } = analysis
   if (dot) {
     if (dot.receiver === 'this') {
       return {
         from: dot.from,
         options: thisMemberCompletions(symbols, methods),
-        validFor: /^[\w$]*$/,
+        validFor: javaCompletionValidFor,
       }
     }
     const resolution = receiverResolution(dot.receiver, position, symbols)
     return {
       from: dot.from,
       options: methodOptions(resolution, dot.assertJ),
-      validFor: /^[\w$]*$/,
+      validFor: javaCompletionValidFor,
     }
   }
   const word = context.matchBefore(/[\w$]*/)
   if (!word || (word.from === word.to && !context.explicit)) return null
   return {
     from: word.from,
-    options: uniqueOptions([...symbolCompletions(symbols), ...methodCompletions(methods), ...JAVA_COMPLETIONS]),
-    validFor: /^[\w$]*$/,
+    options: uniqueOptions([
+      ...symbolCompletions(symbols),
+      ...methodCompletions(methods),
+      ...javaIterCompletions(source, position, analysis),
+      ...JAVA_COMPLETIONS,
+    ]),
+    validFor: javaCompletionValidFor,
   }
 }
 

@@ -51,12 +51,18 @@ describe('platform primary binding', () => {
     expect(primaryShortcut(entryFor('Insert JavaDoc'), true)).toBe('⇧⌘J')
     expect(primaryShortcut(entryFor('Complete current statement'), false)).toBe('Alt+Shift+Enter')
     expect(primaryShortcut(entryFor('Complete current statement'), true)).toBe('⇧⌘Enter')
+    expect(primaryShortcut(entryFor('Show code actions'), false)).toBe('Alt+Enter')
+    expect(primaryShortcut(entryFor('Show code actions'), true)).toBe('⌘Enter')
     expect(primaryShortcut(entryFor('Move to line end'), false)).toBe('Alt+ArrowRight')
     expect(primaryShortcut(entryFor('Move to line end'), true)).toBe('⌘ArrowRight')
     expect(primaryShortcut(entryFor('Extract method'), false)).toBe('Ctrl+Alt+M')
     expect(primaryShortcut(entryFor('Extract method'), true)).toBe('⌘⌥M')
+    expect(primaryShortcut(entryFor('Rename method'), false)).toBe('Shift+F6')
+    expect(primaryShortcut(entryFor('Rename method'), true)).toBe('⇧F6')
     expect(primaryShortcut(entryFor('Expand live template / next template field'), false)).toBe('Tab')
     expect(primaryShortcut(entryFor('Expand live template / next template field'), true)).toBe('Tab')
+    expect(primaryShortcut(entryFor('Finish live template'), false)).toBe('Enter')
+    expect(primaryShortcut(entryFor('Finish live template'), true)).toBe('Enter')
   })
 
   it('shows only the app binding for the selected operating system', () => {
@@ -74,6 +80,7 @@ describe('platform primary binding', () => {
     expect(primaryShortcut(entryFor('Run all tests'), true)).toBe('⌃R')
     expect(primaryShortcut(entryFor('Run test at cursor'), false)).toBe('Ctrl+Shift+R')
     expect(primaryShortcut(entryFor('Run test at cursor'), true)).toBe('⌃⇧R')
+    expect(shortcutBindings('rename-method')).toEqual(['Shift-F6'])
   })
 })
 
@@ -92,7 +99,7 @@ describe('shortcut table', () => {
       for (const entry of section.entries) {
         const modBinding = entry.bindings.find((binding) => binding.includes('Mod-'))
         if (!modBinding || modBinding.includes('Mod-Alt-')) {
-          // Mod-Alt-* IntelliJ chords are intentionally identical on both
+          // Mod-Alt-* chords are intentionally identical on both
           // platforms, so adding a second Alt modifier would be ambiguous.
           continue
         }
@@ -108,6 +115,8 @@ describe('shortcut table', () => {
     expect(shortcutLabel('run-test-at-cursor', true)).toBe('⌃⇧R')
     expect(shortcutLabel('run-test', false)).toBe('Ctrl+R')
     expect(shortcutLabel('complete-statement', false)).toBe('Alt+Shift+Enter')
+    expect(shortcutLabel('show-intentions', false)).toBe('Alt+Enter')
+    expect(shortcutLabel('show-intentions', true)).toBe('⌘Enter')
     expect(shortcutLabel('move-to-line-end', true)).toBe('⌘ArrowRight')
     expect(shortcutLabel('move-line-up', false)).toBe('Alt+Shift+ArrowUp')
     expect(shortcutLabel('move-line-down', true)).toBe('⇧⌘ArrowDown')
@@ -117,7 +126,10 @@ describe('shortcut table', () => {
     expect(shortcutLabel('open-settings', true)).toBe('⌘,')
     expect(shortcutLabel('extract-method', false)).toBe('Ctrl+Alt+M')
     expect(shortcutLabel('extract-method', true)).toBe('⌘⌥M')
+    expect(shortcutLabel('rename-method', false)).toBe('Shift+F6')
+    expect(shortcutLabel('rename-method', true)).toBe('⇧F6')
     expect(shortcutLabel('expand-template', false)).toBe('Tab')
+    expect(shortcutLabel('finish-template', false)).toBe('Enter')
     expect(() => shortcutLabel('not-a-shortcut', false)).toThrow(/Unknown shortcut id/)
   })
 

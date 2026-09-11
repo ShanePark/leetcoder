@@ -63,11 +63,18 @@ pub fn list_problem_files(repo_path: String) -> Result<ProblemFileList, String> 
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn read_problem_file(repo_path: String, path: String) -> Result<ProblemFileContent, String> {
-    repository::read_problem_file(ProblemFileArgs {
-        project_root: repo_path,
-        relative_path: path,
+pub async fn read_problem_file(
+    repo_path: String,
+    path: String,
+) -> Result<ProblemFileContent, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        repository::read_problem_file(ProblemFileArgs {
+            project_root: repo_path,
+            relative_path: path,
+        })
     })
+    .await
+    .map_err(|error| format!("Problem file read worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -149,17 +156,21 @@ pub fn get_git_diff(repo_path: String, paths: Vec<String>) -> Result<String, Str
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn commit_git(
+pub async fn commit_git(
     repo_path: String,
     paths: Vec<String>,
     message: String,
 ) -> Result<GitCommitResult, String> {
-    git::commit(&repo_path, paths, message)
+    tauri::async_runtime::spawn_blocking(move || git::commit(&repo_path, paths, message))
+        .await
+        .map_err(|error| format!("Git commit worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn push_git(repo_path: String) -> Result<GitPushResult, String> {
-    git::push(&repo_path)
+pub async fn push_git(repo_path: String) -> Result<GitPushResult, String> {
+    tauri::async_runtime::spawn_blocking(move || git::push(&repo_path))
+        .await
+        .map_err(|error| format!("Git push worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

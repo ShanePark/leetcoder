@@ -133,13 +133,14 @@ pub(crate) fn current_status() -> UpdateStatus {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        let latest_commit = if is_supported() {
+        let supported = is_supported();
+        let latest_commit = if supported {
             git_head(Path::new(EMBEDDED_SOURCE_ROOT)).unwrap_or_default()
         } else {
             String::new()
         };
         UpdateStatus {
-            supported: is_supported(),
+            supported,
             available: commits_differ(&current_commit, &latest_commit),
             current_commit,
             latest_commit,

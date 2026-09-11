@@ -27,6 +27,13 @@ export interface JavaMethodExtractionFailure {
 
 export type JavaMethodExtractionResult = JavaMethodExtractionPlan | JavaMethodExtractionFailure
 
+/** A source range inferred from an empty editor selection. */
+export interface JavaRefactorSelection {
+  from: number
+  to: number
+  kind: 'expression' | 'statement'
+}
+
 type JavaSyntaxNode = ReturnType<typeof javaLanguage.parser.parse>['topNode']
 
 interface JavaMethodInfo {
@@ -353,6 +360,98 @@ function statementCandidate(node: JavaSyntaxNode): boolean {
   return STATEMENT_NODES.has(node.name) && !node.type.isError
 }
 
+function cursorRelation(
+  source: string,
+  node: JavaSyntaxNode,
+  position: number,
+): 'inside' | 'after' | null {
+  if (position >= node.from && position <= node.to) return 'inside'
+  if (position < node.to) return null
+  const suffix = source.slice(node.to, position)
+  // The caret commonly sits just after the closing parenthesis, the
+  // statement semicolon, or spaces following it. Keep this bounded to one
+  // line so a blank line cannot select the preceding statement by accident.
+  if (/^[ \t]*(?:;[ \t]*)?$/.test(suffix)) return 'after'
+  return null
+}
+
+function expressionSelectable(node: JavaSyntaxNode): boolean {
+  if (!EXPRESSION_NODES.has(node.name) || node.type.isError) return false
+  if (node.name !== 'Identifier') return true
+  return !(node.parent
+    && (node.parent.name === 'FieldAccess'
+      || node.parent.name === 'MethodInvocation'
+      || node.parent.name === 'MethodName'))
+}
+
+function chooseRefactorNode(
+  source: string,
+  nodes: readonly JavaSyntaxNode[],
+  position: number,
+  predicate: (node: JavaSyntaxNode) => boolean,
+): JavaSyntaxNode | null {
+  const candidates = nodes
+    .filter(predicate)
+    .map((node) => ({ node, relation: cursorRelation(source, node, position) }))
+    .filter((candidate): candidate is { node: JavaSyntaxNode; relation: 'inside' | 'after' } => (
+      candidate.relation !== null
+    ))
+  if (candidates.length === 0) return null
+
+  // At the end of a call, prefer the expression whose end is nearest the
+  // caret and then the widest expression ending there. This is what keeps a
+  // closing `)` from resolving to the final argument literal.
+  const adjacent = candidates.filter((candidate) => candidate.relation === 'after'
+    || candidate.node.to <= position)
+  if (adjacent.length > 0) {
+    return [...adjacent].sort((left, right) => (
+      right.node.to - left.node.to
+        || (right.node.to - right.node.from) - (left.node.to - left.node.from)
+    ))[0].node
+  }
+
+  // While the caret is inside an expression, use the most specific node. A
+  // call or compound expression wins over a method/field identifier that
+  // happens to start at the same offset.
+  return [...candidates].sort((left, right) => {
+    const width = (left.node.to - left.node.from) - (right.node.to - right.node.from)
+    if (width !== 0) return width
+    if (left.node.name === 'Identifier' && right.node.name !== 'Identifier') return 1
+    if (right.node.name === 'Identifier' && left.node.name !== 'Identifier') return -1
+    return left.node.from - right.node.from
+  })[0].node
+}
+
+/**
+ * Infer the expression or statement under a Java editor caret.
+ *
+ * `expression` is used by Introduce Variable and is tried first by Extract
+ * Method. `statement` lets the latter fall back to a complete statement when
+ * the expression cannot be extracted safely.
+ */
+export function findJavaRefactorSelection(
+  source: string,
+  position: number,
+  preference: 'expression' | 'statement' = 'expression',
+): JavaRefactorSelection | null {
+  if (!Number.isInteger(position) || position < 0 || position > source.length) return null
+  const tree = javaLanguage.parser.parse(source).topNode
+  if (preference === 'expression') {
+    const expression = chooseRefactorNode(
+      source,
+      descendants(tree, expressionSelectable),
+      position,
+      expressionSelectable,
+    )
+    return expression ? { from: expression.from, to: expression.to, kind: 'expression' } : null
+  }
+  const statements = descendants(tree, (node) => (
+    statementCandidate(node) && node.name !== 'Block' && node.name !== 'EmptyStatement'
+  ))
+  const statement = chooseRefactorNode(source, statements, position, statementCandidate)
+  return statement ? { from: statement.from, to: statement.to, kind: 'statement' } : null
+}
+
 function selectedStatements(
   source: string,
   method: JavaMethodInfo,
@@ -548,16 +647,30 @@ function methodInvocationReceiverText(source: string, node: JavaSyntaxNode): str
 function knownMethodReturnType(
   source: string,
   node: JavaSyntaxNode,
+  declarations: readonly JavaDeclaration[],
   methods: readonly JavaMethodInfo[],
   receiverType: string | null,
 ): string | null {
   const name = methodInvocationName(source, node)
   if (!name) return null
+  const receiverText = methodInvocationReceiverText(source, node)
   const declared = [...new Set(methods
     .filter((method) => method.name === name)
     .map((method) => method.returnType)
     .filter((type): type is string => Boolean(type)))]
-  if (declared.length === 1 && methodInvocationReceiverText(source, node) === '') return declared[0]
+  if (declared.length === 1 && receiverText === '') return declared[0]
+  if (receiverText === 'Math') {
+    const argumentList = node.getChild('ArgumentList')
+    const arguments_ = argumentList
+      ? expressionChildren(argumentList).filter((candidate) => EXPRESSION_NODES.has(candidate.name))
+      : []
+    const argumentTypes = arguments_.map((argument) => (
+      inferJavaExpressionType(source, argument, declarations, methods)
+    ))
+    if (name === 'max' || name === 'min') {
+      return promotedNumericType(argumentTypes)
+    }
+  }
   const base = receiverType?.replace(/\s*<[\s\S]*>\s*$/, '').trim()
   if (base === 'String') {
     if (name === 'length' || name === 'hashCode') return 'int'
@@ -622,7 +735,7 @@ function inferJavaExpressionType(
   if (node.name === 'MethodInvocation') {
     const receiver = expressionChildren(node).find((candidate) => candidate.name !== 'ArgumentList')
     const receiverType = receiver ? inferJavaExpressionType(source, receiver, declarations, methods) : null
-    return knownMethodReturnType(source, node, methods, receiverType)
+    return knownMethodReturnType(source, node, declarations, methods, receiverType)
   }
   if (node.name === 'UnaryExpression' || node.name === 'UpdateExpression') {
     const child = expressionChildren(node).find((candidate) => EXPRESSION_NODES.has(candidate.name))
@@ -849,7 +962,12 @@ function helperInsertion(
     ? closeLineStart
     : closePosition
   const before = source.slice(0, insertionPoint)
-  const prefix = before.endsWith('\n') || before.endsWith('\r') ? '' : newline
+  const linesBefore = before.split(/\r\n|\r|\n/)
+  const hasBlankSeparator = linesBefore.length > 2
+    && linesBefore.at(-1)?.trim() === ''
+    && linesBefore.at(-2)?.trim() === ''
+  const endsAtLineStart = before.endsWith('\n') || before.endsWith('\r')
+  const prefix = hasBlankSeparator ? '' : endsAtLineStart ? newline : newline + newline
   return { from: insertionPoint, insert: prefix + helper + newline }
 }
 
@@ -974,7 +1092,7 @@ function statementPlan(
 }
 
 /**
- * Plan a bounded IntelliJ-style Extract Method operation. It accepts an exact
+ * Plan a bounded Extract Method operation. It accepts an exact
  * Java expression or complete direct statements inside one method body and
  * returns source edits without mutating editor state.
  */

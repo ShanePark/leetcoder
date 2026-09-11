@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
+  findJavaRefactorSelection,
   planJavaMethodExtraction,
   type JavaMethodExtractionPlan,
   type JavaRefactorChange,
@@ -42,6 +43,39 @@ function compileJavaIfAvailable(source: string): void {
 }
 
 describe('Java Extract Method planner', () => {
+  it('finds the complete call when the caret is after `)` or `);`', () => {
+    const expression = 'Math.max(0, 1)'
+    const source = `class Solution { int f() { ${expression}; } }`
+    const from = source.indexOf(expression)
+    const expected = { from, to: from + expression.length, kind: 'expression' as const }
+
+    expect(findJavaRefactorSelection(source, expected.to, 'expression')).toEqual(expected)
+    expect(findJavaRefactorSelection(source, expected.to + 1, 'expression')).toEqual(expected)
+    expect(findJavaRefactorSelection(source, expected.to + 2, 'expression')).toEqual(expected)
+    expect(findJavaRefactorSelection(source, expected.to + 1, 'statement')).toEqual({
+      from,
+      to: expected.to + 1,
+      kind: 'statement',
+    })
+  })
+
+  it('chooses an enclosing invocation instead of its final argument', () => {
+    const expression = 'consume(Math.max(0, 1))'
+    const source = `class Solution { void f() { ${expression}; } }`
+    const from = source.indexOf(expression)
+    expect(findJavaRefactorSelection(source, from + expression.length, 'expression')).toEqual({
+      from,
+      to: from + expression.length,
+      kind: 'expression',
+    })
+  })
+
+  it('does not resolve a call-shaped comment as source code', () => {
+    const commentSource = 'class Solution { void f() { // Math.max(0, 1);\n } }'
+    const commentPosition = commentSource.indexOf('Math.max') + 3
+    expect(findJavaRefactorSelection(commentSource, commentPosition, 'expression')).toBeNull()
+  })
+
   it('extracts a typed array expression and passes its parameter', () => {
     const source = [
       'class Solution {',
@@ -61,6 +95,7 @@ describe('Java Extract Method planner', () => {
       '    public int firstStableIndex(int[] nums, int k) {',
       '        return lastElement(nums);',
       '    }',
+      '',
       '    private int lastElement(int[] nums) {',
       '        return nums[nums.length - 1];',
       '    }',
@@ -72,6 +107,36 @@ describe('Java Extract Method planner', () => {
       'lastElement', 'lastElement',
     ])
     compileJavaIfAvailable(transformed)
+  })
+
+  it('does not duplicate an existing blank separator before the helper', () => {
+    const source = [
+      'class Solution {',
+      '    int value() {',
+      '        return 0;',
+      '    }',
+      '',
+      '}',
+      '',
+    ].join('\n')
+    const expression = '0'
+    const from = source.indexOf(expression)
+    const plan = planned(source, from, from + expression.length, 'constant')
+    const transformed = applyChanges(source, plan.changes)
+
+    expect(transformed).toBe([
+      'class Solution {',
+      '    int value() {',
+      '        return constant();',
+      '    }',
+      '',
+      '    private int constant() {',
+      '        return 0;',
+      '    }',
+      '}',
+      '',
+    ].join('\n'))
+    expect(transformed.match(/\n\n    private int constant/g)).toHaveLength(1)
   })
 
   it('extracts complete loop statements into a void helper', () => {
@@ -99,6 +164,7 @@ describe('Java Extract Method planner', () => {
       '        fillMinimums(nums);',
       '        return 0;',
       '    }',
+      '',
       '    private void fillMinimums(int[] nums) {',
       '        int[] min = new int[nums.length];',
       '        for (int i = nums.length - 1; i >= 0; i--) {',
@@ -134,6 +200,7 @@ describe('Java Extract Method planner', () => {
       '        int value = calculateValue(nums);',
       '        return value;',
       '    }',
+      '',
       '    private int calculateValue(int[] nums) {',
       '        int value = nums[0];',
       '        value += 1;',

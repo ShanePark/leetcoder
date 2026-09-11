@@ -1,0 +1,44 @@
+/* Context menu                                                      */
+/* ---------------------------------------------------------------- */
+
+.file-context-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-3);
+  box-shadow: var(--shadow-menu);
+}
+
+.file-context-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--red);
+  font-size: 13px;
+  text-align: left;
+}
+
+.file-context-menu-item:hover:not(:disabled) {
+  background: var(--red-soft);
+}
+
+.file-context-menu-item-neutral {
+  color: var(--text);
+}
+
+.file-context-menu-item-neutral:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.file-context-menu-item:disabled {
+  opacity: 0.5;
+}
+
+.git-context-menu {
+  min-width: 190px;
+}

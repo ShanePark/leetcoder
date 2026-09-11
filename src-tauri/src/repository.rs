@@ -283,10 +283,12 @@ pub(crate) fn duplicate_problem_file(args: ProblemFileArgs) -> Result<ProblemFil
         // The listing above handles known Java/Kotlin collisions, while
         // noclobber makes the operation safe if another editor creates the
         // same candidate after that listing.
+        let duplicate_content =
+            replace_source_identifiers(&source_content, &source_stem, &candidate_stem);
         match write_source_noclobber(
             &candidate_path,
             source_parent,
-            &replace_source_identifiers(&source_content, &source_stem, &candidate_stem),
+            &duplicate_content,
             &permissions,
         ) {
             Ok(()) => {
@@ -298,11 +300,7 @@ pub(crate) fn duplicate_problem_file(args: ProblemFileArgs) -> Result<ProblemFil
                 })?;
                 return Ok(ProblemFileContent {
                     relative_path: relative_path(&root, &candidate_path)?,
-                    content: replace_source_identifiers(
-                        &source_content,
-                        &source_stem,
-                        &candidate_stem,
-                    ),
+                    content: duplicate_content,
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

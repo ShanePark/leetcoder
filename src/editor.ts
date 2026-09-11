@@ -1,30 +1,23 @@
 import {
   autocompletion,
-  acceptCompletion,
   closeBrackets,
   closeBracketsKeymap,
   completionKeymap,
   completionStatus,
-  nextSnippetField,
   startCompletion,
 } from '@codemirror/autocomplete'
-import { java, javaLanguage } from '@codemirror/lang-java'
+import { java } from '@codemirror/lang-java'
 import {
-  HighlightStyle,
   bracketMatching,
   codeFolding,
   foldEffect,
   foldGutter,
   foldService,
-  getIndentation,
-  indentString,
   indentOnInput,
-  indentRange,
   indentUnit,
   syntaxHighlighting,
   syntaxTree,
 } from '@codemirror/language'
-import { tags } from '@lezer/highlight'
 import {
   copyLineDown,
   defaultKeymap,
@@ -41,18 +34,11 @@ import {
 } from '@codemirror/commands'
 import {
   EditorState,
-  EditorSelection,
   Prec,
-  RangeSet,
-  RangeSetBuilder,
-  StateEffect,
-  StateField,
   Transaction,
 } from '@codemirror/state'
 import {
-  Decoration,
   EditorView,
-  GutterMarker,
   ViewPlugin,
   drawSelection,
   gutter,
@@ -67,174 +53,115 @@ import {
   addJavaTypeImports,
   JAVA_TYPE_IMPORTS,
   javaCompletions,
+  finishJavaTemplate,
   javaIdentifierAt,
-  expandJavaPrintTemplate,
-  resolveJavaDefinition,
+  javaIterTemplateExtension,
 } from './completions'
 import type { ClipboardBridge } from './clipboard'
 import { createClipboardBridge } from './clipboard'
-import { platformShortcutBindings, shortcutLabel } from './shortcuts'
+import { platformShortcutBindings, shortcutBindings, shortcutLabel } from './shortcuts'
 import {
-  formatJavaSource,
   importBlockRange,
   removeUnusedJavaTypeImports,
 } from './java-format'
-import { planJavaMethodExtraction } from './java-refactor'
+import { leetcoderHighlight, leetcoderTheme } from './editor/theme'
+import {
+  findJavaTestMethodAt,
+  findJavaTestMethodMarkers,
+} from './editor/test-markers'
+import {
+  buildTestRunMarkers,
+  failureDecorations,
+  failureMarkers,
+  setEditorIssues,
+  testMethodMarkers,
+  type EditorIssue,
+} from './editor/gutters'
+import {
+  copySelectedText,
+  expandJavaTemplateOnTab,
+  extractJavaMethod,
+  formatJavaDocClipboard,
+  introduceJavaVariable,
+  minimalDocumentChange,
+  planJavaDocInsertion,
+  reformatJavaDocument,
+  selectedLineBlocks,
+} from './editor/editing'
+import {
+  completeJavaStatement,
+  moveToJavaLineEnd,
+} from './editor/statement-completion'
+import {
+  renameJavaMethod,
+} from './editor/rename'
+import {
+  definitionHover,
+  javaDefinitionAt,
+  javaDefinitionHoverRange,
+  setDefinitionHover,
+} from './editor/definition-navigation'
+import {
+  applySelectedJavaIntention,
+  applyJavaMethodCreation,
+  dismissJavaIntentions,
+  javaIntentionsExtension,
+  javaIntentionsAt,
+  javaIntentionsState,
+  planJavaMethodCreation,
+  showJavaIntentions,
+} from './editor/intentions'
 
-/**
- * Editor palette references the design tokens in styles.css. CSS variables are
- * used instead of resolved colors so an appearance change can update the
- * CodeMirror surface without rebuilding the editor state.
- */
-const editorPalette = {
-  background: 'var(--bg)',
-  surface: 'var(--surface-2)',
-  text: 'var(--text)',
-  textDim: 'var(--text-dim)',
-  textFaint: 'var(--text-faint)',
-  accent: 'var(--accent)',
-  green: 'var(--green)',
-  amber: 'var(--amber)',
-  red: 'var(--red)',
-  violet: 'var(--editor-violet)',
-  blue: 'var(--editor-blue)',
-  selection: 'var(--editor-selection)',
-  activeLine: 'var(--editor-active-line)',
-} as const
+export {
+  expandJavaTemplateOnTab,
+  extractJavaMethod,
+  formatJavaDocClipboard,
+  introduceJavaVariable,
+  planJavaDocInsertion,
+  planJavaVariableInsertion,
+  reformatJavaDocument,
+  selectedLineBlocks,
+  copySelectedText,
+} from './editor/editing'
+export {
+  planJavaMethodRename,
+  renameJavaMethod,
+} from './editor/rename'
+export type {
+  JavaMethodRenameFailure,
+  JavaMethodRenamePlan,
+  JavaMethodRenameRange,
+  JavaMethodRenameResult,
+} from './editor/rename'
+export type { JavaDocInsertion, JavaVariableInsertion } from './editor/editing'
+export {
+  applySelectedJavaIntention,
+  applyJavaMethodCreation,
+  dismissJavaIntentions,
+  javaIntentionsExtension,
+  javaIntentionsAt,
+  javaIntentionsState,
+  planJavaMethodCreation,
+  showJavaIntentions,
+} from './editor/intentions'
+export type {
+  JavaIntention,
+  JavaIntentionsMenuState,
+  JavaIntentionChange,
+  JavaMethodCreationPlan,
+  JavaMethodParameter,
+} from './editor/intentions'
+export {
+  completeJavaStatement,
+  moveToJavaLineEnd,
+  planJavaStatementCompletion,
+} from './editor/statement-completion'
+export type { JavaStatementCompletion } from './editor/statement-completion'
 
-const leetcoderTheme = EditorView.theme({
-  '&': {
-    color: editorPalette.text,
-    backgroundColor: editorPalette.background,
-    fontSize: '14px',
-    height: '100%',
-  },
-  '.cm-content': {
-    caretColor: editorPalette.accent,
-  },
-  '.cm-cursor, .cm-dropCursor': {
-    borderLeftColor: editorPalette.accent,
-  },
-  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
-    backgroundColor: editorPalette.selection,
-  },
-  '.cm-selectionMatch': {
-    backgroundColor: 'var(--editor-link-background)',
-  },
-  '.cm-activeLine': {
-    backgroundColor: editorPalette.activeLine,
-  },
-  '.cm-gutters': {
-    backgroundColor: editorPalette.background,
-    color: editorPalette.textFaint,
-    border: 'none',
-  },
-  '.cm-activeLineGutter': {
-    backgroundColor: editorPalette.activeLine,
-    color: editorPalette.textDim,
-  },
-  '.cm-test-gutter': {
-    flex: '0 0 0',
-    width: '0',
-    minWidth: '0',
-    overflow: 'visible',
-    zIndex: '1',
-  },
-  '.cm-test-gutter .cm-gutterElement': {
-    position: 'relative',
-    width: '0',
-    overflow: 'visible',
-  },
-  '.cm-foldGutter': {
-    minWidth: '14px',
-  },
-  '.cm-foldGutter .cm-gutterElement': {
-    color: editorPalette.textFaint,
-    cursor: 'pointer',
-    padding: '0 2px',
-  },
-  '.cm-foldGutter .cm-gutterElement:hover': {
-    color: editorPalette.textDim,
-  },
-  '.cm-foldPlaceholder': {
-    margin: '0 2px',
-    padding: '0 6px',
-    border: '1px solid var(--editor-link-border)',
-    borderRadius: '4px',
-    backgroundColor: editorPalette.surface,
-    color: editorPalette.textDim,
-    cursor: 'pointer',
-    fontFamily: 'inherit',
-    fontSize: '12px',
-  },
-  '.cm-foldPlaceholder:hover': {
-    borderColor: editorPalette.accent,
-    color: editorPalette.text,
-  },
-  '.cm-test-run-button': {
-    display: 'inline-flex',
-    position: 'absolute',
-    top: '50%',
-    left: '2px',
-    transform: 'translateY(-50%)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '18px',
-    height: '18px',
-    padding: '0',
-    border: '0',
-    borderRadius: '4px',
-    backgroundColor: 'transparent',
-    color: editorPalette.green,
-    cursor: 'pointer',
-    fontFamily: 'inherit',
-    fontSize: '12px',
-    lineHeight: '1',
-    opacity: '0.8',
-  },
-  '.cm-test-run-button:hover': {
-    backgroundColor: 'var(--green-soft)',
-    opacity: '1',
-  },
-  '.cm-test-run-button:focus-visible': {
-    outline: `2px solid ${editorPalette.accent}`,
-    outlineOffset: '1px',
-  },
-  '.cm-specialChar': {
-    color: editorPalette.red,
-  },
-  '.cm-matchingBracket, &.cm-focused .cm-matchingBracket': {
-    backgroundColor: 'var(--editor-link-background)',
-    outline: 'none',
-  },
-  '.cm-tooltip': {
-    backgroundColor: editorPalette.surface,
-    color: editorPalette.text,
-    border: '1px solid var(--border-strong)',
-    borderRadius: '8px',
-  },
-  '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': {
-    backgroundColor: 'var(--accent-soft)',
-    color: editorPalette.text,
-  },
-  '.cm-panels': {
-    backgroundColor: editorPalette.surface,
-    color: editorPalette.text,
-  },
-}, { dark: true })
-
-const leetcoderHighlight = HighlightStyle.define([
-  { tag: [tags.keyword, tags.modifier, tags.controlKeyword, tags.operatorKeyword, tags.definitionKeyword, tags.self], color: editorPalette.violet },
-  { tag: [tags.string, tags.character, tags.special(tags.string)], color: editorPalette.green },
-  { tag: [tags.number, tags.integer, tags.float, tags.bool, tags.null], color: editorPalette.amber },
-  { tag: [tags.comment, tags.blockComment, tags.lineComment, tags.docComment], color: editorPalette.textFaint, fontStyle: 'italic' },
-  { tag: [tags.typeName, tags.className, tags.namespace, tags.standard(tags.typeName)], color: editorPalette.blue },
-  { tag: [tags.annotation, tags.meta], color: editorPalette.amber },
-  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: editorPalette.text },
-  { tag: [tags.punctuation, tags.separator, tags.bracket, tags.operator], color: editorPalette.textDim },
-  { tag: [tags.propertyName, tags.variableName], color: editorPalette.text },
-  { tag: tags.invalid, color: editorPalette.red },
-])
+export { findJavaTestMethodAt, findJavaTestMethodMarkers }
+export type { JavaTestMethodMarker } from './editor/test-markers'
+export type { EditorIssue } from './editor/gutters'
+export { buildTestRunMarkers } from './editor/gutters'
 
 export interface EditorCallbacks {
   onChange?: (source: string) => void
@@ -318,19 +245,6 @@ function referencedJavaImportTypes(state: EditorState): Set<string> {
     },
   })
   return typeNames
-}
-
-function minimalDocumentChange(before: string, after: string) {
-  let from = 0
-  while (from < before.length && from < after.length && before[from] === after[from]) from += 1
-
-  let beforeTo = before.length
-  let afterTo = after.length
-  while (beforeTo > from && afterTo > from && before[beforeTo - 1] === after[afterTo - 1]) {
-    beforeTo -= 1
-    afterTo -= 1
-  }
-  return { from, to: beforeTo, insert: after.slice(from, afterTo) }
 }
 
 export const javaAutoImports = EditorState.transactionFilter.of((transaction) => {
@@ -422,237 +336,6 @@ const javaFolding = codeFolding({
     return element
   },
 })
-
-/**
- * Reformat the whole document: tidy imports and whitespace, then re-indent
- * through the Java language support, which already has the syntax tree.
- */
-export function reformatJavaDocument(view: EditorView): boolean {
-  const source = view.state.doc.toString()
-  const formatted = formatJavaSource(source)
-  if (formatted !== source) {
-    view.dispatch({ changes: minimalDocumentChange(source, formatted), userEvent: 'format' })
-  }
-  const indentation = indentRange(view.state, 0, view.state.doc.length)
-  if (!indentation.empty) {
-    view.dispatch({ changes: indentation, userEvent: 'format' })
-  }
-  return true
-}
-
-/**
- * The line blocks `deleteLine` would remove for the current selection. A
- * selection that ends exactly at a line start does not include that line.
- */
-export function selectedLineBlocks(state: EditorState): Array<{ from: number; to: number }> {
-  const blocks: Array<{ from: number; to: number }> = []
-  for (const range of state.selection.ranges) {
-    const startLine = state.doc.lineAt(range.from)
-    let endLine = state.doc.lineAt(range.to)
-    if (range.to > range.from && endLine.from === range.to) {
-      endLine = state.doc.lineAt(range.to - 1)
-    }
-    const from = startLine.from
-    const to = Math.min(state.doc.length, endLine.to + 1)
-    const previous = blocks[blocks.length - 1]
-    if (previous && previous.to >= from) {
-      previous.to = to
-    } else {
-      blocks.push({ from, to })
-    }
-  }
-  return blocks
-}
-
-function isTestAnnotation(annotation: string): boolean {
-  const withoutArguments = annotation.slice(1, annotation.indexOf('(') >= 0
-    ? annotation.indexOf('(')
-    : undefined).trim()
-  const simpleName = withoutArguments.slice(withoutArguments.lastIndexOf('.') + 1)
-  return simpleName === 'Test'
-}
-
-/**
- * Return the Java @Test method containing a CodeMirror document position.
- *
- * MethodDeclaration nodes include their modifiers, declaration, parameters,
- * and body, so a single range check covers all of the places where a user
- * reasonably expects a test-only run shortcut to work. The Java syntax tree
- * also keeps comments and string contents out of the declaration nodes.
- */
-export function findJavaTestMethodAt(
-  state: EditorState,
-  position = state.selection.main.head,
-): string | null {
-  const source = state.doc.toString()
-  const boundedPosition = Math.max(0, Math.min(position, source.length))
-  let node: ReturnType<typeof syntaxTree>['topNode'] | null = syntaxTree(state)
-    .resolveInner(boundedPosition, 1)
-  while (node && node.name !== 'MethodDeclaration') {
-    node = node.parent
-  }
-  if (!node || boundedPosition < node.from || boundedPosition >= node.to) {
-    return null
-  }
-  return testMethodNameAndAnnotation(source, node)?.methodName ?? null
-}
-
-/**
- * A source-level run action for one Java @Test method. `from` is the start of
- * the @Test annotation (or, for a same-line annotation/declaration, the
- * declaration line), which is the position used by the CodeMirror gutter.
- */
-export interface JavaTestMethodMarker {
-  methodName: string
-  /** Document position at the start of the annotation's line, as required by CodeMirror gutters. */
-  from: number
-  line: number
-}
-
-function testMethodNameAndAnnotation(
-  source: string,
-  method: ReturnType<typeof syntaxTree>['topNode'],
-): { methodName: string; annotationFrom: number } | null {
-  const modifiers = method.getChild('Modifiers')
-  let annotationFrom: number | null = null
-  let hasTest = false
-  for (let child = modifiers?.firstChild; child; child = child.nextSibling) {
-    if (child.name !== 'MarkerAnnotation' && child.name !== 'Annotation') {
-      continue
-    }
-    const annotation = source.slice(child.from, child.to).trim()
-    if (!isTestAnnotation(annotation)) {
-      continue
-    }
-    hasTest = true
-    annotationFrom = child.from
-    break
-  }
-  if (!hasTest || annotationFrom === null) {
-    return null
-  }
-  const definition = method.getChild('Definition')
-  if (!definition) {
-    return null
-  }
-  const methodName = source.slice(definition.from, definition.to)
-  return isJavaIdentifier(methodName) ? { methodName, annotationFrom } : null
-}
-
-/**
- * Extract all test methods from the current Java syntax tree. This deliberately
- * uses syntax nodes instead of text matching so comments, strings, and
- * annotation-looking text cannot create source run actions.
- */
-export function findJavaTestMethodMarkers(state: EditorState): JavaTestMethodMarker[] {
-  const source = state.doc.toString()
-  const markers: JavaTestMethodMarker[] = []
-  syntaxTree(state).iterate({
-    enter: (node) => {
-      if (node.name !== 'MethodDeclaration') {
-        return
-      }
-      const testMethod = testMethodNameAndAnnotation(source, node.node)
-      if (!testMethod) {
-        return
-      }
-      markers.push({
-        methodName: testMethod.methodName,
-        from: state.doc.lineAt(testMethod.annotationFrom).from,
-        line: state.doc.lineAt(testMethod.annotationFrom).number,
-      })
-    },
-  })
-  return markers.sort((left, right) => left.from - right.from)
-}
-
-/** A source position that should be surfaced in the editor gutter. */
-export interface EditorIssue {
-  file: string
-  line: number
-  column?: number | null
-  message?: string | null
-}
-
-export interface JavaDocInsertion {
-  from: number
-  insert: string
-  cursor: number
-}
-
-interface SourceLine {
-  from: number
-  to: number
-  text: string
-}
-
-const JAVA_CLASS_DECLARATION = /^[ \t]*(?:(?:public|protected|private|abstract|final|static|strictfp|sealed|non-sealed)[ \t]+)*class[ \t]+[A-Za-z_$][\w$]*/
-
-function isEscaped(source: string, position: number): boolean {
-  let backslashes = 0
-  for (let index = position - 1; index >= 0 && source[index] === '\\'; index -= 1) {
-    backslashes += 1
-  }
-  return backslashes % 2 === 1
-}
-
-function isInsideCommentOrString(source: string, position: number): boolean {
-  let blockComment = false
-  let lineComment = false
-  let textBlock = false
-  let quote: '"' | "'" | null = null
-  let escaped = false
-
-  for (let index = 0; index < position; index += 1) {
-    const character = source[index]
-    const next = source[index + 1]
-    if (lineComment) {
-      if (character === '\n' || character === '\r') {
-        lineComment = false
-      }
-      continue
-    }
-    if (blockComment) {
-      if (character === '*' && next === '/') {
-        blockComment = false
-        index += 1
-      }
-      continue
-    }
-    if (textBlock) {
-      if (character === '"' && next === '"' && source[index + 2] === '"'
-        && !isEscaped(source, index)) {
-        textBlock = false
-        index += 2
-      }
-      continue
-    }
-    if (quote) {
-      if (escaped) {
-        escaped = false
-      } else if (character === '\\') {
-        escaped = true
-      } else if (character === quote) {
-        quote = null
-      }
-      continue
-    }
-    if (character === '/' && next === '*') {
-      blockComment = true
-      index += 1
-    } else if (character === '/' && next === '/') {
-      lineComment = true
-      index += 1
-    } else if (character === '"' && next === '"' && source[index + 2] === '"'
-      && !isEscaped(source, index)) {
-      textBlock = true
-      index += 2
-    } else if (character === '"' || character === "'") {
-      quote = character
-    }
-  }
-  return blockComment || lineComment || textBlock || quote !== null
-}
 
 export interface JavaDocAltShortcutEvent {
   code: string
@@ -768,6 +451,15 @@ export function isCompleteStatementAltShortcut(event: JavaDocAltShortcutEvent): 
   return event.code === 'Enter'
     && event.shiftKey
     && event.altKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
+/** Match the plain Option+Enter form of the editor intentions menu. */
+export function isShowIntentionsAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'Enter'
+    && event.altKey
+    && !event.shiftKey
     && !event.metaKey
     && !event.ctrlKey
 }
@@ -932,7 +624,7 @@ const javaIdentifierCallKeyBindings = [
 /** High-precedence keymap used by the editor and its keyboard regression tests. */
 export const javaIdentifierCallKeymap = Prec.highest(keymap.of(javaIdentifierCallKeyBindings))
 
-/** Match the IntelliJ-style Ctrl/Command+Option+V chord by physical key. */
+/** Match the cross-platform Ctrl/Command+Option+V chord by physical key. */
 export function isIntroduceVariableShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'KeyV'
     && event.altKey
@@ -940,878 +632,13 @@ export function isIntroduceVariableShortcut(event: JavaDocAltShortcutEvent): boo
     && (event.metaKey !== event.ctrlKey)
 }
 
-/** Match the IntelliJ-style Ctrl/Command+Option+M chord by physical key. */
+/** Match the cross-platform Ctrl/Command+Option+M chord by physical key. */
 export function isExtractMethodShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'KeyM'
     && event.altKey
     && !event.shiftKey
     && (event.metaKey !== event.ctrlKey)
 }
-
-function lineAt(source: string, position: number): SourceLine {
-  const bounded = Math.max(0, Math.min(position, source.length))
-  let from = bounded
-  while (from > 0 && source[from - 1] !== '\n' && source[from - 1] !== '\r') {
-    from -= 1
-  }
-  let to = bounded
-  while (to < source.length && source[to] !== '\n' && source[to] !== '\r') {
-    to += 1
-  }
-  return { from, to, text: source.slice(from, to) }
-}
-
-function previousLine(source: string, lineFrom: number): SourceLine | null {
-  if (lineFrom <= 0) {
-    return null
-  }
-  let to = lineFrom - 1
-  if (source[to] === '\n' && to > 0 && source[to - 1] === '\r') {
-    to -= 1
-  }
-  let from = to
-  while (from > 0 && source[from - 1] !== '\n' && source[from - 1] !== '\r') {
-    from -= 1
-  }
-  return { from, to, text: source.slice(from, to) }
-}
-
-function lineBreakFor(source: string, line?: SourceLine): string {
-  if (line) {
-    const following = /^(?:\r\n|\r|\n)/.exec(source.slice(line.to))
-    if (following) {
-      return following[0]
-    }
-    const preceding = source.slice(Math.max(0, line.from - 2), line.from)
-    if (preceding.endsWith('\r\n')) {
-      return '\r\n'
-    }
-    if (preceding.endsWith('\r')) {
-      return '\r'
-    }
-    if (preceding.endsWith('\n')) {
-      return '\n'
-    }
-  }
-  const match = /\r\n|\r|\n/.exec(source)
-  return match?.[0] ?? '\n'
-}
-
-export interface JavaStatementCompletion {
-  /** Position at which completion text is inserted, before trailing spaces/comments. */
-  semicolonFrom: number
-  /** Empty when the current statement already has its semicolon. */
-  semicolon: string
-  /** Closing parentheses/brackets needed to make the statement syntactically complete. */
-  closing: string
-  /** Cursor position immediately after the completed statement. */
-  cursor: number
-}
-
-function lineCodeEnd(text: string): number {
-  let blockComment = false
-  let quote: '"' | "'" | null = null
-  let escaped = false
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index]
-    const next = text[index + 1]
-    if (blockComment) {
-      if (character === '*' && next === '/') {
-        blockComment = false
-        index += 1
-      }
-      continue
-    }
-    if (quote) {
-      if (escaped) {
-        escaped = false
-      } else if (character === '\\') {
-        escaped = true
-      } else if (character === quote) {
-        quote = null
-      }
-      continue
-    }
-    if (character === '/' && next === '/') {
-      return index
-    }
-    if (character === '/' && next === '*') {
-      blockComment = true
-      index += 1
-    } else if (character === '"' || character === "'") {
-      quote = character
-    }
-  }
-  return text.length
-}
-
-function balancedJavaDelimiters(text: string): boolean {
-  const stack: string[] = []
-  let quote: '"' | "'" | null = null
-  let escaped = false
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index]
-    if (quote) {
-      if (escaped) {
-        escaped = false
-      } else if (character === '\\') {
-        escaped = true
-      } else if (character === quote) {
-        quote = null
-      }
-      continue
-    }
-    if (character === '"' || character === "'") {
-      quote = character
-      continue
-    }
-    if (character === '(' || character === '[' || character === '{') {
-      stack.push(character)
-      continue
-    }
-    if (character !== ')' && character !== ']' && character !== '}') {
-      continue
-    }
-    const opening = character === ')' ? '(' : character === ']' ? '[' : '{'
-    if (stack.pop() !== opening) {
-      return false
-    }
-  }
-  return quote === null && stack.length === 0
-}
-
-/**
- * Return the closing delimiters needed by a source fragment, or null when its
- * delimiters are mismatched. Parentheses and square brackets can be repaired
- * for an incomplete expression; an unmatched brace is deliberately rejected
- * because it may be the beginning of a block rather than an expression.
- */
-function missingJavaClosingDelimiters(text: string): string | null {
-  const stack: string[] = []
-  let blockComment = false
-  let quote: '"' | "'" | null = null
-  let escaped = false
-  let textBlock = false
-
-  for (let index = 0; index < text.length; index += 1) {
-    const character = text[index]
-    const next = text[index + 1]
-    if (blockComment) {
-      if (character === '*' && next === '/') {
-        blockComment = false
-        index += 1
-      }
-      continue
-    }
-    if (textBlock) {
-      if (character === '"' && next === '"' && text[index + 2] === '"'
-        && !isEscaped(text, index)) {
-        textBlock = false
-        index += 2
-      }
-      continue
-    }
-    if (quote) {
-      if (escaped) {
-        escaped = false
-      } else if (character === '\\') {
-        escaped = true
-      } else if (character === quote) {
-        quote = null
-      }
-      continue
-    }
-    if (character === '/' && next === '*') {
-      blockComment = true
-      index += 1
-      continue
-    }
-    if (character === '"' && next === '"' && text[index + 2] === '"'
-      && !isEscaped(text, index)) {
-      textBlock = true
-      index += 2
-      continue
-    }
-    if (character === '"' || character === "'") {
-      quote = character
-      continue
-    }
-    if (character === '(') {
-      stack.push(')')
-      continue
-    }
-    if (character === '[') {
-      stack.push(']')
-      continue
-    }
-    if (character === '{') {
-      stack.push('}')
-      continue
-    }
-    if (character !== ')' && character !== ']' && character !== '}') {
-      continue
-    }
-    if (stack.pop() !== character) {
-      return null
-    }
-  }
-
-  if (blockComment || textBlock || quote !== null || stack.includes('}')) {
-    return null
-  }
-  return stack.reverse().join('')
-}
-
-function hasJavaSyntaxError(node: JavaSyntaxNode): boolean {
-  if (node.type.isError) {
-    return true
-  }
-  for (let child = node.firstChild; child; child = child.nextSibling) {
-    if (hasJavaSyntaxError(child)) {
-      return true
-    }
-  }
-  return false
-}
-
-function isStatementCandidate(text: string, closing = ''): boolean {
-  const statement = text.trim().replace(/;\s*$/, '').trimEnd()
-  if (!statement || missingJavaClosingDelimiters(statement) === null) {
-    return false
-  }
-  if (/^(?:package|import|@)\b/.test(statement)) {
-    return false
-  }
-  // Parse the exact text that the command would produce. The Java grammar
-  // keeps recoverable parse errors as zero-width `⚠` nodes, so checking only
-  // the top-level statement name would incorrectly accept `foo =;` and
-  // `return value +;` as completable statements.
-  const tree = javaLanguage.parser.parse(`${statement}${closing};`)
-  const node = tree.topNode.firstChild
-  if (!node || node.nextSibling || hasJavaSyntaxError(tree.topNode)) {
-    return false
-  }
-  return new Set([
-    'AssertStatement',
-    'BreakStatement',
-    'ContinueStatement',
-    'ExpressionStatement',
-    'LocalVariableDeclaration',
-    'ReturnStatement',
-    'ThrowStatement',
-    'YieldStatement',
-  ]).has(node.name)
-}
-
-/** Plan the minimal syntax completion for the current Java statement. */
-export function planJavaStatementCompletion(
-  source: string,
-  position: number,
-): JavaStatementCompletion | null {
-  const line = lineAt(source, position)
-  if (isInsideCommentOrString(source, line.from) || isInsideCommentOrString(source, position)) {
-    return null
-  }
-  const codeEnd = line.from + lineCodeEnd(line.text)
-  const code = source.slice(line.from, codeEnd)
-  const trimmed = code.trim()
-  if (!trimmed || code.includes('/*')) {
-    return null
-  }
-  const hasSemicolon = /;\s*$/.test(trimmed)
-  const statement = hasSemicolon ? trimmed.slice(0, -1).trimEnd() : trimmed
-  const closing = missingJavaClosingDelimiters(statement)
-  if (closing === null || !isStatementCandidate(statement, closing)) {
-    return null
-  }
-  const codeEndWithoutSpaces = line.from + code.trimEnd().length
-  const semicolonPosition = hasSemicolon ? codeEndWithoutSpaces - 1 : codeEndWithoutSpaces
-  const semicolonFrom = closing && hasSemicolon ? semicolonPosition : codeEndWithoutSpaces
-  const semicolon = hasSemicolon ? '' : ';'
-  return {
-    semicolonFrom,
-    semicolon,
-    closing,
-    cursor: hasSemicolon
-      ? codeEndWithoutSpaces + closing.length
-      : semicolonFrom + closing.length + semicolon.length,
-  }
-}
-
-/** Complete the current Java statement without inserting a line break. */
-export function completeJavaStatement(view: EditorView): boolean {
-  const { state } = view
-  const selection = state.selection.main
-  if (state.selection.ranges.length !== 1 || !selection.empty) {
-    return false
-  }
-  const plan = planJavaStatementCompletion(state.doc.toString(), selection.head)
-  if (!plan) {
-    return false
-  }
-  const insert = `${plan.closing}${plan.semicolon}`
-  view.dispatch({
-    ...(insert ? { changes: { from: plan.semicolonFrom, insert } } : {}),
-    selection: { anchor: plan.cursor },
-    userEvent: 'input.completeStatement',
-  })
-  return true
-}
-
-/** Move every cursor to its physical line end, correcting blank-line indent when known. */
-export function moveToJavaLineEnd(view: EditorView): boolean {
-  const { state } = view
-  const changes: Array<{ from: number; to: number; insert: string }> = []
-  const lines = new Set<number>()
-  for (const range of state.selection.ranges) {
-    const line = state.doc.lineAt(range.head)
-    if (line.text.trim() !== '' || lines.has(line.number)) {
-      continue
-    }
-    lines.add(line.number)
-    const columns = getIndentation(state, line.from)
-    if (columns === null) {
-      continue
-    }
-    const indent = indentString(state, columns)
-    if (indent !== line.text) {
-      changes.push({ from: line.from, to: line.to, insert: indent })
-    }
-  }
-  if (changes.length > 0) {
-    view.dispatch({ changes, userEvent: 'input.indent' })
-  }
-  const selection = EditorSelection.create(
-    view.state.selection.ranges.map((range) => (
-      EditorSelection.cursor(view.state.doc.lineAt(range.head).to)
-    )),
-  )
-  view.dispatch({ selection })
-  return true
-}
-
-export interface JavaVariableInsertion {
-  from: number
-  insert: string
-  replaceFrom: number
-  replaceTo: number
-  selected: string
-  name: string
-  nameFrom: number
-  nameTo: number
-}
-
-type JavaSyntaxNode = ReturnType<typeof syntaxTree>['topNode']
-
-const JAVA_KEYWORDS = new Set([
-  'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class',
-  'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final',
-  'finally', 'float', 'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int',
-  'interface', 'long', 'native', 'new', 'package', 'private', 'protected', 'public',
-  'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this',
-  'throw', 'throws', 'transient', 'try', 'void', 'volatile', 'while', 'var', 'true',
-  'false', 'null', 'record', 'sealed', 'permits', 'non-sealed', 'yield',
-])
-
-function javaVariableBase(expression: string): string {
-  const value = expression.trim()
-  const method = /(?:^|\.)([A-Za-z_$][\w$]*)\s*\(/.exec(value)
-  if (method) {
-    const methodName = method[1]
-    const property = /^(?:get|is|has)([A-Z][A-Za-z0-9_$]*)$/.exec(methodName)
-    return property ? property[1][0].toLowerCase() + property[1].slice(1) : methodName
-  }
-  const created = /\bnew\s+(?:[A-Za-z_$][\w$]*\.)*([A-Za-z_$][\w$]*)/.exec(value)
-  if (created) {
-    return created[1][0].toLowerCase() + created[1].slice(1)
-  }
-  const identifier = /^[A-Za-z_$][\w$]*$/.exec(value)
-  if (identifier) {
-    return identifier[0]
-  }
-  const property = /\.([A-Za-z_$][\w$]*)$/.exec(value)
-  return property?.[1] ?? 'value'
-}
-
-function uniqueJavaVariableName(source: string, from: number, to: number, base: string): string {
-  const fallback = /^[A-Za-z_$][\w$]*$/.test(base) && !JAVA_KEYWORDS.has(base) ? base : 'value'
-  const surrounding = `${source.slice(0, from)} ${source.slice(to)}`
-  const used = new Set(surrounding.match(/[A-Za-z_$][\w$]*/g) ?? [])
-  if (!used.has(fallback) && !JAVA_KEYWORDS.has(fallback)) {
-    return fallback
-  }
-  let suffix = 2
-  while (used.has(`${fallback}${suffix}`) || JAVA_KEYWORDS.has(`${fallback}${suffix}`)) {
-    suffix += 1
-  }
-  return `${fallback}${suffix}`
-}
-
-function exactJavaSyntaxNode(
-  state: EditorState,
-  from: number,
-  to: number,
-): JavaSyntaxNode | null {
-  let node: JavaSyntaxNode | null = syntaxTree(state).resolveInner(from, 1)
-  while (node) {
-    if (node.from === from && node.to === to) {
-      return node
-    }
-    node = node.parent
-  }
-  return null
-}
-
-function allowsJavaExpressionSelection(state: EditorState, from: number, to: number): boolean {
-  const exact = exactJavaSyntaxNode(state, from, to)
-  if (!exact) {
-    return true
-  }
-  if (exact.name === 'Definition' || exact.name === 'TypeName' || exact.name === 'PrimitiveType'
-    || exact.name === 'MethodName' || exact.name.endsWith('Statement')) {
-    return false
-  }
-  for (let node = exact.parent; node; node = node.parent) {
-    if (node.name === 'FieldDeclaration') {
-      return false
-    }
-  }
-  return true
-}
-
-/** Plan introducing a `var` for one single-line expression selection. */
-export function planJavaVariableInsertion(
-  source: string,
-  selectionFrom: number,
-  selectionTo: number,
-): JavaVariableInsertion | null {
-  if (selectionFrom < 0 || selectionTo <= selectionFrom || selectionTo > source.length) {
-    return null
-  }
-  const line = lineAt(source, selectionFrom)
-  if (lineAt(source, selectionTo).from !== line.from
-    || isInsideCommentOrString(source, line.from)
-    || isInsideCommentOrString(source, selectionFrom)
-    || isInsideCommentOrString(source, selectionTo)) {
-    return null
-  }
-  const codeEnd = line.from + lineCodeEnd(line.text)
-  const code = source.slice(line.from, codeEnd)
-  const indent = /^[ \t]*/.exec(line.text)?.[0] ?? ''
-  const codeStart = line.from + indent.length
-  const rawSelected = source.slice(selectionFrom, selectionTo)
-  // IntelliJ accepts selecting an entire expression statement, including its
-  // semicolon. Keep the selection range intact for the replacement, but omit
-  // that terminator when building the declaration initializer.
-  const selected = rawSelected.endsWith(';')
-    ? rawSelected.slice(0, -1).trimEnd()
-    : rawSelected
-  if (code.includes('/*')
-    || selectionFrom < codeStart
-    || selectionTo > codeEnd
-    || rawSelected.trim() !== rawSelected
-    || !balancedJavaDelimiters(selected)
-    || !isStatementCandidate(code.slice(indent.length))) {
-    return null
-  }
-  if (/;/.test(selected) || /(?:^|[^=!<>])=(?!=|>)/.test(selected)) {
-    return null
-  }
-  const name = uniqueJavaVariableName(source, selectionFrom, selectionTo, javaVariableBase(selected))
-  if (/^[A-Za-z_$][\w$]*$/.test(selected)) {
-    return null
-  }
-  const lineBreak = lineBreakFor(source, line)
-  const insert = `${indent}var ${name} = ${selected};${lineBreak}`
-  const nameFrom = line.from + indent.length + 4
-  return {
-    from: line.from,
-    insert,
-    replaceFrom: selectionFrom,
-    replaceTo: selectionTo,
-    selected,
-    name,
-    nameFrom,
-    nameTo: nameFrom + name.length,
-  }
-}
-
-/** Introduce a local `var` for the current single expression selection. */
-export function introduceJavaVariable(view: EditorView): boolean {
-  const { state } = view
-  const selection = state.selection.main
-  if (state.selection.ranges.length !== 1 || selection.empty) {
-    return false
-  }
-  const from = Math.min(selection.from, selection.to)
-  const to = Math.max(selection.from, selection.to)
-  const plan = planJavaVariableInsertion(state.doc.toString(), from, to)
-  if (!plan || !allowsJavaExpressionSelection(state, from, from + plan.selected.length)) {
-    return false
-  }
-  const line = state.doc.lineAt(from)
-  const codeEnd = line.from + lineCodeEnd(line.text)
-  const indent = /^[\t ]*/.exec(line.text)?.[0] ?? ''
-  if (from === line.from + indent.length
-    && /^\s*;?\s*$/.test(state.sliceDoc(from + plan.selected.length, codeEnd))) {
-    view.dispatch({
-      changes: { from, to: codeEnd, insert: `var ${plan.name} = ${plan.selected};` },
-      selection: { anchor: from + 4, head: from + 4 + plan.name.length },
-      userEvent: 'input.introduceVariable',
-    })
-    return true
-  }
-  let changes
-  if (plan.replaceFrom === plan.from + plan.insert.indexOf('var ')) {
-    changes = [{
-      from: plan.from,
-      to: plan.replaceTo,
-      insert: `${plan.insert}${state.sliceDoc(plan.from, plan.replaceFrom)}${plan.name}`,
-    }]
-  } else {
-    changes = [
-      { from: plan.from, insert: plan.insert },
-      { from: plan.replaceFrom, to: plan.replaceTo, insert: plan.name },
-    ]
-  }
-  const usageEnd = state.changes(changes).mapPos(plan.replaceTo, 1)
-  view.dispatch({
-    changes,
-    selection: EditorSelection.create([
-      EditorSelection.range(plan.nameFrom, plan.nameTo),
-      EditorSelection.range(usageEnd - plan.name.length, usageEnd),
-    ]),
-    userEvent: 'input.introduceVariable',
-  })
-  return true
-}
-
-/** Extract a selected expression or complete statement range into a helper. */
-export function extractJavaMethod(view: EditorView, onError?: (message: string) => void): boolean {
-  const { state } = view
-  if (state.selection.ranges.length !== 1 || state.selection.main.empty) {
-    onError?.('Select an expression or complete statements to extract a method.')
-    return true
-  }
-  const selection = state.selection.main
-  const plan = planJavaMethodExtraction(state.doc.toString(), selection.from, selection.to)
-  if ('reason' in plan) {
-    onError?.(plan.reason)
-    return true
-  }
-  view.dispatch({
-    changes: plan.changes,
-    selection: EditorSelection.create(plan.nameRanges.map((range) => EditorSelection.range(range.from, range.to))),
-    scrollIntoView: true,
-    userEvent: 'input.extractMethod',
-  })
-  return true
-}
-
-/** Snippet navigation takes precedence over expanding a fresh abbreviation. */
-export function expandJavaTemplateOnTab(view: EditorView): boolean {
-  return nextSnippetField(view) || acceptCompletion(view) || expandJavaPrintTemplate(view)
-}
-
-function javaDocBodyCursor(line: SourceLine): number | null {
-  const match = /^([ \t]*)\* (.*)$/.exec(line.text)
-  if (!match) {
-    return null
-  }
-  return line.from + match[1].length + 2
-}
-
-function existingJavaDocCursor(source: string, classLine: SourceLine): number | null {
-  let line = previousLine(source, classLine.from)
-  if (!line || (!/^[ \t]*\*\/[ \t]*$/.test(line.text)
-    && !/^[ \t]*\/\*\*.*\*\/[ \t]*$/.test(line.text))) {
-    return null
-  }
-
-  const closingLine = line
-  let lastBodyCursor: number | null = null
-  while (line) {
-    const opening = /^[ \t]*\/\*\*/.exec(line.text)
-    if (opening) {
-      const openingEnd = line.text.indexOf('/**') + 3
-      const closing = line.text.indexOf('*/', openingEnd)
-      if (closing >= 0) {
-        if (lastBodyCursor !== null) {
-          return lastBodyCursor
-        }
-        let cursor = openingEnd
-        while (cursor < closing && /[ \t]/.test(line.text[cursor] ?? '')) {
-          cursor += 1
-        }
-        return line.from + cursor
-      }
-      return lastBodyCursor ?? (closingLine.from + closingLine.text.search(/\*\//))
-    }
-
-    if (line === closingLine && /^[ \t]*\*\/[ \t]*$/.test(line.text)) {
-      line = previousLine(source, line.from)
-      continue
-    }
-
-    const bodyCursor = javaDocBodyCursor(line)
-    if (bodyCursor !== null && lastBodyCursor === null) {
-      lastBodyCursor = bodyCursor
-    } else if (!/^[ \t]*$/.test(line.text) && !/^[ \t]*\*\*?[ \t]*$/.test(line.text)) {
-      return null
-    }
-    line = previousLine(source, line.from)
-  }
-  return null
-}
-
-/** Plan the JavaDoc edit for a cursor on a Java class declaration line. */
-export function planJavaDocInsertion(source: string, position: number): JavaDocInsertion | null {
-  const classLine = lineAt(source, position)
-  if (isInsideCommentOrString(source, classLine.from) || !JAVA_CLASS_DECLARATION.test(classLine.text)) {
-    return null
-  }
-
-  const existingCursor = existingJavaDocCursor(source, classLine)
-  if (existingCursor !== null) {
-    return { from: existingCursor, insert: '', cursor: existingCursor }
-  }
-
-  const indent = /^[ \t]*/.exec(classLine.text)?.[0] ?? ''
-  const lineBreak = lineBreakFor(source, classLine)
-  const lines = [
-    `${indent}/**`,
-    `${indent} * `,
-    `${indent} */`,
-  ]
-  const insert = `${lines.join(lineBreak)}${lineBreak}`
-  const cursor = classLine.from + lines[0].length + lineBreak.length + lines[1].length
-  return { from: classLine.from, insert, cursor }
-}
-
-function isJavaDocBodyAt(source: string, position: number): { prefix: string } | null {
-  const line = lineAt(source, position)
-  const body = /^([ \t]*)\* /.exec(line.text)
-  if (!body || position < line.from + body[0].length) {
-    return null
-  }
-  const beforeLine = source.slice(0, line.from)
-  if (beforeLine.lastIndexOf('/**') <= beforeLine.lastIndexOf('*/')) {
-    return null
-  }
-  return { prefix: `${body[1]}* ` }
-}
-
-/** Format a multiline clipboard payload when it is pasted into JavaDoc text. */
-export function formatJavaDocClipboard(text: string, source: string, position: number): string {
-  const normalized = text.replace(/\r\n?/g, '\n')
-  if (!normalized.includes('\n')) {
-    return text
-  }
-  const body = isJavaDocBodyAt(source, position)
-  if (!body) {
-    return text
-  }
-  const withoutTrailingNewlines = normalized.replace(/\n+$/, '')
-  const lines = withoutTrailingNewlines.split('\n')
-  return [lines[0], ...lines.slice(1).map((line) => `${body.prefix}${line}`)].join('\n')
-}
-
-/** Copy the selected text, or the current line when there is no selection. */
-export function copySelectedText(
-  state: EditorState,
-  clipboard: Pick<ClipboardBridge, 'writeText'>,
-): boolean {
-  const selected = state.selection.ranges.filter((range) => !range.empty)
-  const text = selected.length > 0
-    ? selected
-      .map((range) => state.sliceDoc(range.from, range.to))
-      .join(state.lineBreak)
-    : selectedLineBlocks(state)
-      .map((block) => state.sliceDoc(block.from, block.to))
-      .join('')
-  if (!text) {
-    return false
-  }
-  void clipboard.writeText(text)
-  return true
-}
-
-const setEditorIssues = StateEffect.define<readonly EditorIssue[]>()
-
-class FailureMarker extends GutterMarker {
-  constructor(private readonly message: string) {
-    super()
-  }
-
-  eq(other: GutterMarker): boolean {
-    return other instanceof FailureMarker && other.message === this.message
-  }
-
-  toDOM(): Node {
-    const marker = document.createElement('span')
-    marker.className = 'cm-failure-marker'
-    marker.textContent = '●'
-    marker.setAttribute('aria-label', this.message || 'Test failure')
-    if (this.message) {
-      marker.title = this.message
-    }
-    return marker
-  }
-}
-
-class TestRunMarker extends GutterMarker {
-  constructor(
-    private readonly methodName: string,
-    private readonly shortcutLabel: string,
-  ) {
-    super()
-  }
-
-  eq(other: GutterMarker): boolean {
-    return other instanceof TestRunMarker
-      && other.methodName === this.methodName
-      && other.shortcutLabel === this.shortcutLabel
-  }
-
-  toDOM(): Node {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.className = 'cm-test-run-button'
-    button.textContent = '▶'
-    button.dataset.testMethod = this.methodName
-    const label = `Run ${this.methodName} (${this.shortcutLabel})`
-    button.setAttribute('aria-label', label)
-    button.title = label
-    return button
-  }
-}
-
-/** Build gutter markers from the syntax-tree extraction result. */
-export function buildTestRunMarkers(
-  markers: readonly JavaTestMethodMarker[],
-  shortcutLabel: string,
-): RangeSet<GutterMarker> {
-  const builder = new RangeSetBuilder<GutterMarker>()
-  const orderedMarkers = [...markers].sort((left, right) => left.from - right.from)
-  for (const marker of orderedMarkers) {
-    builder.add(marker.from, marker.from, new TestRunMarker(marker.methodName, shortcutLabel))
-  }
-  return builder.finish()
-}
-
-const testMethodMarkers = StateField.define<readonly JavaTestMethodMarker[]>({
-  create: (state) => findJavaTestMethodMarkers(state),
-  update(value, transaction) {
-    return transaction.docChanged ? findJavaTestMethodMarkers(transaction.state) : value
-  },
-})
-
-function buildFailureMarkers(state: EditorState, issues: readonly EditorIssue[]): RangeSet<GutterMarker> {
-  const byLine = new Map<number, { issue: EditorIssue; line: NonNullable<ReturnType<typeof safeLine>> }>()
-  for (const issue of issues) {
-    const line = safeLine(state, issue.line)
-    if (line && !byLine.has(line.number)) {
-      byLine.set(line.number, { issue, line })
-    }
-  }
-  const entries = [...byLine.values()]
-    .sort((left, right) => left.line.from - right.line.from)
-  const builder = new RangeSetBuilder<GutterMarker>()
-  for (const { issue, line } of entries) {
-    const message = issue.message?.trim() || 'Test failure'
-    builder.add(line.from, line.from, new FailureMarker(message))
-  }
-  return builder.finish()
-}
-
-function buildFailureDecorations(state: EditorState, issues: readonly EditorIssue[]) {
-  const byLine = new Map<number, EditorIssue>()
-  for (const issue of issues) {
-    const line = safeLine(state, issue.line)
-    if (line && !byLine.has(line.number)) {
-      byLine.set(line.number, issue)
-    }
-  }
-  const entries = [...byLine.entries()]
-    .map(([lineNumber, issue]) => ({ issue, line: state.doc.line(lineNumber) }))
-    .sort((left, right) => left.line.from - right.line.from)
-  const builder = new RangeSetBuilder<Decoration>()
-  for (const { issue, line } of entries) {
-    const message = issue.message?.trim() || 'Test failure'
-    builder.add(
-      line.from,
-      line.from,
-      Decoration.line({
-        attributes: {
-          class: 'cm-failure-line',
-          title: message,
-        },
-      }),
-    )
-  }
-  return builder.finish()
-}
-
-function safeLine(state: EditorState, line: number) {
-  const target = Math.trunc(line)
-  if (!Number.isFinite(target) || target < 1 || target > state.doc.lines) {
-    return null
-  }
-  return state.doc.line(target)
-}
-
-const failureMarkers = StateField.define<RangeSet<GutterMarker>>({
-  create: () => RangeSet.empty,
-  update(value, transaction) {
-    value = value.map(transaction.changes)
-    for (const effect of transaction.effects) {
-      if (effect.is(setEditorIssues)) {
-        return buildFailureMarkers(transaction.state, effect.value)
-      }
-    }
-    return value
-  },
-})
-
-const failureDecorations = StateField.define<ReturnType<typeof RangeSet.of<Decoration>>>({
-  create: () => Decoration.none,
-  update(value, transaction) {
-    value = value.map(transaction.changes)
-    for (const effect of transaction.effects) {
-      if (effect.is(setEditorIssues)) {
-        return buildFailureDecorations(transaction.state, effect.value)
-      }
-    }
-    return value
-  },
-  provide: (field) => EditorView.decorations.from(field),
-})
-
-const setDefinitionHover = StateEffect.define<{ from: number; to: number } | null>()
-
-const definitionHover = StateField.define<ReturnType<typeof RangeSet.of<Decoration>>>({
-  create: () => Decoration.none,
-  update(value, transaction) {
-    value = value.map(transaction.changes)
-    for (const effect of transaction.effects) {
-      if (!effect.is(setDefinitionHover)) {
-        continue
-      }
-      if (!effect.value || effect.value.from >= effect.value.to) {
-        return Decoration.none
-      }
-      const builder = new RangeSetBuilder<Decoration>()
-      builder.add(
-        effect.value.from,
-        effect.value.to,
-        Decoration.mark({ class: 'cm-definition-link' }),
-      )
-      return builder.finish()
-    }
-    return value
-  },
-  provide: (field) => EditorView.decorations.from(field),
-})
 
 /** A deliberately small CodeMirror wrapper used by the single editor pane. */
 export class JavaEditor {
@@ -1851,9 +678,14 @@ export class JavaEditor {
     const settingsShortcuts = bindings('open-settings')
     const introduceVariableShortcuts = bindings('introduce-variable')
     const extractMethodShortcuts = bindings('extract-method')
+    const renameMethodShortcuts = bindings('rename-method')
+    const finishTemplateShortcuts = bindings('finish-template')
+    const showIntentionsShortcuts = shortcutBindings('show-intentions')
     const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
+    const renameMethod = (view: EditorView): boolean => renameJavaMethod(view, callbacks.onRefactorError)
+    const showIntentions = (view: EditorView): boolean => showJavaIntentions(view)
     const showShortcuts = (): boolean => {
       callbacks.onShowShortcuts?.()
       return true
@@ -1945,21 +777,16 @@ export class JavaEditor {
       const position = modifierHeld
         ? view.posAtCoords({ x: event.clientX, y: event.clientY })
         : null
-      const identifier = position === null ? null : javaIdentifierAt(view.state.doc.toString(), position)
-      const definition = modifierHeld && position !== null && identifier
-        ? resolveJavaDefinition(view.state.doc.toString(), position)
+      const highlight = modifierHeld && position !== null
+        ? javaDefinitionHoverRange(view.state.doc.toString(), position)
         : null
-      const range = definition && identifier
-        ? `${identifier.from}:${identifier.to}`
-        : ''
+      const range = highlight ? `${highlight.from}:${highlight.to}` : ''
       if (range === hoveredDefinition) {
         return
       }
       hoveredDefinition = range
       view.dispatch({
-        effects: setDefinitionHover.of(identifier && definition
-          ? { from: identifier.from, to: identifier.to }
-          : null),
+        effects: setDefinitionHover.of(highlight),
       })
     }
 
@@ -1992,6 +819,7 @@ export class JavaEditor {
         [isRedoAltShortcut, redo],
         [isUndoAltShortcut, undo],
         [isCompleteStatementAltShortcut, completeJavaStatement],
+        [isShowIntentionsAltShortcut, showIntentions],
         [isLineEndAltShortcut, moveToJavaLineEnd],
         [isMoveLineUpAltShortcut, moveLineUp],
         [isMoveLineDownAltShortcut, moveLineDown],
@@ -2014,6 +842,7 @@ export class JavaEditor {
         leetcoderTheme,
         syntaxHighlighting(leetcoderHighlight),
         java(),
+        javaIterTemplateExtension,
         javaAutoImports,
         javaImportPruning,
         javaFolding,
@@ -2068,9 +897,15 @@ export class JavaEditor {
         EditorState.tabSize.of(4),
         EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
+        javaIntentionsExtension,
         // Consume the printable opening parenthesis before the browser can
         // emit a second input event with the stale selection range.
         javaIdentifierCallKeymap,
+        // Run before autocompletion's own Prec.highest Enter binding so an
+        // accepted completion can also finish an already active live
+        // template in the same key press.
+        Prec.highest(keymap.of(commandBindings(showIntentionsShortcuts, showIntentions))),
+        Prec.highest(keymap.of(commandBindings(finishTemplateShortcuts, finishJavaTemplate, false))),
         keymap.of([
           ...closeBracketsKeymap,
           ...completionKeymap,
@@ -2091,7 +926,8 @@ export class JavaEditor {
           ...commandBindings(moveLineDownShortcuts, moveLineDown),
           ...commandBindings(introduceVariableShortcuts, introduceJavaVariable),
           ...commandBindings(extractMethodShortcuts, extractMethod),
-          // IntelliJ-style line editing shortcuts. CodeMirror's built-in
+          ...commandBindings(renameMethodShortcuts, renameMethod),
+          // Familiar line-editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while
           // preserving the document's configured line separator.
           ...commandBindings(duplicateLineShortcuts, copyLineDown),
@@ -2149,7 +985,7 @@ export class JavaEditor {
             if (position === null) {
               return false
             }
-            const definition = resolveJavaDefinition(view.state.doc.toString(), position)
+            const definition = javaDefinitionAt(view.state.doc.toString(), position)
             if (!definition) {
               return false
             }

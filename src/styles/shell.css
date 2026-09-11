@@ -1,0 +1,182 @@
+/* ---------------------------------------------------------------- */
+/* Shell layout                                                      */
+/* ---------------------------------------------------------------- */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+.app-header {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  height: 44px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.wordmark {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.app-header-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.app-menu-button {
+  flex: none;
+}
+
+.app-menu {
+  position: absolute;
+  z-index: 70;
+  top: 40px;
+  left: 12px;
+  min-width: 220px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-3);
+  box-shadow: var(--shadow-menu);
+}
+
+.app-menu-item {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+}
+
+.app-menu-item:hover:not(:disabled),
+.app-menu-item:focus-visible {
+  background: var(--surface-2);
+}
+
+.app-menu-item:disabled {
+  opacity: 0.5;
+}
+
+.app-menu-item-update {
+  color: var(--accent);
+}
+
+.app-menu-item-danger {
+  color: var(--red);
+}
+
+.app-menu-item-danger:hover:not(:disabled),
+.app-menu-item-danger:focus-visible {
+  background: var(--red-soft);
+}
+
+.app-menu-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+}
+
+.app-menu-action-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.app-menu-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-menu-item-detail {
+  justify-self: end;
+  margin-top: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.app-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.app-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.update-button {
+  color: var(--accent);
+}
+
+.update-button[hidden] {
+  display: none;
+}
+
+.update-button.is-spinning .app-icon {
+  animation: spin 0.9s linear infinite;
+}
+
+.repo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  max-width: 340px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.repo-chip:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.repo-chip:disabled {
+  opacity: 0.55;
+}
+
+.repo-chip.is-empty {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.repo-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace {
+  display: grid;
+  flex: 1;
+  grid-template-columns: var(--sidebar-width, 248px) 7px minmax(0, 1fr);
+  min-height: 0;
+}

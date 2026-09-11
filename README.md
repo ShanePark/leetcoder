@@ -8,6 +8,9 @@ package, edit it, and run that class's JUnit test.
 The app currently supports this repository only. It does not try to replace a
 general-purpose Java IDE.
 
+For module responsibilities, dependency direction, and parallel work
+ownership, see [the architecture guide](docs/architecture.md).
+
 <div align="center">
   <img src="src-tauri/icons/icon.png" width="144" alt="leetcoder app icon: a friendly white ghost holding a green check mark on a deep blue background" />
   <h2>A focused, friendly workspace for daily Java problem practice</h2>

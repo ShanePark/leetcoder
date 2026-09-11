@@ -6,6 +6,7 @@
 - Do not invent requirements, broaden scope, or add speculative abstractions or dependencies.
 - Follow existing conventions and preserve unrelated behavior and work.
 - Write clear code. Comment only non-obvious rationale, invariants, or constraints.
+- Keep commit messages, code comments, documentation, and user-facing copy focused on behavior and function; avoid unnecessary references to specific products or brands. Preserve required API identifiers and license attributions.
 - Keyboard shortcuts follow the policy in `## Keyboard Shortcuts` below.
 
 ## Keyboard Shortcuts
@@ -28,8 +29,8 @@ with `Ctrl`.
   primary label. Save shows as `Alt+S` on Linux and `⌘S` on macOS; JavaDoc as
   `Alt+Shift+J` and `⇧⌘J`.
 - Exceptions are shortcuts that are the same chord on both platforms already —
-  `Ctrl-Space`, and IntelliJ chords the user asked for verbatim such as
-  `Mod-Alt-l` for reformat. These get no `Alt-` twin.
+  `Ctrl-Space`, and platform-independent chords the user asked for verbatim
+  such as `Mod-Alt-l` for reformat. These get no `Alt-` twin.
 - macOS turns `Option`+letter into a typed glyph, so CodeMirror's key names do
   not match those bindings. Every `Alt-` shortcut also needs a matcher in
   `src/editor.ts` that works from `event.code`, registered in
@@ -70,3 +71,12 @@ with `Ctrl`.
 - `npm run rebuild` performs the platform-specific Tauri production build, atomically installs the new binary used by the macOS Dock or Ubuntu application launcher, and restarts leetcoder.
 - If the rebuild command is unavailable or fails, do not claim that the Dock application was updated. Report the blocker and the build log location instead.
 - Preserve unrelated working-tree changes while building and installing.
+
+## Architecture and work ownership
+
+- Use [docs/architecture.md](docs/architecture.md) as the source of truth for current module responsibilities, dependency direction, public facades, and parallel ownership.
+- Before editing, claim a concrete path set, its dependencies, and focused checks. Do not assign two agents the same source path or existing test file.
+- Shared contracts and wiring have one owner at a time: `src/backend/contracts.ts`, `src/app/types.ts`, `src-tauri/src/models.rs`, Tauri command registration, public barrels, and the ordered `src/styles.css` imports. Agents may read these files in parallel; contract changes are integrated sequentially with their consumers and tests.
+- Prefer parallel work on independent leaf modules and their owned tests. Keep `src/app.ts`, `src/editor.ts`, `src/backend.ts`, native command wiring, and native facade modules as integration boundaries unless the assigned owner is explicitly changing that boundary.
+- Preserve frontend public facades, native command names, serialized DTO shapes, event names, and the shortcut policy while moving implementation code. Shortcut definitions remain owned by `src/shortcuts.ts` with matching editor event handling.
+- After leaf checks, the integrator runs `npm run typecheck`, `npm test`, `npm run build`, and the Rust format/test/check commands. Source changes also require `npm run rebuild` before reporting desktop behavior as verified.
