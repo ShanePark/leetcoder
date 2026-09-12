@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use super::process::{git_pathspec, require_success, run_git, utf8_stdout};
@@ -247,21 +247,48 @@ pub(crate) fn changed_path_selection(
     }
 
     let mut command_paths = selected_paths.clone();
-    for selected in &selected_paths {
-        let Some(change) = changes.iter().find(|change| change.path == *selected) else {
-            continue;
-        };
-        let Some(original_path) = change.original_path.as_deref() else {
-            continue;
-        };
+    let original_start = command_paths.len();
+    append_original_paths(&changes, &selected_paths, &mut seen, &mut command_paths);
+    for original_path in &command_paths[original_start..] {
         validate_worktree_path(root, original_path)?;
-        if seen.insert(original_path.to_string()) {
-            command_paths.push(original_path.to_string());
-        }
     }
     Ok(ChangedPathSelection {
         selected_paths,
         command_paths,
         changes,
     })
+}
+
+pub(super) fn append_original_paths(
+    changes: &[GitFileChange],
+    selected_paths: &[String],
+    seen: &mut HashSet<String>,
+    command_paths: &mut Vec<String>,
+) {
+    let changes_by_path = (selected_paths.len() > 1).then(|| {
+        let mut changes_by_path = HashMap::with_capacity(changes.len());
+        for change in changes {
+            // Git normally emits each path once, but retain the old first-match
+            // behavior if a malformed status stream ever contains duplicates.
+            changes_by_path
+                .entry(change.path.as_str())
+                .or_insert(change);
+        }
+        changes_by_path
+    });
+    for selected in selected_paths {
+        let change = changes_by_path
+            .as_ref()
+            .and_then(|changes| changes.get(selected.as_str()).copied())
+            .or_else(|| changes.iter().find(|change| change.path == *selected));
+        let Some(change) = change else {
+            continue;
+        };
+        let Some(original_path) = change.original_path.as_deref() else {
+            continue;
+        };
+        if seen.insert(original_path.to_string()) {
+            command_paths.push(original_path.to_string());
+        }
+    }
 }

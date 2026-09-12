@@ -1,15 +1,20 @@
 use super::{
     commit::commit,
     diff::diff,
-    path::{file_manager_target, validate_worktree_path},
+    path::{
+        append_original_paths, changed_path_selection, file_manager_target, validate_worktree_path,
+    },
     process::read_bounded_stream,
     push::push,
     service::{discard_changes, list_changes, show_in_file_manager},
 };
+use crate::models::GitFileChange;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 fn run_fixture_git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -54,6 +59,228 @@ fn fixture() -> tempfile::TempDir {
     run_fixture_git(directory.path(), &["add", "--", "tracked.txt"]);
     run_fixture_git(directory.path(), &["commit", "--quiet", "-m", "initial"]);
     directory
+}
+
+#[test]
+fn rename_source_lookup_preserves_first_duplicate_status_record() {
+    let changes = vec![
+        GitFileChange {
+            path: "renamed.txt".to_string(),
+            status: "R".to_string(),
+            index_status: "R".to_string(),
+            worktree_status: ".".to_string(),
+            original_path: Some("first.txt".to_string()),
+        },
+        GitFileChange {
+            path: "renamed.txt".to_string(),
+            status: "R".to_string(),
+            index_status: "R".to_string(),
+            worktree_status: ".".to_string(),
+            original_path: Some("second.txt".to_string()),
+        },
+        GitFileChange {
+            path: "other.txt".to_string(),
+            status: "M".to_string(),
+            index_status: ".".to_string(),
+            worktree_status: "M".to_string(),
+            original_path: None,
+        },
+    ];
+    let selected = vec!["renamed.txt".to_string(), "other.txt".to_string()];
+    let mut seen = selected.iter().cloned().collect();
+    let mut command_paths = selected.clone();
+
+    append_original_paths(&changes, &selected, &mut seen, &mut command_paths);
+
+    assert_eq!(command_paths, ["renamed.txt", "other.txt", "first.txt"]);
+}
+
+#[test]
+#[ignore = "manual native path-selection benchmark"]
+fn benchmark_rename_source_lookup() {
+    let change_count = 10_000usize;
+    let selected_count = 500usize;
+    const WARMUPS: usize = 4;
+    const SAMPLES: usize = 20;
+    const CALLS_PER_SAMPLE: usize = 10;
+    let changes: Vec<GitFileChange> = (0..change_count)
+        .map(|index| GitFileChange {
+            path: format!("src/problem-{index}.java"),
+            status: "R".to_string(),
+            index_status: "R".to_string(),
+            worktree_status: ".".to_string(),
+            original_path: (index % 20 == 0).then(|| format!("src/original-{index}.java")),
+        })
+        .collect();
+    let selected: Vec<String> = (0..selected_count)
+        .map(|index| {
+            format!(
+                "src/problem-{}.java",
+                index * (change_count / selected_count)
+            )
+        })
+        .collect();
+
+    fn reference_lookup(changes: &[GitFileChange], selected: &[String]) -> Vec<String> {
+        let mut seen: HashSet<String> = selected.iter().cloned().collect();
+        let mut command_paths = selected.to_vec();
+        for selected_path in selected {
+            let Some(change) = changes.iter().find(|change| change.path == *selected_path) else {
+                continue;
+            };
+            let Some(original_path) = change.original_path.as_deref() else {
+                continue;
+            };
+            if seen.insert(original_path.to_string()) {
+                command_paths.push(original_path.to_string());
+            }
+        }
+        command_paths
+    }
+
+    fn production_lookup(changes: &[GitFileChange], selected: &[String]) -> Vec<String> {
+        let mut seen: HashSet<String> = selected.iter().cloned().collect();
+        let mut command_paths = selected.to_vec();
+        append_original_paths(changes, selected, &mut seen, &mut command_paths);
+        command_paths
+    }
+
+    fn measure_batch<F>(calls: usize, mut lookup: F) -> (u128, Vec<Vec<String>>, usize)
+    where
+        F: FnMut() -> Vec<String>,
+    {
+        let started = Instant::now();
+        let mut outputs = Vec::with_capacity(calls);
+        for _ in 0..calls {
+            outputs.push(lookup());
+        }
+        let elapsed_ns_per_call = started.elapsed().as_nanos() / calls as u128;
+        let checksum = outputs.iter().map(Vec::len).sum();
+        (elapsed_ns_per_call, outputs, checksum)
+    }
+
+    let measure_pair = |reference_first: bool| {
+        let (reference, production) = if reference_first {
+            (
+                measure_batch(CALLS_PER_SAMPLE, || reference_lookup(&changes, &selected)),
+                measure_batch(CALLS_PER_SAMPLE, || production_lookup(&changes, &selected)),
+            )
+        } else {
+            let production =
+                measure_batch(CALLS_PER_SAMPLE, || production_lookup(&changes, &selected));
+            let reference =
+                measure_batch(CALLS_PER_SAMPLE, || reference_lookup(&changes, &selected));
+            (reference, production)
+        };
+        assert_eq!(reference.1, production.1);
+        assert_eq!(reference.2, production.2);
+        (reference.0, production.0, reference.2, production.2)
+    };
+
+    for warmup in 0..WARMUPS {
+        let _ = measure_pair(warmup % 2 == 0);
+    }
+
+    let mut reference_samples = Vec::with_capacity(SAMPLES);
+    let mut production_samples = Vec::with_capacity(SAMPLES);
+    let mut baseline_checksum = 0usize;
+    let mut checksum = 0usize;
+    for sample in 0..SAMPLES {
+        let (reference_ns, production_ns, reference_batch_checksum, production_batch_checksum) =
+            measure_pair(sample % 2 == 0);
+        reference_samples.push(reference_ns);
+        production_samples.push(production_ns);
+        baseline_checksum = baseline_checksum.saturating_add(reference_batch_checksum);
+        checksum = checksum.saturating_add(production_batch_checksum);
+    }
+
+    fn median(samples: &[u128]) -> u128 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let middle = sorted.len() / 2;
+        if sorted.len() % 2 == 0 {
+            (sorted[middle - 1] + sorted[middle]) / 2
+        } else {
+            sorted[middle]
+        }
+    }
+
+    let selected_single = vec!["src/problem-0.java".to_string()];
+    let started = Instant::now();
+    let mut single_checksum = 0usize;
+    for _ in 0..(SAMPLES * CALLS_PER_SAMPLE) {
+        let mut seen: HashSet<String> = selected_single.iter().cloned().collect();
+        let mut command_paths = selected_single.clone();
+        append_original_paths(&changes, &selected_single, &mut seen, &mut command_paths);
+        single_checksum = single_checksum.saturating_add(command_paths.len());
+    }
+    let single_elapsed = started.elapsed();
+
+    let expected_checksum = SAMPLES * CALLS_PER_SAMPLE * (selected_count * 2);
+    assert_eq!(baseline_checksum, expected_checksum);
+    assert_eq!(baseline_checksum, checksum);
+    assert_eq!(single_checksum, SAMPLES * CALLS_PER_SAMPLE * 2);
+    eprintln!(
+        "rename-source lookup benchmark: {change_count} changes, {selected_count} selected, warmups={WARMUPS}, samples={SAMPLES}, calls_per_sample={CALLS_PER_SAMPLE}: baseline_samples_ns_per_call={reference_samples:?}, production_samples_ns_per_call={production_samples:?}, baseline_median_ns_per_call={}, production_median_ns_per_call={}, single_ns_per_call={}, checksum={baseline_checksum}/{checksum}/{single_checksum}",
+        median(&reference_samples),
+        median(&production_samples),
+        single_elapsed.as_nanos() / (SAMPLES * CALLS_PER_SAMPLE) as u128,
+    );
+}
+
+#[test]
+#[ignore = "manual native Git status benchmark"]
+fn benchmark_changed_path_selection_with_git_fixture() {
+    let directory = fixture();
+    let root = fs::canonicalize(directory.path()).expect("canonical fixture root");
+    let source_root = root.join("src");
+    fs::create_dir(&source_root).expect("source directory");
+    let change_count = 2_000usize;
+    let selected_count = 500usize;
+    for index in 0..change_count {
+        fs::write(
+            source_root.join(format!("problem-{index}.java")),
+            format!("class Problem{index} {{}}\n"),
+        )
+        .expect("problem fixture");
+    }
+    let selected: Vec<String> = (0..selected_count)
+        .map(|index| {
+            format!(
+                "src/problem-{}.java",
+                index * (change_count / selected_count)
+            )
+        })
+        .collect();
+
+    let started = Instant::now();
+    let selection = changed_path_selection(&root, selected.clone()).expect("fixture selection");
+    let elapsed = started.elapsed();
+
+    let mut baseline_paths = selected.clone();
+    let mut seen: HashSet<String> = selected.iter().cloned().collect();
+    for selected_path in &selected {
+        let Some(change) = selection
+            .changes
+            .iter()
+            .find(|change| change.path == *selected_path)
+        else {
+            continue;
+        };
+        let Some(original_path) = change.original_path.as_deref() else {
+            continue;
+        };
+        if seen.insert(original_path.to_string()) {
+            baseline_paths.push(original_path.to_string());
+        }
+    }
+
+    assert_eq!(selection.selected_paths, selected);
+    assert_eq!(selection.command_paths, baseline_paths);
+    eprintln!(
+        "changed_path_selection fixture benchmark: {change_count} untracked files, {selected_count} selected: elapsed={elapsed:?}, command_paths={}"
+        , selection.command_paths.len()
+    );
 }
 
 #[test]
