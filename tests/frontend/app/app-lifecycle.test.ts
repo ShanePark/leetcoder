@@ -5,6 +5,7 @@ import type {
   ProblemFileEntry,
   RepositoryFilesChanged,
 } from '../../../src/backend'
+import { UPDATE_CHECK_INTERVAL_MS } from '../../../src/update-controller'
 
 const testMocks = vi.hoisted(() => ({
   editorInstances: [] as Array<{
@@ -631,6 +632,54 @@ describe('LeetcoderApp lifecycle', () => {
     await second.destroy()
     expect(dom.window.totalListenerCount()).toBe(0)
     expect(dom.document.totalListenerCount()).toBe(0)
+  })
+
+  it('does not gate remembered repository startup on a pending daily request', async () => {
+    const { backend } = createBackend()
+    const daily = deferred<typeof dailyProblem>()
+    backend.fetchDailyProblem = vi.fn(() => daily.promise)
+    const app = new LeetcoderApp(dom.root as unknown as HTMLElement, {
+      backend,
+      storage: rememberedStorage() as unknown as Storage,
+    })
+
+    let started = false
+    const startup = app.start().then(() => {
+      started = true
+    })
+
+    await vi.waitFor(() => {
+      expect(backend.listProblemFiles).toHaveBeenCalledWith('/repo')
+      expect(started).toBe(false)
+    })
+    expect(backend.fetchDailyProblem).toHaveBeenCalledOnce()
+
+    await app.destroy()
+    daily.resolve(dailyProblem)
+    await startup
+    expect(started).toBe(true)
+  })
+
+  it('pauses update polling while hidden and resumes on visibility return', async () => {
+    vi.useFakeTimers()
+    try {
+      const { backend } = createBackend()
+      const app = await startApp(dom, backend)
+      await Promise.resolve()
+      expect(backend.checkForUpdate).toHaveBeenCalledOnce()
+
+      dom.document.visibilityState = 'hidden'
+      dom.document.dispatch('visibilitychange')
+      vi.advanceTimersByTime(UPDATE_CHECK_INTERVAL_MS * 2)
+      expect(backend.checkForUpdate).toHaveBeenCalledOnce()
+
+      dom.document.visibilityState = 'visible'
+      dom.document.dispatch('visibilitychange')
+      expect(backend.checkForUpdate).toHaveBeenCalledTimes(2)
+      await app.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

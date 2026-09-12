@@ -129,6 +129,7 @@ export class LeetcoderApp {
   private updateController: UpdateController
   private updateProgressListenerStop: (() => void) | null = null
   private updateCheckTimer: ReturnType<typeof setInterval> | null = null
+  private updatePollingInstalled = false
   private readonly state: AppState = {
     repoPath: null,
     projectValid: false,
@@ -257,6 +258,7 @@ export class LeetcoderApp {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
       this.gitController.clearScheduledRefresh()
       this.problemSelectionController.clearScheduledRefresh()
+      this.pauseUpdatePolling()
       return
     }
     this.handleAppVisibilityReturn()
@@ -524,24 +526,40 @@ export class LeetcoderApp {
     } catch {
       // Without the watcher the editor still syncs on window focus.
     }
-    await this.problemSelectionController.loadDailyProblem()
+    // Daily problem loading uses the network and can take considerably longer
+    // than local repository setup. Start both operations together so a
+    // remembered repository is usable while the daily card is still loading,
+    // while keeping start()'s completion contract intact.
+    const dailyProblemLoad = this.problemSelectionController.loadDailyProblem()
     const rememberedPath = this.storage?.getItem(LAST_REPOSITORY_KEY) ?? null
+    let repositoryLoad: Promise<void> = Promise.resolve()
     if (rememberedPath) {
-      await this.selectRepository(rememberedPath, false)
+      repositoryLoad = this.selectRepository(rememberedPath, false)
     } else {
       this.setMessage('Choose a repository to get started.', 'info')
     }
+    await Promise.all([dailyProblemLoad, repositoryLoad])
     this.installUpdatePolling()
   }
 
   private installUpdatePolling(): void {
-    if (this.updateCheckTimer !== null) {
-      clearInterval(this.updateCheckTimer)
+    this.updatePollingInstalled = true
+    this.pauseUpdatePolling()
+    if (!this.isWindowVisible() || this.destroyed) {
+      return
     }
     void this.updateController.checkForUpdate()
     this.updateCheckTimer = setInterval(() => {
       void this.updateController.checkForUpdate()
     }, UPDATE_CHECK_INTERVAL_MS)
+  }
+
+  private pauseUpdatePolling(): void {
+    if (this.updateCheckTimer === null) {
+      return
+    }
+    clearInterval(this.updateCheckTimer)
+    this.updateCheckTimer = null
   }
 
   async prepareToClose(): Promise<void> {
@@ -566,10 +584,7 @@ export class LeetcoderApp {
       remove()
     }
     this.problemSelectionController.dispose()
-    if (this.updateCheckTimer !== null) {
-      clearInterval(this.updateCheckTimer)
-      this.updateCheckTimer = null
-    }
+    this.pauseUpdatePolling()
     this.updateProgressListenerStop?.()
     this.updateProgressListenerStop = null
     this.updateProgressView.fail()
@@ -1106,6 +1121,9 @@ export class LeetcoderApp {
   private handleAppVisibilityReturn(): void {
     if (!this.isWindowVisible() || this.destroyed) {
       return
+    }
+    if (this.updatePollingInstalled && this.updateCheckTimer === null) {
+      this.installUpdatePolling()
     }
     this.problemSelectionController.refreshDailyProblemIfStale()
     // Filesystem events can be missed while the window is hidden, so returning
