@@ -486,93 +486,88 @@ export function collectJavaSymbols(source: string, position = source.length): Ja
  * declarations or clickable calls.
  */
 export function maskJavaCommentsAndLiterals(source: string): string {
-  // `split('')` intentionally keeps UTF-16 code-unit indexing. CodeMirror
-  // positions are UTF-16 offsets, while spreading a string would collapse
-  // astral characters and shift every later source range.
-  const chars = source.split('')
-  let state: 'normal' | 'lineComment' | 'blockComment' | 'string' | 'char' | 'textBlock' = 'normal'
-  for (let index = 0; index < chars.length; index += 1) {
-    const current = chars[index]
-    const next = chars[index + 1]
-    if (state === 'lineComment') {
-      if (current === '\n' || current === '\r') {
-        state = 'normal'
-      } else {
-        chars[index] = ' '
-      }
-      continue
-    }
-    if (state === 'blockComment') {
-      if (current === '*' && next === '/') {
-        chars[index] = ' '
-        chars[index + 1] = ' '
-        index += 1
-        state = 'normal'
-      } else if (current !== '\n' && current !== '\r') {
-        chars[index] = ' '
-      }
-      continue
-    }
-    if (state === 'string' || state === 'char') {
-      if (current === '\\') {
-        chars[index] = ' '
-        if (index + 1 < chars.length && chars[index + 1] !== '\n' && chars[index + 1] !== '\r') {
-          chars[index + 1] = ' '
-          index += 1
-        }
-      } else if ((state === 'string' && current === '"') || (state === 'char' && current === "'")) {
-        chars[index] = ' '
-        state = 'normal'
-      } else if (current !== '\n' && current !== '\r') {
-        chars[index] = ' '
-      }
-      continue
-    }
-    if (state === 'textBlock') {
-      if (current === '\\') {
-        chars[index] = ' '
-        if (index + 1 < chars.length && chars[index + 1] !== '\n' && chars[index + 1] !== '\r') {
-          chars[index + 1] = ' '
-          index += 1
-        }
-      } else if (current === '"' && next === '"' && chars[index + 2] === '"') {
-        chars[index] = ' '
-        chars[index + 1] = ' '
-        chars[index + 2] = ' '
-        index += 2
-        state = 'normal'
-      } else if (current !== '\n' && current !== '\r') {
-        chars[index] = ' '
-      }
-      continue
-    }
+  // Keep source offsets in UTF-16 code units, as CodeMirror does. Record only
+  // masked runs, then assemble the unchanged source around them so ordinary
+  // completion requests avoid a full per-character copy.
+  const maskedRanges: Array<{ from: number; to: number; literal: boolean }> = []
+  let index = 0
+  while (index < source.length) {
+    const current = source[index]
+    const next = source[index + 1]
     if (current === '/' && next === '/') {
-      chars[index] = ' '
-      chars[index + 1] = ' '
-      index += 1
-      state = 'lineComment'
-    } else if (current === '/' && next === '*') {
-      chars[index] = ' '
-      chars[index + 1] = ' '
-      index += 1
-      state = 'blockComment'
-    } else if (current === '"' && next === '"' && chars[index + 2] === '"') {
-      // Keep one non-whitespace placeholder so a literal counts as an
-      // argument even when its contents are masked.
-      chars[index] = '\u0001'
-      chars[index + 1] = ' '
-      chars[index + 2] = ' '
+      const from = index
       index += 2
-      state = 'textBlock'
-    } else if (current === '"') {
-      chars[index] = '\u0001'
-      state = 'string'
-    } else if (current === "'") {
-      chars[index] = '\u0001'
-      state = 'char'
+      while (index < source.length && source[index] !== '\n' && source[index] !== '\r') index += 1
+      maskedRanges.push({ from, to: index, literal: false })
+      continue
     }
+    if (current === '/' && next === '*') {
+      const from = index
+      index += 2
+      while (index < source.length) {
+        if (source[index] === '*' && source[index + 1] === '/') {
+          index += 2
+          break
+        }
+        index += 1
+      }
+      maskedRanges.push({ from, to: index, literal: false })
+      continue
+    }
+    if (current === '"' && next === '"' && source[index + 2] === '"') {
+      const from = index
+      index += 3
+      while (index < source.length) {
+        if (source[index] === '\\') {
+          index += 1
+          if (index < source.length && source[index] !== '\n' && source[index] !== '\r') index += 1
+          continue
+        }
+        if (source[index] === '"' && source[index + 1] === '"' && source[index + 2] === '"') {
+          index += 3
+          break
+        }
+        index += 1
+      }
+      maskedRanges.push({ from, to: index, literal: true })
+      continue
+    }
+    if (current === '"' || current === "'") {
+      const quote = current
+      const from = index
+      index += 1
+      while (index < source.length) {
+        if (source[index] === '\\') {
+          index += 1
+          if (index < source.length && source[index] !== '\n' && source[index] !== '\r') index += 1
+          continue
+        }
+        if (source[index] === quote) {
+          index += 1
+          break
+        }
+        index += 1
+      }
+      maskedRanges.push({ from, to: index, literal: true })
+      continue
+    }
+    index += 1
   }
-  return chars.join('')
+
+  if (maskedRanges.length === 0) return source
+
+  const maskRange = (range: typeof maskedRanges[number]): string => {
+    const value = source.slice(range.from, range.to).replace(/[^\r\n]/g, ' ')
+    return range.literal ? `\u0001${value.slice(1)}` : value
+  }
+  const parts: string[] = []
+  let cursor = 0
+  for (const range of maskedRanges) {
+    parts.push(source.slice(cursor, range.from), maskRange(range))
+    cursor = range.to
+  }
+  parts.push(source.slice(cursor))
+  return parts.join('')
 }
 
 function javaClassNames(maskedSource: string): Set<string> {

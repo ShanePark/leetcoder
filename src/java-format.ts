@@ -54,16 +54,43 @@ export function importBlockRange(source: string): ImportBlock | null {
 
 /** The source with comments, literals, and every import line blanked out. */
 function codeOutsideImports(source: string, lines: readonly ImportLine[]): string {
-  let masked = maskJavaCommentsAndLiterals(source)
+  const masked = maskJavaCommentsAndLiterals(source)
+  if (lines.length === 0) return masked
+
+  // Keep the masked source immutable while blanking imports in one assembly
+  // pass. Repeated slice/concatenate operations made this O(source length ×
+  // import count) for files with a long import block.
+  const parts: string[] = []
+  let cursor = 0
   for (const line of lines) {
-    masked = masked.slice(0, line.from) + ' '.repeat(line.to - line.from) + masked.slice(line.to)
+    parts.push(masked.slice(cursor, line.from), ' '.repeat(line.to - line.from))
+    cursor = line.to
   }
-  return masked
+  parts.push(masked.slice(cursor))
+  return parts.join('')
 }
 
-function referencesType(code: string, typeName: string): boolean {
-  const escaped = typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`\\b${escaped}\\b`).test(code)
+function referencedTypeNames(code: string, lines: readonly ImportLine[]): Set<string> {
+  const names = new Set(lines
+    .filter((line) => !line.static && !line.name.endsWith('.*'))
+    .map((line) => {
+      const typeName = line.name.slice(line.name.lastIndexOf('.') + 1)
+      return JAVA_TYPE_IMPORTS[typeName] === line.name ? typeName : null
+    })
+    .filter((typeName): typeName is string => typeName !== null))
+  if (names.size === 0) return names
+
+  // One alternation scans the code once for every candidate type. Word
+  // boundaries intentionally match the previous per-import RegExp behavior.
+  const escaped = [...names]
+    .sort((left, right) => right.length - left.length)
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')
+  const references = new Set<string>()
+  const pattern = new RegExp(`\\b(?:${escaped})\\b`, 'g')
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(code)) !== null) references.add(match[0])
+  return references
 }
 
 /**
@@ -83,6 +110,7 @@ export function removeUnusedJavaTypeImports(source: string, typingPrefix: string
     return source
   }
   const code = codeOutsideImports(source, lines)
+  const referenced = referencedTypeNames(code, lines)
   const unused = lines.filter((line) => {
     if (line.static || line.name.endsWith('.*')) {
       return false
@@ -91,7 +119,7 @@ export function removeUnusedJavaTypeImports(source: string, typingPrefix: string
     if (typingPrefix && typeName.startsWith(typingPrefix)) {
       return false
     }
-    return JAVA_TYPE_IMPORTS[typeName] === line.name && !referencesType(code, typeName)
+    return JAVA_TYPE_IMPORTS[typeName] === line.name && !referenced.has(typeName)
   })
   if (unused.length === 0) {
     return source
@@ -274,12 +302,12 @@ function collectJavaTokenWhitespaceEdits(source: string): JavaWhitespaceEdit[] {
   }
 
   // Multiple rules can address the same boundary, such as `={`. Keep one
-  // deterministic edit for it before applying changes from right to left.
+  // deterministic edit for it before applying changes in source order.
   const unique = new Map<string, JavaWhitespaceEdit>()
   for (const edit of edits) {
     unique.set(`${edit.from}:${edit.to}`, edit)
   }
-  return [...unique.values()].sort((left, right) => right.from - left.from)
+  return [...unique.values()].sort((left, right) => left.from - right.from || left.to - right.to)
 }
 
 /**
@@ -295,6 +323,7 @@ function normalizeJavaTokenWhitespace(source: string): string {
   const masked = maskJavaCommentsAndLiterals(source)
   let normalized = ''
   let index = 0
+  let lineStart = 0
 
   while (index < source.length) {
     const current = source[index]
@@ -306,7 +335,6 @@ function normalizeJavaTokenWhitespace(source: string): string {
 
       const previous = index > 0 ? masked[index - 1] : ''
       const next = end < source.length ? masked[end] : ''
-      const lineStart = Math.max(source.lastIndexOf('\n', index - 1) + 1, source.lastIndexOf('\r', index - 1) + 1)
       const onlyIndentation = source.slice(lineStart, index).trim() === ''
       const followsComment = source[end] === '/'
         && (source[end + 1] === '/' || source[end + 1] === '*')
@@ -325,6 +353,7 @@ function normalizeJavaTokenWhitespace(source: string): string {
     }
 
     normalized += current
+    if (current === '\n' || current === '\r') lineStart = index + 1
     if (masked[index] === ',') {
       const next = source[index + 1]
       const startsComment = next === '/' && (source[index + 2] === '/' || source[index + 2] === '*')
@@ -339,10 +368,14 @@ function normalizeJavaTokenWhitespace(source: string): string {
     index += 1
   }
   const edits = collectJavaTokenWhitespaceEdits(normalized)
+  const pieces: string[] = []
+  let cursor = 0
   for (const edit of edits) {
-    normalized = `${normalized.slice(0, edit.from)}${edit.insert}${normalized.slice(edit.to)}`
+    pieces.push(normalized.slice(cursor, edit.from), edit.insert)
+    cursor = edit.to
   }
-  return normalized
+  pieces.push(normalized.slice(cursor))
+  return pieces.join('')
 }
 
 /** Trim trailing spaces, normalize token spacing, cap blank-line runs, and end with one line break. */
