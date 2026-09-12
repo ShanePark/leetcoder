@@ -72,6 +72,13 @@ with `Ctrl`.
 - If the rebuild command is unavailable or fails, do not claim that the Dock application was updated. Report the blocker and the build log location instead.
 - Preserve unrelated working-tree changes while building and installing.
 
+## Rust/Tauri build artifacts
+
+- The default Rust development profile keeps line tables for this crate and omits debug information from dependencies. Use the opt-in `debugging` profile (`cargo build --profile debugging`, or the equivalent Tauri command) when full debug information is required.
+- Agent-run `cargo check`, `cargo test`, `cargo build`, and disposable Tauri verification must use a task-specific temporary `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL=0`. Remove that temporary target directory after verification so checks do not accumulate in `src-tauri/target`.
+- Keep the persistent `src-tauri/target` directory for interactive development only. Do not run `cargo clean` after every command; clean persistent artifacts deliberately when they are stale or no longer needed.
+- Production rebuilds that must install the desktop app are an intentional exception: run `npm run rebuild` with its persistent target path because the rebuild script installs the bundle from `src-tauri/target/release/bundle`. Preserve that path for the required rebuild/install workflow.
+
 ## Architecture and work ownership
 
 - Use [docs/architecture.md](docs/architecture.md) as the source of truth for current module responsibilities, dependency direction, public facades, and parallel ownership.
