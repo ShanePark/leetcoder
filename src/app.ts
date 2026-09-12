@@ -545,7 +545,7 @@ export class LeetcoderApp {
   private installUpdatePolling(): void {
     this.updatePollingInstalled = true
     this.pauseUpdatePolling()
-    if (!this.isWindowVisible() || this.destroyed) {
+    if (!this.isWindowVisible() || !this.isAppActive()) {
       return
     }
     void this.updateController.checkForUpdate()
@@ -571,6 +571,7 @@ export class LeetcoderApp {
       return
     }
     await this.prepareToClose()
+    this.destroyed = true
     this.fileOperationsController.dispose()
     this.testRunController.dispose()
     this.liveDiagnostics.dispose()
@@ -593,7 +594,6 @@ export class LeetcoderApp {
     this.stopWatchingFiles?.()
     this.stopWatchingFiles = null
     void this.backend.stopWatchingRepository().catch(() => {})
-    this.destroyed = true
   }
 
   private renderShell(): void {
@@ -782,7 +782,7 @@ export class LeetcoderApp {
   }
 
   private async chooseRepository(): Promise<void> {
-    if (this.state.busy) {
+    if (!this.isAppActive() || this.state.busy) {
       return
     }
     const selection = this.repositoryPicker.open(this.directoryPicker)
@@ -798,12 +798,14 @@ export class LeetcoderApp {
     } catch (error) {
       this.setMessage(errorMessage(error), 'error')
     } finally {
-      this.renderAll()
+      if (this.isAppActive()) {
+        this.renderAll()
+      }
     }
   }
 
   private async selectRepository(path: string, remember: boolean): Promise<void> {
-    if (this.state.busy) {
+    if (!this.isAppActive() || this.state.busy) {
       return
     }
     this.closeFileContextMenu()
@@ -812,12 +814,19 @@ export class LeetcoderApp {
       this.repositoryGeneration += 1
       this.refreshRequestId += 1
     }
+    const selectionGeneration = this.repositoryGeneration
     this.state.busy = true
     this.renderAll()
-    if (path !== this.state.repoPath && !(await this.flushPendingSave())) {
-      this.state.busy = false
-      this.renderAll()
-      return
+    if (path !== this.state.repoPath) {
+      const saved = await this.flushPendingSave()
+      if (!this.isCurrentRepositorySelection(selectionGeneration)) {
+        return
+      }
+      if (!saved) {
+        this.state.busy = false
+        this.renderAll()
+        return
+      }
     }
     if (switchingRepository) {
       // Clear the old document before loading the new repository. Relative
@@ -837,6 +846,9 @@ export class LeetcoderApp {
     }
     try {
       const validation = await this.backend.validateProject(path)
+      if (!this.isCurrentRepositorySelection(selectionGeneration)) {
+        return
+      }
       if (!validation.valid) {
         this.storage?.removeItem(LAST_REPOSITORY_KEY)
         throw new Error(validation.message ?? 'This folder does not look like the ps repository.')
@@ -848,22 +860,35 @@ export class LeetcoderApp {
         this.storage?.setItem(LAST_REPOSITORY_KEY, path)
       }
       await this.refreshFiles()
+      if (!this.isCurrentRepositorySelection(selectionGeneration)) {
+        return
+      }
       try {
         await this.backend.watchRepository(path)
+        if (!this.isCurrentRepositorySelection(selectionGeneration)) {
+          await this.backend.stopWatchingRepository().catch(() => {})
+        }
       } catch {
         // Losing the watcher only costs live updates, not the repository.
+        if (!this.isCurrentRepositorySelection(selectionGeneration)) {
+          await this.backend.stopWatchingRepository().catch(() => {})
+        }
       }
     } catch (error) {
-      this.state.projectValid = false
-      this.setMessage(errorMessage(error), 'error')
+      if (this.isCurrentRepositorySelection(selectionGeneration)) {
+        this.state.projectValid = false
+        this.setMessage(errorMessage(error), 'error')
+      }
     } finally {
-      this.state.busy = false
-      this.renderAll()
+      if (this.isCurrentRepositorySelection(selectionGeneration)) {
+        this.state.busy = false
+        this.renderAll()
+      }
     }
   }
 
   private async refreshFiles(): Promise<boolean> {
-    if (!this.state.repoPath || !this.state.projectValid) {
+    if (!this.isAppActive() || !this.state.repoPath || !this.state.projectValid) {
       return false
     }
     const repoPath = this.state.repoPath
@@ -876,8 +901,13 @@ export class LeetcoderApp {
       }
       const filesByPath = indexProblemFiles(files)
       const missingTabs = this.state.openTabs.filter((tab) => !findIndexedProblemFile(filesByPath, tab.path))
-      if (missingTabs.length > 0 && !(await this.flushPendingSave())) {
-        return false
+      if (missingTabs.length > 0) {
+        if (!this.isCurrentRefresh(repoPath, repositoryGeneration, requestId)) {
+          return false
+        }
+        if (!(await this.flushPendingSave())) {
+          return false
+        }
       }
       if (!this.isCurrentRefresh(repoPath, repositoryGeneration, requestId)) {
         return false
@@ -910,12 +940,14 @@ export class LeetcoderApp {
       this.setMessage(`Could not list problem files: ${errorMessage(error)}`, 'error')
       return false
     } finally {
-      this.renderAll()
+      if (this.isAppActive()) {
+        this.renderAll()
+      }
     }
   }
 
   private isCurrentRefresh(repoPath: string, repositoryGeneration: number, requestId: number): boolean {
-    return isCurrentRepositoryRefresh(
+    return this.isAppActive() && isCurrentRepositoryRefresh(
       { repoPath, repositoryGeneration, requestId },
       {
         repoPath: this.state.repoPath,
@@ -924,6 +956,15 @@ export class LeetcoderApp {
         refreshRequestId: this.refreshRequestId,
       },
     )
+  }
+
+  private isCurrentRepositorySelection(repositoryGeneration: number): boolean {
+    return this.isAppActive()
+      && repositoryGeneration === this.repositoryGeneration
+  }
+
+  private isAppActive(): boolean {
+    return !this.destroyed
   }
 
   private activeOpenTab(): OpenFileTab | null {
@@ -981,7 +1022,7 @@ export class LeetcoderApp {
     snapshot: LiveDiagnosticsSnapshot,
     diagnostics: readonly ProblemDiagnostic[],
   ): void {
-    if (this.destroyed || !this.isCurrentLiveDiagnosticsSnapshot(snapshot)) {
+    if (!this.isAppActive() || !this.isCurrentLiveDiagnosticsSnapshot(snapshot)) {
       return
     }
     this.state.liveDiagnosticsError = null
@@ -998,7 +1039,7 @@ export class LeetcoderApp {
   }
 
   private handleLiveDiagnosticsError(snapshot: LiveDiagnosticsSnapshot, error: unknown): void {
-    if (this.destroyed || !this.isCurrentLiveDiagnosticsSnapshot(snapshot)) {
+    if (!this.isAppActive() || !this.isCurrentLiveDiagnosticsSnapshot(snapshot)) {
       return
     }
     // Keep this in the quiet status row rather than a toast: a compiler
@@ -1094,7 +1135,7 @@ export class LeetcoderApp {
   }
 
   private readonly handleRepositoryFilesChanged = (change: RepositoryFilesChanged): void => {
-    if (this.destroyed || !this.state.repoPath || !this.state.projectValid) {
+    if (!this.isAppActive() || !this.state.repoPath || !this.state.projectValid) {
       return
     }
     if (change.structural) {
@@ -1119,7 +1160,7 @@ export class LeetcoderApp {
   }
 
   private handleAppVisibilityReturn(): void {
-    if (!this.isWindowVisible() || this.destroyed) {
+    if (!this.isWindowVisible() || !this.isAppActive()) {
       return
     }
     if (this.updatePollingInstalled && this.updateCheckTimer === null) {

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   BackendClient,
   ProblemFileEntry,
+  ProjectValidation,
   RepositoryFilesChanged,
 } from '../../../src/backend'
 import { UPDATE_CHECK_INTERVAL_MS } from '../../../src/update-controller'
@@ -599,6 +600,10 @@ describe('LeetcoderApp lifecycle', () => {
       'class Q1TwoSum { int value = 2; }',
     )
 
+    const listenersBeforeFailedDestroy = dom.window.totalListenerCount()
+    await expect(app.destroy()).rejects.toThrow('disk full')
+    expect(dom.window.totalListenerCount()).toBe(listenersBeforeFailedDestroy)
+
     // Resolve the pending retry so the fixture can tear down through the same
     // close path a real desktop window uses.
     backend.saveProblemFile = vi.fn().mockResolvedValue(undefined)
@@ -658,6 +663,75 @@ describe('LeetcoderApp lifecycle', () => {
     daily.resolve(dailyProblem)
     await startup
     expect(started).toBe(true)
+  })
+
+  it('stops remembered repository startup when validation finishes after destroy', async () => {
+    const { backend } = createBackend()
+    const validation = deferred<ProjectValidation>()
+    backend.validateProject = vi.fn(() => validation.promise)
+    const app = new LeetcoderApp(dom.root as unknown as HTMLElement, {
+      backend,
+      storage: rememberedStorage() as unknown as Storage,
+    })
+    const startup = app.start()
+
+    await vi.waitFor(() => {
+      expect(backend.validateProject).toHaveBeenCalledWith('/repo')
+    })
+    const rendersBeforeDestroy = testMocks.fileViewCallbacks.length
+    await app.destroy()
+    validation.resolve({ valid: true })
+    await startup
+
+    expect(backend.listProblemFiles).not.toHaveBeenCalled()
+    expect(backend.watchRepository).not.toHaveBeenCalled()
+    expect(testMocks.fileViewCallbacks).toHaveLength(rendersBeforeDestroy)
+  })
+
+  it('does not apply a file listing that finishes after destroy', async () => {
+    const { backend } = createBackend()
+    const files = deferred<ProblemFileEntry[]>()
+    backend.listProblemFiles = vi.fn(() => files.promise)
+    const app = new LeetcoderApp(dom.root as unknown as HTMLElement, {
+      backend,
+      storage: rememberedStorage() as unknown as Storage,
+    })
+    const startup = app.start()
+
+    await vi.waitFor(() => {
+      expect(backend.listProblemFiles).toHaveBeenCalledWith('/repo')
+    })
+    const rendersBeforeDestroy = testMocks.fileViewCallbacks.length
+    await app.destroy()
+    files.resolve([file])
+    await startup
+
+    expect(backend.watchRepository).not.toHaveBeenCalled()
+    expect(testMocks.fileViewCallbacks).toHaveLength(rendersBeforeDestroy)
+  })
+
+  it('stops a watcher that finishes installing after destroy', async () => {
+    const { backend } = createBackend()
+    const watching = deferred<void>()
+    backend.watchRepository = vi.fn(() => watching.promise)
+    const app = new LeetcoderApp(dom.root as unknown as HTMLElement, {
+      backend,
+      storage: rememberedStorage() as unknown as Storage,
+    })
+    const startup = app.start()
+
+    await vi.waitFor(() => {
+      expect(backend.watchRepository).toHaveBeenCalledWith('/repo')
+    })
+    const rendersBeforeDestroy = testMocks.fileViewCallbacks.length
+    await app.destroy()
+    const stopsBeforeLateWatcher = vi.mocked(backend.stopWatchingRepository).mock.calls.length
+    watching.resolve()
+    await startup
+
+    expect(vi.mocked(backend.stopWatchingRepository).mock.calls.length)
+      .toBe(stopsBeforeLateWatcher + 1)
+    expect(testMocks.fileViewCallbacks).toHaveLength(rendersBeforeDestroy)
   })
 
   it('pauses update polling while hidden and resumes on visibility return', async () => {
