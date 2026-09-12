@@ -1,0 +1,201 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Leetcoder app view performance</title>
+<style>
+  body { margin: 0; font: 13px system-ui, sans-serif; }
+  .fixture-pair { display: flex; gap: 12px; }
+  .fixture { width: 420px; height: 540px; overflow: auto; contain: content; }
+  .file-list { contain: content; }
+  .file-group-list { display: block; }
+  .file-item { display: block; width: 100%; }
+  pre { white-space: pre-wrap; }
+</style>
+<main>
+  <h1>App view benchmark</h1>
+  <div class="fixture-pair">
+    <div id="fixture-baseline" class="fixture">
+      <input class="file-search">
+      <span class="file-count"></span>
+      <div class="file-list"></div>
+    </div>
+    <div id="fixture-optimized" class="fixture">
+      <input class="file-search">
+      <span class="file-count"></span>
+      <div class="file-list"></div>
+    </div>
+  </div>
+  <pre id="output">Running…</pre>
+</main>
+<script type="module">
+  import { renderFilesView, FILE_GROUPS } from '../../src/app/files-view.ts'
+  import { renderFilesViewBaseline } from './fixtures/files-view-baseline.ts'
+
+  const fileCount = 2353
+  const files = Array.from({ length: fileCount }, (_, index) => {
+    const packageSegment = FILE_GROUPS[index % FILE_GROUPS.length].key
+    return {
+      path: `src/main/java/${packageSegment}/Q${index + 1}Problem.java`,
+      name: `Q${index + 1}Problem.java`,
+      packageSegment,
+    }
+  })
+  const baselineFixture = document.querySelector('#fixture-baseline')
+  const optimizedFixture = document.querySelector('#fixture-optimized')
+  const output = document.querySelector('#output')
+  if (!(baselineFixture instanceof HTMLElement)
+    || !(optimizedFixture instanceof HTMLElement)
+    || !(output instanceof HTMLElement)) {
+    throw new Error('benchmark fixture is incomplete')
+  }
+
+  function viewElements(fixture) {
+    const list = fixture.querySelector('.file-list')
+    const searchInput = fixture.querySelector('.file-search')
+    const totalCount = fixture.querySelector('.file-count')
+    if (!(list instanceof HTMLElement)
+      || !(searchInput instanceof HTMLInputElement)
+      || !(totalCount instanceof HTMLElement)) {
+      throw new Error('benchmark fixture controls are incomplete')
+    }
+    return { list, searchInput, totalCount }
+  }
+
+  const baselineElements = viewElements(baselineFixture)
+  const optimizedElements = viewElements(optimizedFixture)
+
+  const model = (selectedPath = null) => ({
+    projectValid: true,
+    files,
+    selectedPath,
+    fileSearch: '',
+    expandedGroups: new Set(['easy', 'medium', 'xhard']),
+    busy: false,
+    isFileOpen: (path) => path === selectedPath,
+  })
+  const callbacks = {
+    onFileSelect: () => {},
+    onGroupToggle: () => {},
+    onFileContextMenu: () => {},
+    onRendered: () => {},
+  }
+  function forceLayout(elements) {
+    // Reading layout after each render keeps the result representative of the
+    // browser's DOM/style work, while still excluding network/native work.
+    return elements.list.offsetHeight
+      + elements.list.scrollHeight
+      + elements.list.querySelectorAll('.file-item').length
+  }
+
+  function median(samples) {
+    const sorted = [...samples].sort((left, right) => left - right)
+    const middle = (sorted.length - 1) / 2
+    const lower = Math.floor(middle)
+    const upper = Math.ceil(middle)
+    return (sorted[lower] + sorted[upper]) / 2
+  }
+
+  function percentile(samples, fraction) {
+    const sorted = [...samples].sort((left, right) => left - right)
+    return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)]
+  }
+
+  function measureRender(render, elements, samples, checksums, selectedPath) {
+    const start = performance.now()
+    render(elements, model(selectedPath), callbacks)
+    checksums.push(forceLayout(elements))
+    samples.push(performance.now() - start)
+  }
+
+  const warmupIterations = 4
+  const measuredIterations = 20
+  for (let index = 0; index < warmupIterations; index += 1) {
+    const selectedPath = files[index].path
+    if (index % 2 === 0) {
+      renderFilesViewBaseline(baselineElements, model(selectedPath), callbacks)
+      forceLayout(baselineElements)
+      renderFilesView(optimizedElements, model(selectedPath), callbacks)
+      forceLayout(optimizedElements)
+    } else {
+      renderFilesView(optimizedElements, model(selectedPath), callbacks)
+      forceLayout(optimizedElements)
+      renderFilesViewBaseline(baselineElements, model(selectedPath), callbacks)
+      forceLayout(baselineElements)
+    }
+  }
+
+  const baselineSamples = []
+  const optimizedSamples = []
+  const baselineChecksums = []
+  const optimizedChecksums = []
+  for (let index = 0; index < measuredIterations; index += 1) {
+    const selectedPath = files[(index + warmupIterations) % files.length].path
+    if (index % 2 === 0) {
+      measureRender(
+        renderFilesViewBaseline,
+        baselineElements,
+        baselineSamples,
+        baselineChecksums,
+        selectedPath,
+      )
+      measureRender(
+        renderFilesView,
+        optimizedElements,
+        optimizedSamples,
+        optimizedChecksums,
+        selectedPath,
+      )
+    } else {
+      measureRender(
+        renderFilesView,
+        optimizedElements,
+        optimizedSamples,
+        optimizedChecksums,
+        selectedPath,
+      )
+      measureRender(
+        renderFilesViewBaseline,
+        baselineElements,
+        baselineSamples,
+        baselineChecksums,
+        selectedPath,
+      )
+    }
+  }
+  const baselineLayoutChecksum = baselineChecksums.reduce((sum, value) => sum + value, 0)
+  const optimizedLayoutChecksum = optimizedChecksums.reduce((sum, value) => sum + value, 0)
+  const layoutChecksumsEqual = baselineChecksums.length === optimizedChecksums.length
+    && baselineChecksums.every((value, index) => value === optimizedChecksums[index])
+  if (!layoutChecksumsEqual) {
+    throw new Error(`layout checksum mismatch: ${baselineLayoutChecksum} !== ${optimizedLayoutChecksum}`)
+  }
+  const legacy = {
+    label: 'legacy full DOM rebuild',
+    iterations: measuredIterations,
+    samplesMs: baselineSamples,
+    layoutChecksums: baselineChecksums,
+    medianMs: median(baselineSamples),
+    p95Ms: percentile(baselineSamples, 0.95),
+    layoutChecksum: baselineLayoutChecksum,
+  }
+  const optimized = {
+    label: 'cached structure + in-place rows',
+    iterations: measuredIterations,
+    samplesMs: optimizedSamples,
+    layoutChecksums: optimizedChecksums,
+    medianMs: median(optimizedSamples),
+    p95Ms: percentile(optimizedSamples, 0.95),
+    layoutChecksum: optimizedLayoutChecksum,
+  }
+  const report = {
+    fixtureFiles: fileCount,
+    warmupIterations,
+    measuredIterations,
+    note: 'Real browser DOM with forced layout reads; separate attached fixtures alternate execution order and exclude native/network work.',
+    layoutChecksumEqual: layoutChecksumsEqual,
+    legacy,
+    optimized,
+    speedup: legacy.medianMs / optimized.medianMs,
+  }
+  output.textContent = JSON.stringify(report, null, 2)
+  window.__leetcoderAppViewBenchmark = report
+</script>

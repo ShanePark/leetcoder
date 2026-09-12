@@ -307,6 +307,60 @@ describe('FileTabsView', () => {
     expect(itemsAfter[1].querySelector<HTMLButtonElement>('[role="tab"]')?.scrollCalls).toHaveLength(1)
   })
 
+  it('skips rebuilding when render receives the same tab and state snapshot', () => {
+    installFakeDocument()
+    const list = new FakeElement('nav')
+    const view = new FileTabsView(list as unknown as HTMLElement, {
+      onOpenTab: vi.fn(),
+      onCloseTab: vi.fn(),
+    })
+    const current = tabsModel()
+    view.render(current)
+    const itemsBefore = list.querySelectorAll('.file-tab')
+    const firstTabBefore = itemsBefore[0]
+
+    view.render({ ...current })
+
+    expect(list.querySelectorAll('.file-tab')).toEqual(itemsBefore)
+    expect(list.querySelectorAll('.file-tab')[0]).toBe(firstTabBefore)
+  })
+
+  it('updates close-button busy state without rebuilding tab controls', () => {
+    installFakeDocument()
+    const list = new FakeElement('nav')
+    const view = new FileTabsView(list as unknown as HTMLElement, {
+      onOpenTab: vi.fn(),
+      onCloseTab: vi.fn(),
+    })
+    const current = tabsModel()
+    view.render(current)
+    const firstTab = list.querySelector('.file-tab')
+    const close = firstTab?.querySelector<HTMLButtonElement>('.file-tab-close')
+
+    view.render({ ...current, busy: true })
+
+    expect(list.querySelector('.file-tab')).toBe(firstTab)
+    expect(close?.disabled).toBe(true)
+  })
+
+  it('rebuilds when an external mutation removes a cached tab item', () => {
+    installFakeDocument()
+    const list = new FakeElement('nav')
+    const view = new FileTabsView(list as unknown as HTMLElement, {
+      onOpenTab: vi.fn(),
+      onCloseTab: vi.fn(),
+    })
+    const current = tabsModel()
+    view.render(current)
+    const firstTabBefore = list.querySelector('.file-tab')
+    firstTabBefore?.remove()
+
+    view.update(current)
+
+    expect(list.querySelectorAll('.file-tab')).toHaveLength(2)
+    expect(list.querySelector('.file-tab')).not.toBe(firstTabBefore)
+  })
+
   it('moves the tab strip only for a shifted wheel when it overflows', () => {
     installFakeDocument()
     const list = new FakeElement('nav')

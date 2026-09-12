@@ -27,6 +27,8 @@ export interface FileTabsViewCallbacks {
  */
 export class FileTabsView {
   private renderedActiveTabId: number | null = null
+  private renderedTabsSignature: string | null = null
+  private renderedStateSignature: string | null = null
   private revealFrame: number | null = null
   private revealToken = 0
 
@@ -43,11 +45,18 @@ export class FileTabsView {
 
   /** Render the tab strip from scratch after its membership or metadata changes. */
   render(model: FileTabsViewModel): void {
+    const tabsSignature = fileTabsSignature(model.openTabs)
+    if (this.renderedTabsSignature === tabsSignature) {
+      this.update(model)
+      return
+    }
     const activeChanged = this.renderedActiveTabId !== model.activeTabId
     if (activeChanged) {
       this.cancelScheduledReveal()
     }
     this.renderedActiveTabId = model.activeTabId
+    this.renderedTabsSignature = tabsSignature
+    this.renderedStateSignature = fileTabsStateSignature(model)
     this.list.innerHTML = ''
     for (const tab of model.openTabs) {
       this.list.append(this.renderTab(tab, model))
@@ -60,8 +69,17 @@ export class FileTabsView {
   /** Update active/dirty state without rebuilding tab controls when possible. */
   update(model: FileTabsViewModel): void {
     const items = Array.from(this.list.querySelectorAll<HTMLElement>('.file-tab'))
-    if (items.length !== model.openTabs.length) {
+    if (this.renderedTabsSignature !== fileTabsSignature(model.openTabs)
+      || items.length !== model.openTabs.length) {
+      // `render()` delegates to `update()` when the membership signature is
+      // unchanged, so invalidate the cached signature before asking it to
+      // rebuild after external DOM removal.
+      this.renderedTabsSignature = null
+      this.renderedStateSignature = null
       this.render(model)
+      return
+    }
+    if (this.renderedStateSignature === fileTabsStateSignature(model)) {
       return
     }
 
@@ -71,6 +89,8 @@ export class FileTabsView {
       const item = itemsById.get(String(tab.id))
       const tabButton = item?.querySelector<HTMLButtonElement>('[role="tab"]')
       if (!item || !tabButton) {
+        this.renderedTabsSignature = null
+        this.renderedStateSignature = null
         this.render(model)
         return
       }
@@ -78,6 +98,10 @@ export class FileTabsView {
       item.classList.toggle('is-active', active)
       tabButton.setAttribute('aria-selected', String(active))
       tabButton.tabIndex = active ? 0 : -1
+      const close = item.querySelector<HTMLButtonElement>('.file-tab-close')
+      if (close) {
+        close.disabled = model.busy
+      }
       this.updateDirtyMarker(item, tabButton, active && this.isDirty(model))
     }
 
@@ -88,11 +112,14 @@ export class FileTabsView {
     } else {
       this.renderedActiveTabId = model.activeTabId
     }
+    this.renderedStateSignature = fileTabsStateSignature(model)
   }
 
   /** Cancel pending reveal work and detach the wheel listener. */
   dispose(): void {
     this.cancelScheduledReveal()
+    this.renderedTabsSignature = null
+    this.renderedStateSignature = null
     this.list.removeEventListener('wheel', this.handleWheel)
   }
 
@@ -229,6 +256,16 @@ export function createFileTabsView(
   callbacks: FileTabsViewCallbacks,
 ): FileTabsView {
   return new FileTabsView(list, callbacks)
+}
+
+function fileTabsSignature(tabs: readonly OpenFileTab[]): string {
+  return tabs
+    .map((tab) => `${tab.id}\u0000${tab.path}\u0000${tab.name}\u0000${tab.packageSegment}`)
+    .join('\u0001')
+}
+
+function fileTabsStateSignature(model: FileTabsViewModel): string {
+  return `${model.activeTabId ?? ''}\u0000${String(model.dirty)}\u0000${String(model.hasPendingChanges)}\u0000${String(model.busy)}`
 }
 
 /** Whether a file-tab wheel gesture should move the tab strip horizontally. */

@@ -39,6 +39,26 @@ export interface DailyProblemViewElements {
 
 export type DailyProblemViewRenderer = (model: DailyProblemViewModel) => void
 
+interface DailyProblemRenderSnapshot {
+  readonly problemId: string
+  readonly problemTitle: string
+  readonly problemDifficulty: string
+  readonly problemUrl: string
+  readonly problemSnippet: string
+  readonly problemContent: string | null
+  readonly existingFilePath: string
+  readonly existingFileName: string
+  readonly existingFilePackage: ProblemFileEntry['packageSegment'] | ''
+  readonly projectValid: boolean
+  readonly busy: boolean
+  readonly dailyLoading: boolean
+  readonly dailyError: string | null
+  readonly problemSelection: DailyProblemSelection
+  readonly problemNumberDraft: string
+  readonly viewingToday: boolean
+  readonly dailyDescriptionOpen: boolean
+}
+
 /**
  * Create a renderer for the daily-problem card.
  *
@@ -52,8 +72,19 @@ export function createDailyProblemView(
 ): DailyProblemViewRenderer {
   let sanitizedDescriptionSource: string | null = null
   let sanitizedDescriptionElement: HTMLElement | null = null
+  let currentCallbacks = callbacks
+  let currentExistingFile: ProblemFileEntry | null = null
+  let renderedSnapshot: DailyProblemRenderSnapshot | null = null
 
   return (model): void => {
+    currentCallbacks = callbacks
+    currentExistingFile = model.existingFile
+    const nextSnapshot = dailyProblemRenderSnapshot(model)
+    if (sameDailyProblemSnapshot(renderedSnapshot, nextSnapshot)) {
+      return
+    }
+    renderedSnapshot = nextSnapshot
+
     const activeElement = document.activeElement
     const focusedLookup = activeElement instanceof HTMLInputElement
       && activeElement.classList.contains('problem-lookup-input')
@@ -62,7 +93,10 @@ export function createDailyProblemView(
     const lookupSelectionEnd = focusedLookup ? activeElement.selectionEnd : null
 
     elements.header.innerHTML = ''
-    elements.header.append(renderProblemLookup(model, callbacks))
+    elements.header.append(renderProblemLookup(model, {
+      onLookupInput: (value) => currentCallbacks.onLookupInput(value),
+      onLookupSubmit: (value) => currentCallbacks.onLookupSubmit(value),
+    }))
     if (focusedLookup) {
       const input = elements.header.querySelector<HTMLInputElement>('.problem-lookup-input')
       if (input) {
@@ -77,11 +111,13 @@ export function createDailyProblemView(
     if (!problem) {
       elements.description.hidden = true
       elements.resizeHandle.hidden = true
-      callbacks.onApplyDescriptionHeight()
+      currentCallbacks.onApplyDescriptionHeight()
       if (model.dailyLoading) {
         elements.header.append(renderDailySkeleton())
       } else if (model.dailyError) {
-        elements.header.append(renderDailyError(model, callbacks))
+        elements.header.append(renderDailyError(model, {
+          onRetry: () => currentCallbacks.onRetry(),
+        }))
       } else {
         const waiting = document.createElement('span')
         waiting.className = 'daily-waiting'
@@ -118,7 +154,7 @@ export function createDailyProblemView(
       todayButton.disabled = model.busy || model.dailyLoading
       todayButton.append(iconFor('calendarDays', 'button-icon'))
       todayButton.append(document.createTextNode('Back to today'))
-      todayButton.addEventListener('click', callbacks.onBackToToday)
+      todayButton.addEventListener('click', () => currentCallbacks.onBackToToday())
     }
 
     const actions = document.createElement('div')
@@ -135,7 +171,7 @@ export function createDailyProblemView(
     refresh.append(iconFor('refresh', 'button-icon'))
     refresh.disabled = model.busy || model.dailyLoading
     refresh.classList.toggle('is-spinning', model.dailyLoading)
-    refresh.addEventListener('click', callbacks.onRefresh)
+    refresh.addEventListener('click', () => currentCallbacks.onRefresh())
     actions.append(refresh)
 
     const link = document.createElement('a')
@@ -159,7 +195,7 @@ export function createDailyProblemView(
       toggle.title = 'Description'
       toggle.append(iconFor('bookOpen', 'button-icon'))
       toggle.classList.toggle('is-active', model.dailyDescriptionOpen)
-      toggle.addEventListener('click', callbacks.onToggleDescription)
+      toggle.addEventListener('click', () => currentCallbacks.onToggleDescription())
       actions.append(toggle)
     }
 
@@ -174,9 +210,13 @@ export function createDailyProblemView(
       primary.disabled = model.busy
     }
     if (model.existingFile) {
-      primary.addEventListener('click', () => callbacks.onOpenFile(model.existingFile!))
+      primary.addEventListener('click', () => {
+        if (currentExistingFile) {
+          currentCallbacks.onOpenFile(currentExistingFile)
+        }
+      })
     } else {
-      primary.addEventListener('click', callbacks.onCreateFile)
+      primary.addEventListener('click', () => currentCallbacks.onCreateFile())
     }
     actions.append(primary)
     elements.header.append(title, difficulty, today, actions)
@@ -185,11 +225,11 @@ export function createDailyProblemView(
       elements.description.hidden = false
       renderDailyDescription(elements.description, problem.content ?? '')
       elements.resizeHandle.hidden = false
-      callbacks.onApplyDescriptionHeight()
+      currentCallbacks.onApplyDescriptionHeight()
     } else {
       elements.description.hidden = true
       elements.resizeHandle.hidden = true
-      callbacks.onApplyDescriptionHeight()
+      currentCallbacks.onApplyDescriptionHeight()
     }
   }
 
@@ -208,9 +248,61 @@ export function createDailyProblemView(
   }
 }
 
+function dailyProblemRenderSnapshot(model: DailyProblemViewModel): DailyProblemRenderSnapshot {
+  const problem = model.problem
+  const existingFile = model.existingFile
+  return {
+    problemId: problem?.frontendId ?? '',
+    problemTitle: problem?.title ?? '',
+    problemDifficulty: problem?.difficulty ?? '',
+    problemUrl: problem?.url ?? '',
+    problemSnippet: problem?.javaSnippet ?? '',
+    problemContent: problem?.content ?? null,
+    existingFilePath: existingFile?.path ?? '',
+    existingFileName: existingFile?.name ?? '',
+    existingFilePackage: existingFile?.packageSegment ?? '',
+    projectValid: model.projectValid,
+    busy: model.busy,
+    dailyLoading: model.dailyLoading,
+    dailyError: model.dailyError,
+    problemSelection: model.problemSelection,
+    // This stores the value the input actually displays. A null draft falls
+    // back to the problem id, while an empty draft intentionally stays blank.
+    problemNumberDraft: model.problemNumberDraft ?? problem?.frontendId ?? '',
+    viewingToday: model.viewingToday,
+    dailyDescriptionOpen: model.dailyDescriptionOpen,
+  }
+}
+
+function sameDailyProblemSnapshot(
+  previous: DailyProblemRenderSnapshot | null,
+  next: DailyProblemRenderSnapshot,
+): boolean {
+  if (!previous) {
+    return false
+  }
+  return previous.problemId === next.problemId
+    && previous.problemTitle === next.problemTitle
+    && previous.problemDifficulty === next.problemDifficulty
+    && previous.problemUrl === next.problemUrl
+    && previous.problemSnippet === next.problemSnippet
+    && previous.problemContent === next.problemContent
+    && previous.existingFilePath === next.existingFilePath
+    && previous.existingFileName === next.existingFileName
+    && previous.existingFilePackage === next.existingFilePackage
+    && previous.projectValid === next.projectValid
+    && previous.busy === next.busy
+    && previous.dailyLoading === next.dailyLoading
+    && previous.dailyError === next.dailyError
+    && previous.problemSelection === next.problemSelection
+    && previous.problemNumberDraft === next.problemNumberDraft
+    && previous.viewingToday === next.viewingToday
+    && previous.dailyDescriptionOpen === next.dailyDescriptionOpen
+}
+
 function renderProblemLookup(
   model: DailyProblemViewModel,
-  callbacks: DailyProblemViewCallbacks,
+  callbacks: Pick<DailyProblemViewCallbacks, 'onLookupInput' | 'onLookupSubmit'>,
 ): HTMLElement {
   const form = document.createElement('form')
   form.className = 'problem-lookup'
@@ -272,7 +364,7 @@ function renderDailySkeleton(): HTMLElement {
 
 function renderDailyError(
   model: DailyProblemViewModel,
-  callbacks: DailyProblemViewCallbacks,
+  callbacks: Pick<DailyProblemViewCallbacks, 'onRetry'>,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'daily-error'
