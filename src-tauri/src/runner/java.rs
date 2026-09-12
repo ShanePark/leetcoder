@@ -15,6 +15,17 @@ pub(crate) struct JavaInstallation {
 }
 
 pub(crate) fn discover_compatible_java() -> Result<JavaInstallation, String> {
+    discover_compatible_java_with_parallel_queries(true)
+}
+
+#[cfg(test)]
+pub(crate) fn discover_compatible_java_baseline() -> Result<JavaInstallation, String> {
+    discover_compatible_java_with_parallel_queries(false)
+}
+
+fn discover_compatible_java_with_parallel_queries(
+    enable_parallel_queries: bool,
+) -> Result<JavaInstallation, String> {
     let mut homes = Vec::new();
     for variable in ["JAVA_HOME", "JDK_HOME"] {
         if let Some(home) = std::env::var_os(variable) {
@@ -35,20 +46,30 @@ pub(crate) fn discover_compatible_java() -> Result<JavaInstallation, String> {
     homes.extend(discover_environment_java_homes());
 
     #[cfg(target_os = "macos")]
-    homes.extend(discover_macos_java_homes());
+    if enable_parallel_queries {
+        homes.extend(discover_macos_java_homes());
+    } else {
+        homes.extend(discover_macos_java_homes_sequential());
+    }
 
     #[cfg(target_os = "linux")]
     homes.extend(discover_linux_java_homes());
 
+    #[cfg(not(target_os = "macos"))]
+    let _ = enable_parallel_queries;
+
     let homes = deduplicate_paths(homes);
-    let installations: Vec<JavaInstallation> = homes
+    let installations = homes
         .iter()
         .filter_map(|home| probe_java_home(home))
         .collect();
+    finish_java_selection(installations)
+}
+
+fn finish_java_selection(installations: Vec<JavaInstallation>) -> Result<JavaInstallation, String> {
     if let Some(java) = select_compatible_java(&installations) {
         return Ok(java);
     }
-
     let detected = installations
         .iter()
         .map(|java| format!("{} (Java {})", java.home.display(), java.major_version))
@@ -210,22 +231,50 @@ pub(crate) fn discover_environment_java_homes() -> Vec<PathBuf> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn discover_macos_java_homes() -> Vec<PathBuf> {
-    let mut homes = Vec::new();
-    for version in MIN_SUPPORTED_JAVA_MAJOR..=TARGET_JAVA_MAJOR {
-        let output = Command::new("/usr/libexec/java_home")
-            .arg("-v")
-            .arg(version.to_string())
-            .output();
-        if let Ok(output) = output {
-            if output.status.success() {
-                let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !home.is_empty() {
-                    homes.push(PathBuf::from(home));
-                }
-            }
-        }
+    discover_macos_java_homes_with(Path::new("/usr/libexec/java_home"), true)
+}
+
+#[cfg(target_os = "macos")]
+fn discover_macos_java_homes_sequential() -> Vec<PathBuf> {
+    discover_macos_java_homes_with(Path::new("/usr/libexec/java_home"), false)
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn discover_macos_java_homes_with(command: &Path, parallel: bool) -> Vec<PathBuf> {
+    let versions: Vec<u32> = (MIN_SUPPORTED_JAVA_MAJOR..=TARGET_JAVA_MAJOR).collect();
+    if parallel {
+        return std::thread::scope(|scope| {
+            let handles: Vec<_> = versions
+                .iter()
+                .copied()
+                .map(|version| scope.spawn(move || query_macos_java_home(command, version)))
+                .collect();
+            // Consume handles in version order so completion order cannot
+            // change the original candidate ordering or tie selection.
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok().flatten())
+                .collect()
+        });
     }
-    homes
+    versions
+        .into_iter()
+        .filter_map(|version| query_macos_java_home(command, version))
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn query_macos_java_home(command: &Path, version: u32) -> Option<PathBuf> {
+    let version = version.to_string();
+    let output = Command::new(command)
+        .args(["-v", version.as_str()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!home.is_empty()).then(|| PathBuf::from(home))
 }
 
 #[cfg(target_os = "linux")]

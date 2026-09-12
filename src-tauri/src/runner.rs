@@ -28,7 +28,10 @@ pub(crate) use gradle::{
     validate_gradle_wrapper,
 };
 #[cfg(test)]
-pub(crate) use java::{parse_java_major_version, select_compatible_java, JavaInstallation};
+pub(crate) use java::{
+    discover_compatible_java, discover_compatible_java_baseline, discover_macos_java_homes_with,
+    parse_java_major_version, select_compatible_java, JavaInstallation,
+};
 #[cfg(test)]
 pub(crate) use junit::extract_expected_actual;
 #[cfg(test)]

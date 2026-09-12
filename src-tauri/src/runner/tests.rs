@@ -7,6 +7,7 @@ use crate::models::{
 };
 use crate::runner::{
     build_gradle_init_script, build_problem_test_result, create_compile_cache, create_init_script,
+    discover_compatible_java, discover_compatible_java_baseline, discover_macos_java_homes_with,
     java_source_relative_path, marker_status, parse_compilation_diagnostics,
     parse_java_major_version, parse_junit_xml, parse_test_progress_marker,
     progress_case_from_marker, read_stream, remap_snapshot_diagnostics, run_problem_test,
@@ -204,6 +205,83 @@ fn java_selection_falls_back_to_java_11() {
             home: PathBuf::from("/jdk-11"),
             major_version: 11,
         })
+    );
+}
+
+#[cfg(unix)]
+fn fake_macos_java_home_helper(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let helper = root.join("java-home-helper");
+    fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\ncase \"$2\" in\n  11) sleep 0.07; printf '%s\\n' \"{}/java-11\" ;;\n  12) sleep 0.06; exit 1 ;;\n  13) sleep 0.05; printf '%s\\n' \"{}/java-13\" ;;\n  14) sleep 0.04; printf '%s\\n' \"{}/java-14\" ;;\n  15) sleep 0.03; printf '%s\\n' \"{}/java-15\" ;;\n  16) sleep 0.02; printf '%s\\n' \"{}/java-16\" ;;\n  17) sleep 0.01; printf '%s\\n' \"{}/java-17\" ;;\nesac\n",
+            root.display(),
+            root.display(),
+            root.display(),
+            root.display(),
+            root.display(),
+            root.display(),
+        ),
+    )
+    .expect("fake java_home helper");
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("helper executable");
+    helper
+}
+
+#[cfg(unix)]
+#[test]
+fn macos_java_home_queries_preserve_version_order_and_skip_failures() {
+    let root = tempfile::tempdir().expect("fake java_home root");
+    let helper = fake_macos_java_home_helper(root.path());
+    let expected = [11, 13, 14, 15, 16, 17]
+        .into_iter()
+        .map(|version| root.path().join(format!("java-{version}")))
+        .collect::<Vec<_>>();
+
+    let parallel = discover_macos_java_homes_with(&helper, true);
+    let sequential = discover_macos_java_homes_with(&helper, false);
+
+    assert_eq!(parallel, expected);
+    assert_eq!(parallel, sequential);
+}
+
+#[test]
+#[ignore = "manual native Java discovery benchmark"]
+fn benchmark_java_discovery() {
+    let mut selected = None;
+    for _ in 0..4 {
+        let baseline = discover_compatible_java_baseline().expect("baseline JDK");
+        let optimized = discover_compatible_java().expect("optimized JDK");
+        assert_eq!(baseline, optimized);
+        selected = Some(optimized);
+    }
+    let selected = selected.expect("warmup JDK");
+
+    let mut baseline_durations = Vec::with_capacity(20);
+    let mut optimized_durations = Vec::with_capacity(20);
+    for iteration in 0..20 {
+        if iteration % 2 == 0 {
+            let started = std::time::Instant::now();
+            let baseline = discover_compatible_java_baseline().expect("baseline JDK");
+            baseline_durations.push(started.elapsed());
+            let started = std::time::Instant::now();
+            let optimized = discover_compatible_java().expect("optimized JDK");
+            optimized_durations.push(started.elapsed());
+            assert_eq!(baseline, optimized);
+        } else {
+            let started = std::time::Instant::now();
+            let optimized = discover_compatible_java().expect("optimized JDK");
+            optimized_durations.push(started.elapsed());
+            let started = std::time::Instant::now();
+            let baseline = discover_compatible_java_baseline().expect("baseline JDK");
+            baseline_durations.push(started.elapsed());
+            assert_eq!(baseline, optimized);
+        }
+    }
+    eprintln!(
+        "Java discovery benchmark: warmup_pairs=4, measured_pairs=20, selected={selected:?}, baseline={baseline_durations:?}, optimized={optimized_durations:?}"
     );
 }
 
