@@ -1,5 +1,6 @@
 use reqwest::header::{ACCEPT, CONTENT_TYPE, ORIGIN, REFERER};
 use serde_json::{json, Map, Value};
+use std::sync::OnceLock;
 
 use crate::models::DailyProblem;
 
@@ -42,6 +43,8 @@ query questionData($titleSlug: String!) {
   }
 }
 "#;
+
+static LEETCODE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 pub(crate) async fn fetch_daily_problem() -> Result<DailyProblem, String> {
     let client = leetcode_client()?;
@@ -88,6 +91,23 @@ pub(crate) async fn fetch_problem_by_number(frontend_id: &str) -> Result<DailyPr
 }
 
 fn leetcode_client() -> Result<reqwest::Client, String> {
+    if let Some(client) = LEETCODE_CLIENT.get() {
+        return Ok(client.clone());
+    }
+
+    let candidate = build_leetcode_client()?;
+    if LEETCODE_CLIENT.set(candidate.clone()).is_ok() {
+        Ok(candidate)
+    } else {
+        // Another caller initialized the client while this one was building.
+        Ok(LEETCODE_CLIENT
+            .get()
+            .expect("client set after a competing initialization")
+            .clone())
+    }
+}
+
+fn build_leetcode_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .user_agent("leetcoder/0.1 (+https://github.com/ShanePark/leetcoder)")
@@ -325,6 +345,136 @@ fn truncate(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hint::black_box;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmark_client_creation() {
+        fn median_ns<F>(mut operation: F) -> u128
+        where
+            F: FnMut(),
+        {
+            for _ in 0..10 {
+                operation();
+            }
+            let mut samples = Vec::with_capacity(30);
+            for _ in 0..30 {
+                let start = Instant::now();
+                operation();
+                samples.push(start.elapsed().as_nanos());
+            }
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        let uncached_ns = median_ns(|| {
+            black_box(build_leetcode_client().unwrap());
+        });
+        let client_ns = median_ns(|| {
+            black_box(leetcode_client().unwrap());
+        });
+        eprintln!(
+            "leetcode benchmark median_ns uncached_client={uncached_ns} cached_client={client_ns}"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmark_client_connection_reuse() {
+        const REQUESTS: usize = 12;
+
+        fn spawn_server(requests: usize) -> (String, thread::JoinHandle<usize>) {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                let mut accepted_connections = 0;
+                let mut served_requests = 0;
+                while served_requests < requests {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    accepted_connections += 1;
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                        .unwrap();
+                    while served_requests < requests {
+                        if !read_request(&mut stream) {
+                            break;
+                        }
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                            )
+                            .unwrap();
+                        stream.flush().unwrap();
+                        served_requests += 1;
+                    }
+                }
+                accepted_connections
+            });
+            (address, handle)
+        }
+
+        fn read_request(stream: &mut TcpStream) -> bool {
+            let mut request = Vec::with_capacity(512);
+            let mut chunk = [0_u8; 256];
+            loop {
+                let read = match stream.read(&mut chunk) {
+                    Ok(read) => read,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        return false
+                    }
+                    Err(_) => return false,
+                };
+                if read == 0 {
+                    return false;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    return true;
+                }
+            }
+        }
+
+        async fn request(client: &reqwest::Client, url: &str) {
+            client.get(url).send().await.unwrap().text().await.unwrap();
+        }
+
+        let (fresh_url, fresh_server) = spawn_server(REQUESTS);
+        let fresh_start = Instant::now();
+        tauri::async_runtime::block_on(async {
+            for _ in 0..REQUESTS {
+                let client = build_leetcode_client().unwrap();
+                request(&client, &fresh_url).await;
+            }
+        });
+        let fresh_elapsed = fresh_start.elapsed().as_nanos();
+        let fresh_connections = fresh_server.join().unwrap();
+
+        let (shared_url, shared_server) = spawn_server(REQUESTS);
+        let shared_client = leetcode_client().unwrap();
+        let shared_start = Instant::now();
+        tauri::async_runtime::block_on(async {
+            for _ in 0..REQUESTS {
+                request(&shared_client, &shared_url).await;
+            }
+        });
+        let shared_elapsed = shared_start.elapsed().as_nanos();
+        let shared_connections = shared_server.join().unwrap();
+
+        eprintln!(
+            "leetcode benchmark requests={REQUESTS} fresh_connections={fresh_connections} shared_connections={shared_connections} fresh_ns={fresh_elapsed} shared_ns={shared_elapsed}"
+        );
+        assert_eq!(fresh_connections, REQUESTS);
+        assert_eq!(shared_connections, 1);
+    }
 
     #[test]
     fn parses_metadata_and_java_snippet() {
