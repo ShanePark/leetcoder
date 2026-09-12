@@ -122,14 +122,15 @@ fn collect_source_files(
     {
         let entry = entry.map_err(|error| format!("Unable to inspect directory entry: {error}"))?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)
+        let file_type = entry
+            .file_type()
             .map_err(|error| format!("Unable to inspect '{}': {error}", path.display()))?;
-        if metadata.file_type().is_symlink() {
+        if file_type.is_symlink() {
             continue;
         }
-        if metadata.is_dir() {
+        if file_type.is_dir() {
             collect_source_files(root, &path, files)?;
-        } else if metadata.is_file() && crate::security::is_source_file(&path) {
+        } else if file_type.is_file() && crate::security::is_source_file(&path) {
             files.push(relative_path(root, &path)?);
         }
     }
@@ -435,8 +436,8 @@ fn source_stems_in_directory(directory: &Path) -> io::Result<Vec<String>> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.is_file() || !crate::security::is_source_file(&path) {
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() || !crate::security::is_source_file(&path) {
             continue;
         }
         if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
@@ -676,6 +677,9 @@ fn sync_directory(directory: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::security::PACKAGE_SEGMENTS;
+    use std::hint::black_box;
+    use std::os::unix::fs as unix_fs;
+    use std::time::Instant;
 
     fn fixture() -> tempfile::TempDir {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -687,6 +691,195 @@ mod tests {
             std::fs::File::create(directory.path().join(file)).expect("required file");
         }
         directory
+    }
+
+    #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmark_repository_hot_paths() {
+        let directory = fixture();
+        let root = directory.path().to_string_lossy().into_owned();
+        let canonical_root = canonical_project_root(&root).unwrap();
+        let package = directory.path().join(SOURCE_ROOT).join("easy");
+        let target = package.join("Q500.java");
+        fs::write(
+            &target,
+            "public class Q500 { int value() { return 500; } }\n",
+        )
+        .unwrap();
+        for (segment, count) in [("easy", 600), ("medium", 1_361), ("xhard", 392)] {
+            let package = directory.path().join(SOURCE_ROOT).join(segment);
+            for index in 0..count {
+                fs::write(
+                    package.join(format!("Q{index}.java")),
+                    format!("public class Q{index} {{}}\n"),
+                )
+                .unwrap();
+            }
+        }
+
+        fn median_ns<F>(mut operation: F) -> u128
+        where
+            F: FnMut(),
+        {
+            for _ in 0..10 {
+                operation();
+            }
+            let mut samples = Vec::with_capacity(30);
+            for _ in 0..30 {
+                let start = Instant::now();
+                operation();
+                samples.push(start.elapsed().as_nanos());
+            }
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        }
+
+        fn baseline_collect_source_files(
+            root: &Path,
+            directory: &Path,
+            files: &mut Vec<String>,
+        ) -> Result<(), String> {
+            for entry in fs::read_dir(directory)
+                .map_err(|error| format!("Unable to list '{}': {error}", directory.display()))?
+            {
+                let entry =
+                    entry.map_err(|error| format!("Unable to inspect directory entry: {error}"))?;
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path)
+                    .map_err(|error| format!("Unable to inspect '{}': {error}", path.display()))?;
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
+                if metadata.is_dir() {
+                    baseline_collect_source_files(root, &path, files)?;
+                } else if metadata.is_file() && crate::security::is_source_file(&path) {
+                    files.push(crate::security::relative_path(root, &path)?);
+                }
+            }
+            Ok(())
+        }
+
+        fn baseline_list_problem_files(project_root: &str) -> ProblemFileList {
+            let root = canonical_project_root(project_root).unwrap();
+            let package_dirs = all_package_directories(&root).unwrap();
+            let mut files = Vec::new();
+            for package_dir in package_dirs {
+                baseline_collect_source_files(&root, &package_dir, &mut files).unwrap();
+            }
+            files.sort();
+            ProblemFileList { files }
+        }
+
+        let optimized_files = list_problem_files(&root).unwrap();
+        let baseline_files = baseline_list_problem_files(&root);
+        assert_eq!(optimized_files.files, baseline_files.files);
+
+        let mut optimized_list_samples = Vec::with_capacity(30);
+        let mut baseline_list_samples = Vec::with_capacity(30);
+        for _ in 0..10 {
+            black_box(list_problem_files(&root).unwrap());
+            black_box(baseline_list_problem_files(&root));
+        }
+        for _ in 0..30 {
+            let start = Instant::now();
+            black_box(list_problem_files(black_box(&root)).unwrap());
+            optimized_list_samples.push(start.elapsed().as_nanos());
+
+            let start = Instant::now();
+            black_box(baseline_list_problem_files(black_box(&root)));
+            baseline_list_samples.push(start.elapsed().as_nanos());
+        }
+        optimized_list_samples.sort_unstable();
+        baseline_list_samples.sort_unstable();
+        let list_ns = optimized_list_samples[optimized_list_samples.len() / 2];
+        let baseline_list_ns = baseline_list_samples[baseline_list_samples.len() / 2];
+        let resolve_ns = median_ns(|| {
+            black_box(
+                crate::security::resolve_existing_source_file(
+                    black_box(&canonical_root),
+                    black_box("src/main/java/shane/leetcode/problems/easy/Q500.java"),
+                )
+                .unwrap(),
+            );
+        });
+        let read_ns = median_ns(|| {
+            black_box(
+                read_problem_file(crate::models::ProblemFileArgs {
+                    project_root: root.clone(),
+                    relative_path: "src/main/java/shane/leetcode/problems/easy/Q500.java"
+                        .to_string(),
+                })
+                .unwrap(),
+            );
+        });
+        eprintln!(
+            "repository benchmark median_ns list={list_ns} baseline_list={baseline_list_ns} resolve={resolve_ns} read={read_ns} files=2353"
+        );
+    }
+
+    #[test]
+    fn list_skips_non_sources_and_symlink_entries_and_sorts_nested_files() {
+        let directory = fixture();
+        let root = directory.path().to_string_lossy().into_owned();
+        let easy = directory.path().join(SOURCE_ROOT).join("easy");
+        let nested = easy.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(easy.join("Q2.java"), "class Q2 {}\n").unwrap();
+        fs::write(easy.join("Q1.kt"), "class Q1\n").unwrap();
+        fs::write(nested.join("Q3.JAVA"), "class Q3 {}\n").unwrap();
+        fs::write(easy.join("ignored.txt"), "ignored\n").unwrap();
+        fs::write(nested.join("ignored.class"), "ignored\n").unwrap();
+
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside.java");
+        fs::write(&outside_file, "outside\n").unwrap();
+        unix_fs::symlink(&outside_file, easy.join("linked.java")).unwrap();
+        unix_fs::symlink(outside.path(), easy.join("linked-directory")).unwrap();
+
+        let files = list_problem_files(&root).unwrap().files;
+        assert_eq!(
+            files,
+            vec![
+                format!("{SOURCE_ROOT}/easy/Q1.kt"),
+                format!("{SOURCE_ROOT}/easy/Q2.java"),
+                format!("{SOURCE_ROOT}/easy/nested/Q3.JAVA"),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_ignores_non_sources_and_symlink_collisions_in_nested_directory() {
+        let directory = fixture();
+        let root = directory.path().to_string_lossy().into_owned();
+        let nested = directory
+            .path()
+            .join(SOURCE_ROOT)
+            .join("easy")
+            .join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("Nested.java"), "class Nested {}\n").unwrap();
+        fs::write(nested.join("Nested2.kt"), "class Nested2\n").unwrap();
+        fs::write(nested.join("Nested3.txt"), "ignored\n").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("Nested4.java"), "outside\n").unwrap();
+        unix_fs::symlink(
+            outside.path().join("Nested4.java"),
+            nested.join("Nested4.java"),
+        )
+        .unwrap();
+
+        let duplicate = duplicate_problem_file(ProblemFileArgs {
+            project_root: root,
+            relative_path: format!("{SOURCE_ROOT}/easy/nested/Nested.java"),
+        })
+        .unwrap();
+
+        assert_eq!(
+            duplicate.relative_path,
+            format!("{SOURCE_ROOT}/easy/nested/Nested3.java")
+        );
+        assert!(nested.join("Nested3.java").is_file());
+        assert!(duplicate.content.contains("class Nested3"));
     }
 
     #[test]
