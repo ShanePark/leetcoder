@@ -87,6 +87,26 @@ class Other {
       .toEqual({ reason: 'Could not resolve every method call safely.' })
   })
 
+  it('publishes the complete syntax tree before resolving calls after the initial viewport', () => {
+    const filler = Array.from({ length: 220 }, (_, index) => `    int filler${index}() { return ${index}; }`).join('\n')
+    const source = `class Solution {
+    int helper() { return 1; }
+${filler}
+    int solve() { return helper(); }
+}`
+    const declaration = source.indexOf('helper()')
+    const call = source.lastIndexOf('helper()')
+
+    expect(source.length).toBeGreaterThan(3000)
+    expect(planJavaMethodRename(source, declaration + 2)).toEqual({
+      name: 'helper',
+      ranges: [
+        { from: declaration, to: declaration + 'helper'.length },
+        { from: call, to: call + 'helper'.length },
+      ],
+    })
+  })
+
   it('turns a successful rename into linked editor selections', () => {
     const source = `class Solution {
     int helper() { return 1; }

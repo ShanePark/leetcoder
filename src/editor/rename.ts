@@ -208,14 +208,22 @@ function analyzeJavaSource(state: EditorState): JavaSourceAnalysis {
 
 function sourceState(source: string): EditorState | null {
   const state = EditorState.create({ doc: source, extensions: [java()] })
-  return ensureSyntaxTree(state, state.doc.length, 1000) ? state : null
+  return completeAnalysisState(state)
+}
+
+function completeAnalysisState(state: EditorState): EditorState | null {
+  if (!ensureSyntaxTree(state, state.doc.length, 1000)) return null
+  // ensureSyntaxTree advances the mutable parse context, while syntaxTree
+  // reads the immutable tree published on the state field. Publish the
+  // completed context before walking it, or a large document can expose only
+  // the initial viewport and silently omit later references.
+  const parsedState = state.update({}).state
+  return syntaxTree(parsedState).length >= parsedState.doc.length ? parsedState : null
 }
 
 function analysisState(sourceOrState: string | EditorState): EditorState | null {
   if (typeof sourceOrState === 'string') return sourceState(sourceOrState)
-  return ensureSyntaxTree(sourceOrState, sourceOrState.doc.length, 1000)
-    ? sourceOrState
-    : null
+  return completeAnalysisState(sourceOrState)
 }
 
 function methodAtPosition(methods: readonly JavaMethodInfo[], position: number): JavaMethodInfo | null {
