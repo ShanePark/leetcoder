@@ -755,6 +755,28 @@ describe('LeetcoderApp lifecycle', () => {
       vi.useRealTimers()
     }
   })
+
+  it('focuses the file search field from the platform file-search shortcut', async () => {
+    const { backend } = createBackend()
+    const app = await startApp(dom, backend)
+    const search = dom.root.querySelector<FakeElement>('#file-search')
+    const event = {
+      key: 'o',
+      code: 'KeyO',
+      shiftKey: true,
+      altKey: true,
+      metaKey: false,
+      ctrlKey: false,
+      target: null,
+      preventDefault: vi.fn(),
+    } as unknown as KeyboardEvent
+
+    dom.window.dispatch('keydown', event)
+
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(dom.document.activeElement).toBe(search)
+    await app.destroy()
+  })
 })
 
 function deferred<T>(): {

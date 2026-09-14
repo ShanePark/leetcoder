@@ -16,6 +16,7 @@ import {
 import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
 import {
+  isFileSearchShortcut,
   isSettingsShortcut,
   runShortcutAction,
   shortcutHints,
@@ -187,6 +188,11 @@ export class LeetcoderApp {
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
     if (this.gitController.commitPushInProgress) {
       event.preventDefault()
+      return
+    }
+    if (isFileSearchShortcut(event, currentIsMacPlatform())) {
+      event.preventDefault()
+      this.focusFileSearch()
       return
     }
     if (isSettingsShortcut(event, currentIsMacPlatform())) {
@@ -461,6 +467,9 @@ export class LeetcoderApp {
       },
       onShowSettings: () => {
         this.overlay.openSettingsDialog('appearance')
+      },
+      onFocusFileSearch: () => {
+        this.focusFileSearch()
       },
       onRefactorError: (message) => this.setMessage(message, 'error'),
       onRunTestAtCursor: (methodName) => {
@@ -1266,6 +1275,11 @@ export class LeetcoderApp {
   private updateEditorVisibility(): void {
     this.element<HTMLElement>('#editor-empty').hidden = Boolean(this.state.selectedPath)
     this.element<HTMLElement>('#editor-host').classList.toggle('is-empty', !this.state.selectedPath)
+  }
+
+  /** Focus the file explorer search field for the global navigation shortcut. */
+  private focusFileSearch(): void {
+    this.element<HTMLInputElement>('#file-search').focus()
   }
 
   /** Update active/open explorer state without rebuilding the file list. */

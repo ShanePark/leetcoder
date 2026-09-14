@@ -170,6 +170,7 @@ export interface EditorCallbacks {
   onRunTestAtCursor?: (methodName: string | null) => boolean | void
   onShowShortcuts?: () => void
   onShowSettings?: () => void
+  onFocusFileSearch?: () => void
   onRefactorError?: (message: string) => void
   /** Overridable so tests can drive clipboard shortcuts without a system clipboard. */
   clipboard?: ClipboardBridge
@@ -496,6 +497,15 @@ export function isSettingsAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return isPlainAltShortcut(event, 'Comma')
 }
 
+/** Match the physical Linux Alt+Shift+O form of the file-search shortcut. */
+export function isFileSearchAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyO'
+    && event.altKey
+    && event.shiftKey
+    && !event.metaKey
+    && !event.ctrlKey
+}
+
 /**
  * CodeMirror wraps a non-empty selection when `(` is typed. Completion can
  * leave the just-typed Java identifier selected, where that behavior turns a
@@ -676,6 +686,7 @@ export class JavaEditor {
     const lineEndShortcuts = bindings('move-to-line-end')
     const showShortcutsBindings = bindings('show-shortcuts')
     const settingsShortcuts = bindings('open-settings')
+    const fileSearchShortcuts = bindings('focus-file-search')
     const introduceVariableShortcuts = bindings('introduce-variable')
     const extractMethodShortcuts = bindings('extract-method')
     const renameMethodShortcuts = bindings('rename-method')
@@ -692,6 +703,10 @@ export class JavaEditor {
     }
     const showSettings = (): boolean => {
       callbacks.onShowSettings?.()
+      return true
+    }
+    const focusFileSearch = (): boolean => {
+      callbacks.onFocusFileSearch?.()
       return true
     }
     const copySelection = (view: EditorView): boolean => {
@@ -824,6 +839,7 @@ export class JavaEditor {
         [isMoveLineUpAltShortcut, moveLineUp],
         [isMoveLineDownAltShortcut, moveLineDown],
         [isSettingsAltShortcut, showSettings],
+        [isFileSearchAltShortcut, focusFileSearch],
       ] as Array<[(event: JavaDocAltShortcutEvent) => boolean, (view: EditorView) => boolean]> : []),
       [isReformatShortcut, reformatJavaDocument],
       [isIntroduceVariableShortcut, introduceJavaVariable],
@@ -941,6 +957,7 @@ export class JavaEditor {
           ...commandBindings(toggleCommentShortcuts, toggleComment),
           ...commandBindings(showShortcutsBindings, showShortcuts),
           ...commandBindings(settingsShortcuts, showSettings),
+          ...commandBindings(fileSearchShortcuts, focusFileSearch),
           ...commandBindings(reformatShortcuts, reformatJavaDocument),
           ...commandBindings(completeShortcuts, startCompletion, false),
         ])),

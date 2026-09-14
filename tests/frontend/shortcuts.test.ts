@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   SHORTCUT_SECTIONS,
   formatShortcut,
+  isFileSearchShortcut,
   isSettingsShortcut,
   platformBindings,
   platformShortcutBindings,
@@ -55,6 +56,8 @@ describe('platform primary binding', () => {
     expect(primaryShortcut(entryFor('Show code actions'), true)).toBe('⌘Enter')
     expect(primaryShortcut(entryFor('Move to line end'), false)).toBe('Alt+ArrowRight')
     expect(primaryShortcut(entryFor('Move to line end'), true)).toBe('⌘ArrowRight')
+    expect(primaryShortcut(entryFor('Focus file search'), false)).toBe('Alt+Shift+O')
+    expect(primaryShortcut(entryFor('Focus file search'), true)).toBe('⇧⌘O')
     expect(primaryShortcut(entryFor('Extract method'), false)).toBe('Ctrl+Alt+M')
     expect(primaryShortcut(entryFor('Extract method'), true)).toBe('⌘⌥M')
     expect(primaryShortcut(entryFor('Rename method'), false)).toBe('Shift+F6')
@@ -124,6 +127,8 @@ describe('shortcut table', () => {
     expect(shortcutLabel('show-shortcuts', false)).toBe('Alt+Shift+/')
     expect(shortcutLabel('open-settings', false)).toBe('Alt+,')
     expect(shortcutLabel('open-settings', true)).toBe('⌘,')
+    expect(shortcutLabel('focus-file-search', false)).toBe('Alt+Shift+O')
+    expect(shortcutLabel('focus-file-search', true)).toBe('⇧⌘O')
     expect(shortcutLabel('extract-method', false)).toBe('Ctrl+Alt+M')
     expect(shortcutLabel('extract-method', true)).toBe('⌘⌥M')
     expect(shortcutLabel('rename-method', false)).toBe('Shift+F6')
@@ -168,6 +173,30 @@ describe('settings shortcut matching', () => {
   })
 })
 
+describe('file search shortcut matching', () => {
+  const base: ShortcutKeyEvent = {
+    key: 'o',
+    code: 'KeyO',
+    shiftKey: true,
+    altKey: false,
+    metaKey: false,
+    ctrlKey: false,
+  }
+
+  it('matches the platform primary modifier', () => {
+    expect(isFileSearchShortcut({ ...base, altKey: true }, false)).toBe(true)
+    expect(isFileSearchShortcut({ ...base, metaKey: true }, true)).toBe(true)
+    expect(isFileSearchShortcut({ ...base, key: 'ø', altKey: true }, false)).toBe(true)
+  })
+
+  it('rejects the wrong platform and extra modifiers', () => {
+    expect(isFileSearchShortcut({ ...base, altKey: true }, true)).toBe(false)
+    expect(isFileSearchShortcut({ ...base, metaKey: true }, false)).toBe(false)
+    expect(isFileSearchShortcut({ ...base, altKey: true, ctrlKey: true }, false)).toBe(false)
+    expect(isFileSearchShortcut({ ...base, altKey: true, shiftKey: false }, false)).toBe(false)
+  })
+})
+
 describe('run shortcut matching', () => {
   const ctrlR: ShortcutKeyEvent = {
     key: 'r',
@@ -191,6 +220,10 @@ describe('run shortcut matching', () => {
     expect(runShortcutAction({ ...ctrlR, shiftKey: true, altKey: true })).toBeNull()
     expect(runShortcutAction({ ...ctrlR, shiftKey: true, metaKey: true })).toBeNull()
     expect(runShortcutAction({ ...ctrlR, key: 's' })).toBeNull()
+  })
+
+  it('does not use the physical letter fallback for non-Alt chords', () => {
+    expect(runShortcutAction({ ...ctrlR, key: 'ř', code: 'KeyR' })).toBeNull()
   })
 })
 

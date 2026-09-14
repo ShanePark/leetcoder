@@ -31,7 +31,7 @@ export interface ShortcutSection {
 /** Keyboard fields used when matching a shortcut outside CodeMirror. */
 export interface ShortcutKeyEvent {
   key: string
-  /** Physical key code for punctuation bindings whose Alt form may compose. */
+  /** Physical key code for bindings whose modified form may compose. */
   code?: string
   shiftKey: boolean
   altKey: boolean
@@ -90,6 +90,7 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
     entries: [
       { id: 'move-to-line-end', bindings: ['Mod-ArrowRight', 'Alt-ArrowRight'], description: 'Move to line end' },
       { id: 'goto-definition', bindings: ['Mod-Click', 'Alt-Click'], description: 'Go to definition', hint: true },
+      { id: 'focus-file-search', bindings: ['Shift-Mod-o', 'Shift-Alt-o'], description: 'Focus file search' },
       { id: 'open-settings', bindings: ['Mod-,', 'Alt-,'], description: 'Open settings' },
       // Alt+/ is the physical Linux twin of Cmd+/ (toggle comment). Keep the
       // shortcut list on a shifted chord so the two actions remain distinct.
@@ -189,9 +190,11 @@ export function platformShortcutBindings(id: string, macPlatform: boolean): read
 function matchesShortcutBinding(event: ShortcutKeyEvent, binding: string): boolean {
   const parts = binding.split('-')
   const key = parts.pop()
+  const physicalKeyCode = key && /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : null
   const keyMatches = key && (
     event.key.toLowerCase() === key.toLowerCase()
     || (key === ',' && event.code === 'Comma')
+    || (event.altKey && event.code === physicalKeyCode)
   )
   if (!keyMatches) {
     return false
@@ -206,6 +209,12 @@ function matchesShortcutBinding(event: ShortcutKeyEvent, binding: string): boole
 /** Match the platform-specific settings shortcut for app-level key handlers. */
 export function isSettingsShortcut(event: ShortcutKeyEvent, macPlatform: boolean): boolean {
   return platformShortcutBindings('open-settings', macPlatform)
+    .some((binding) => matchesShortcutBinding(event, binding))
+}
+
+/** Match the platform-specific shortcut that focuses the file explorer search. */
+export function isFileSearchShortcut(event: ShortcutKeyEvent, macPlatform: boolean): boolean {
+  return platformShortcutBindings('focus-file-search', macPlatform)
     .some((binding) => matchesShortcutBinding(event, binding))
 }
 
