@@ -280,6 +280,21 @@ function hasJavaSyntaxError(node: JavaSyntaxNode): boolean {
   return false
 }
 
+function isControlHeaderCandidate(text: string, closing: string): boolean {
+  if (!closing || !/^(?:if|for|while|switch|catch|synchronized)\s*\(/.test(text)) {
+    return false
+  }
+  const tree = javaLanguage.parser.parse(`${text}${closing};`)
+  const node = tree.topNode.firstChild
+  return Boolean(
+    node
+      && !node.nextSibling
+      && !hasJavaSyntaxError(tree.topNode)
+      && new Set(['IfStatement', 'ForStatement', 'WhileStatement', 'SwitchStatement',
+        'CatchClause', 'SynchronizedStatement']).has(node.name),
+  )
+}
+
 /** Check whether the parser recognizes a fragment as one complete statement. */
 export function isStatementCandidate(text: string, closing = ''): boolean {
   const statement = text.trim().replace(/;\s*$/, '').trimEnd()
@@ -335,13 +350,15 @@ export function planJavaStatementCompletion(
   const hasSemicolon = /;\s*$/.test(trimmed)
   const statement = hasSemicolon ? trimmed.slice(0, -1).trimEnd() : trimmed
   const closing = missingJavaClosingDelimiters(statement)
-  if (closing === null || !isStatementCandidate(statement, closing)) {
+  const controlHeader = closing !== null && !hasSemicolon
+    && isControlHeaderCandidate(statement, closing)
+  if (closing === null || (!isStatementCandidate(statement, closing) && !controlHeader)) {
     return null
   }
   const codeEndWithoutSpaces = line.from + code.trimEnd().length
   const semicolonPosition = hasSemicolon ? codeEndWithoutSpaces - 1 : codeEndWithoutSpaces
   const semicolonFrom = closing && hasSemicolon ? semicolonPosition : codeEndWithoutSpaces
-  const semicolon = hasSemicolon ? '' : ';'
+  const semicolon = hasSemicolon || controlHeader ? '' : ';'
   return {
     semicolonFrom,
     semicolon,

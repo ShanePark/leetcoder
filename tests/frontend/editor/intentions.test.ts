@@ -57,6 +57,40 @@ describe('Java create-method intention planning', () => {
     expect(plan && plan.change.insert.slice(plan.selection.from - plan.change.from, plan.selection.to - plan.change.from)).toBe('0')
   })
 
+  it('infers boolean return and array element parameters in a negated condition', () => {
+    const source = `class Solution {
+    public boolean isRectangleOverlap(int[] rec1, int[] rec2) {
+        if (!isOverval(rec1[0], rec1[2], rec2[0], rec2[2]))
+            return false;
+        return true;
+    }
+}`
+    const plan = planJavaMethodCreation(source, source.indexOf('isOverval') + 1)
+
+    expect(plan?.returnType).toBe('boolean')
+    expect(plan?.parameters).toEqual([
+      { type: 'int', name: 'value' },
+      { type: 'int', name: 'value2' },
+      { type: 'int', name: 'value3' },
+      { type: 'int', name: 'value4' },
+    ])
+    expect(plan?.change.insert).toContain('private boolean isOverval(int value, int value2, int value3, int value4)')
+    expect(plan?.change.insert).toContain('return false;')
+  })
+
+  it('does not infer boolean for a call used as a comparison operand', () => {
+    const source = `class Solution {
+    int solve() {
+        if (missing() == 1)
+            return 1;
+        return 0;
+    }
+}`
+    const plan = planJavaMethodCreation(source, source.indexOf('missing') + 1)
+
+    expect(plan?.returnType).toBe('Object')
+  })
+
   it('inserts after the enclosing method instead of inside its body', () => {
     const source = `class Solution {
     int solve(TreeNode root) {

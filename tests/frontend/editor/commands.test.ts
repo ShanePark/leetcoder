@@ -406,6 +406,26 @@ describe('Complete Current Statement', () => {
     expect(state.selection.main.head).toBe(source.indexOf(statement) + `${statement});`.length)
   })
 
+  it('closes an incomplete control header without adding a semicolon', () => {
+    const statement = 'if(!isOverval(rec1[1], rec1[3], rec2[1], rec2[3])'
+    const source = `class S {\n    boolean f(int[] rec1, int[] rec2) {\n        ${statement}\n            return false;\n    }\n}`
+    const position = source.indexOf(statement) + statement.length
+    const plan = planJavaStatementCompletion(source, position)
+
+    expect(plan?.closing).toBe(')')
+    expect(plan?.semicolon).toBe('')
+    expect(plan?.cursor).toBe(position + 1)
+
+    const state = runEditorCommand(
+      javaState(source).update({ selection: { anchor: position } }).state,
+      completeJavaStatement,
+    )
+    expect(state.doc.toString()).toBe(
+      `class S {\n    boolean f(int[] rec1, int[] rec2) {\n        ${statement})\n            return false;\n    }\n}`,
+    )
+    expect(state.selection.main.head).toBe(position + 1)
+  })
+
   it('closes an incomplete call before an existing semicolon and leaves the cursor after it', () => {
     const statement = 'assertThat(value).isTrue(;'
     const source = `class S {\n    void f() {\n        ${statement}\n    }\n}`

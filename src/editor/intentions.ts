@@ -495,6 +495,12 @@ function expressionType(
   if (declaration) {
     return normalizeType(declaration.type === 'var' ? 'Object' : declaration.type)
   }
+  if (node.name === 'ArrayAccess') {
+    const array = children(node).find((child) => !PUNCTUATION_NODES.has(child.name))
+    if (!array) return 'Object'
+    const arrayType = normalizeType(expressionType(source, array, declarations, methods, invocation))
+    return arrayType.endsWith('[]') ? arrayType.slice(0, -2) : 'Object'
+  }
   if (node.name === 'this') {
     return classNameForBody(source, invocation.classBody) ?? 'Object'
   }
@@ -533,6 +539,31 @@ function expressionType(
     return 'int'
   }
   return 'Object'
+}
+
+function isBooleanContext(source: string, invocation: JavaInvocationInfo): boolean {
+  let current = invocation.node
+  while (current.parent) {
+    const parent = current.parent
+    if (parent.name === 'UnaryExpression') {
+      const operator = children(parent).find((child) => child.name === 'LogicOp')
+      return operator ? source.slice(operator.from, operator.to).trim() === '!' : false
+    }
+    if (parent.name === 'ParenthesizedExpression') {
+      current = parent
+      continue
+    }
+    if (parent.name === 'BinaryExpression') {
+      const text = source.slice(parent.from, parent.to)
+      return /&&|\|\|/.test(text)
+    }
+    if (parent.name === 'IfStatement' || parent.name === 'WhileStatement' || parent.name === 'DoStatement') {
+      const condition = children(parent).find((child) => child.name === 'ParenthesizedExpression')
+      return Boolean(condition && condition.from <= current.from && current.to <= condition.to)
+    }
+    break
+  }
+  return false
 }
 
 function expressionName(source: string, node: JavaSyntaxNode): string {
@@ -586,6 +617,7 @@ function returnTypeFor(
   if (returnStatement && invocation.method) return normalizeType(invocation.method.returnType)
   const expressionStatement = nearestAncestor(invocation.node.parent, new Set(['ExpressionStatement']))
   if (expressionStatement) return 'void'
+  if (isBooleanContext(source, invocation)) return 'boolean'
   return 'Object'
 }
 
