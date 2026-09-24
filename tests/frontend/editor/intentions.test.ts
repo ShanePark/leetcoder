@@ -88,7 +88,27 @@ describe('Java create-method intention planning', () => {
 }`
     const plan = planJavaMethodCreation(source, source.indexOf('missing') + 1)
 
-    expect(plan?.returnType).toBe('Object')
+    expect(plan?.returnType).toBe('int')
+    expect(plan?.returnType).not.toBe('boolean')
+  })
+
+  it('infers the return and parameter types from a comparison with an array element', () => {
+    const source = `class Solution {
+    int smallestIndex(int[] nums) {
+        for (int i = 0; i < nums.length; i++) {
+            if (digitSum(nums[i]) == i) {
+                return i;
+            }
+        }
+        return -1;
+    }
+}`
+    const plan = planJavaMethodCreation(source, source.indexOf('digitSum') + 1)
+
+    expect(plan?.returnType).toBe('int')
+    expect(plan?.parameters).toEqual([{ type: 'int', name: 'value' }])
+    expect(plan?.change.insert).toContain('private int digitSum(int value)')
+    expect(plan?.change.insert).toContain('return 0;')
   })
 
   it('inserts after the enclosing method instead of inside its body', () => {

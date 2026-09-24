@@ -598,6 +598,7 @@ function returnTypeFor(
   source: string,
   invocation: JavaInvocationInfo,
   declarations: readonly JavaDeclaration[],
+  methods: readonly JavaMethodInfo[],
 ): string {
   const variable = nearestAncestor(invocation.node.parent, new Set(['VariableDeclarator']))
   if (variable) {
@@ -618,6 +619,18 @@ function returnTypeFor(
   const expressionStatement = nearestAncestor(invocation.node.parent, new Set(['ExpressionStatement']))
   if (expressionStatement) return 'void'
   if (isBooleanContext(source, invocation)) return 'boolean'
+  const comparison = nearestAncestor(invocation.node.parent, new Set(['BinaryExpression']))
+  const comparisonOperator = comparison && directChild(comparison, 'CompareOp')
+  if (comparison && comparisonOperator && source.slice(comparisonOperator.from, comparisonOperator.to).trim() !== 'instanceof') {
+    const operands = children(comparison).filter((child) => child.name !== 'CompareOp')
+    const invocationOperand = operands.find((operand) => (
+      operand.from <= invocation.node.from && invocation.node.to <= operand.to
+    ))
+    const otherOperand = operands.find((operand) => operand !== invocationOperand)
+    if (otherOperand) {
+      return expressionType(source, otherOperand, declarations, methods, invocation)
+    }
+  }
   return 'Object'
 }
 
@@ -734,7 +747,7 @@ function planForInvocation(
     usedNames.add(name)
     parameters.push({ type, name })
   }
-  const returnType = returnTypeFor(source, invocation, declarations)
+  const returnType = returnTypeFor(source, invocation, declarations, methods)
   const memberIndent = invocation.method
     ? leadingIndent(source, invocation.method.node.from)
     : `${leadingIndent(source, invocation.classBody.to - 1)}${indentationUnit(source, invocation.classBody)}`
