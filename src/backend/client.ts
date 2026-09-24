@@ -130,7 +130,7 @@ export function createBackendClient(
       return normalizeGitPushResult(response)
     },
 
-    async runProblemTest(repoPath, fullyQualifiedClassName, onProgress, testMethod) {
+    async runProblemTest(repoPath, fullyQualifiedClassName, testRunId, onProgress, testMethod) {
       // The channel is intentionally passed even when the caller does not
       // subscribe. Rust commands use it to report lifecycle events, and a
       // no-op listener keeps the invoke contract identical for every caller.
@@ -143,6 +143,7 @@ export function createBackendClient(
       const args: Record<string, unknown> = {
         repoPath,
         fullyQualifiedClassName,
+        testRunId,
         onEvent,
       }
       if (testMethod !== undefined) {
@@ -150,6 +151,11 @@ export function createBackendClient(
       }
       const response = await invoke<unknown>('run_problem_test', args)
       return normalizeTestResult(response)
+    },
+
+    async stopProblemTest(testRunId) {
+      const response = await invoke<unknown>('stop_problem_test', { testRunId })
+      return response === true
     },
 
     async checkProblemDiagnostics(repoPath, fullyQualifiedClassName, source) {

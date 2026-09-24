@@ -15,7 +15,10 @@ mod validation;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use service::{check_problem_diagnostics, run_problem_test_with_sink};
+pub(crate) use service::{
+    check_problem_diagnostics, register_test_run, run_problem_test_with_registration,
+    stop_problem_test,
+};
 
 #[cfg(test)]
 pub(crate) use service::{run_problem_test, summarize_tests};
@@ -36,6 +39,11 @@ pub(crate) use java::{
 pub(crate) use junit::extract_expected_actual;
 #[cfg(test)]
 pub(crate) use junit::parse_junit_xml;
+#[cfg(test)]
+pub(crate) use process::{
+    capture_test_child_output_with_control, capture_test_child_output_with_timeout,
+    isolate_test_process_session, register_test_run as register_active_test_run, stop_test_run,
+};
 #[cfg(test)]
 pub(crate) use process::{
     marker_status, parse_test_progress_marker, progress_case_from_marker, read_stream,

@@ -254,6 +254,7 @@ describe('backend client', () => {
     const result = await createBackendClient(invoke).runProblemTest(
       '/repo',
       'shane.Q1',
+      7,
       (event) => events.push(event),
     )
 
@@ -270,6 +271,7 @@ describe('backend client', () => {
       expect(args).toMatchObject({
         repoPath: '/repo',
         fullyQualifiedClassName: 'shane.Q1',
+        testRunId: 8,
         testMethod: 'test2',
       })
       return {
@@ -286,12 +288,47 @@ describe('backend client', () => {
     const result = await createBackendClient(invoke).runProblemTest(
       '/repo',
       'shane.Q1',
+      8,
       undefined,
       'test2',
     )
 
     expect(result.tests).toHaveLength(1)
     expect(result.tests[0].name).toBe('test2()')
+  })
+
+  it('sends an explicit stop request for the matching test run', async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
+    const client = createBackendClient(async (command, args) => {
+      calls.push({ command, args })
+      return true as never
+    })
+
+    await expect(client.stopProblemTest(42)).resolves.toBe(true)
+    expect(calls).toEqual([
+      { command: 'stop_problem_test', args: { testRunId: 42 } },
+    ])
+  })
+
+  it('normalizes stopped and timed-out test run phases', () => {
+    expect(normalizeTestResult({
+      success: false,
+      phase: 'cancelled',
+      summary: {},
+      tests: [],
+      diagnostics: [],
+      stdout: '',
+      stderr: 'Test run stopped by user.',
+    }).phase).toBe('cancelled')
+    expect(normalizeTestResult({
+      success: false,
+      phase: 'timedOut',
+      summary: {},
+      tests: [],
+      diagnostics: [],
+      stdout: '',
+      stderr: 'Tests exceeded 5 seconds.',
+    }).phase).toBe('timedOut')
   })
 
   it('checks an editor snapshot without saving it or starting a test run', async () => {

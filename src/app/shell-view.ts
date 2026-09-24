@@ -110,7 +110,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
           </div>
           <div class="bottom-panel-actions" role="group" aria-label="Test actions">
             <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">${shortcutLabel('run-test-at-cursor', options.macPlatform)}</kbd></span>
-            <button id="run-test" class="primary-button" type="button">Run <kbd id="run-shortcut">${shortcutLabel('run-test', options.macPlatform)}</kbd></button>
+            <button id="run-test" class="primary-button" type="button"><span id="run-label">Run</span> <kbd id="run-shortcut">${shortcutLabel('run-test', options.macPlatform)}</kbd></button>
           </div>
         </div>
         <section id="tests-panel" class="tests-panel" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">

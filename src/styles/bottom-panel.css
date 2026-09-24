@@ -67,6 +67,11 @@
   padding: 0 10px;
 }
 
+.bottom-panel-actions .primary-button.is-stop-action {
+  background: var(--red);
+  color: var(--on-danger);
+}
+
 .selected-test-shortcut-hint {
   display: inline-flex;
   align-items: center;

@@ -73,6 +73,12 @@ export function normalizePhase(value: unknown): TestPhase {
   if (compact === 'runner' || compact === 'run' || compact === 'execution') {
     return 'runner'
   }
+  if (compact === 'cancelled' || compact === 'canceled') {
+    return 'cancelled'
+  }
+  if (compact === 'timedout' || compact === 'timeout') {
+    return 'timedOut'
+  }
   if (compact === 'notest' || compact === 'notests') {
     return 'noTests'
   }

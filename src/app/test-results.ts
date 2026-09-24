@@ -41,11 +41,16 @@ export function isTestRunSourceCurrent(
  */
 export function presentTestResult(result: TestResult): TestResultPresentation {
   const phaseLabel = testPhaseLabel(result.phase)
+  const phase = normalizeTestPhase(result.phase)
   const failureMessage = result.success ? null : testFailureMessage(result)
   return {
     phaseLabel,
     statusLabel: result.success
       ? 'Passed'
+      : phase === 'cancelled'
+        ? 'Stopped'
+        : phase === 'timedOut'
+          ? 'Timed out'
       : result.summary.errors > 0
         ? `Error · ${phaseLabel}`
         : `Failed · ${phaseLabel}`,
@@ -60,6 +65,12 @@ export function testResultBannerMessage(result: TestResult): string {
   }
   const reason = testFailureMessage(result)
   const phase = normalizeTestPhase(result.phase)
+  if (phase === 'cancelled') {
+    return 'Test run stopped'
+  }
+  if (phase === 'timedOut') {
+    return `Test execution timed out: ${reason}`
+  }
   if (phase === 'compile') {
     return `Compilation failed: ${reason}`
   }
@@ -88,6 +99,10 @@ export function testPhaseLabel(phase: TestPhase): string {
       return 'Compilation'
     case 'runner':
       return 'Test runner'
+    case 'cancelled':
+      return 'Stopped'
+    case 'timedOut':
+      return 'Timed out'
     case 'noTests':
       return 'No tests'
     case 'test':
@@ -109,18 +124,28 @@ export function testStatusLabel(status: string): string {
       return 'skipped'
     case 'running':
       return 'running'
+    case 'cancelled':
+      return 'stopped'
+    case 'timedOut':
+      return 'timed out'
     default:
       return status || 'unknown'
   }
 }
 
-export function normalizeTestPhase(phase: TestPhase): 'compile' | 'runner' | 'noTests' | 'test' | 'unknown' {
+export function normalizeTestPhase(phase: TestPhase): 'compile' | 'runner' | 'noTests' | 'test' | 'cancelled' | 'timedOut' | 'unknown' {
   const normalized = phase.trim().toLowerCase().replace(/[\s_-]/g, '')
   if (normalized === 'compile' || normalized === 'compilation') {
     return 'compile'
   }
   if (normalized === 'runner' || normalized === 'run' || normalized === 'execution') {
     return 'runner'
+  }
+  if (normalized === 'cancelled' || normalized === 'canceled') {
+    return 'cancelled'
+  }
+  if (normalized === 'timedout' || normalized === 'timeout') {
+    return 'timedOut'
   }
   if (normalized === 'notest' || normalized === 'notests') {
     return 'noTests'
@@ -178,6 +203,12 @@ export function testFailureMessage(result: TestResult): string {
   }
   if (phase === 'runner') {
     return 'The test runner stopped before reporting any tests.'
+  }
+  if (phase === 'cancelled') {
+    return 'The test run was stopped.'
+  }
+  if (phase === 'timedOut') {
+    return 'Tests exceeded the 5-second execution limit.'
   }
   if (phase === 'noTests') {
     return 'The test task completed without reporting any tests.'

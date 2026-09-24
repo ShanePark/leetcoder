@@ -486,6 +486,7 @@ describe('DocumentController', () => {
         activeTest: null,
         error: null,
         testMethod: null,
+        stopRequested: false,
       },
       busy: true,
     })

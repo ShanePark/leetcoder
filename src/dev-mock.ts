@@ -212,11 +212,36 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function stoppedMockTestResult(tests: TestCaseResult[], stdout: string): TestResult {
+  const summary = tests.reduce((counts, test) => {
+    counts.total += 1
+    if (test.status === 'passed') counts.passed += 1
+    if (test.status === 'failed') counts.failed += 1
+    if (test.status === 'error') {
+      counts.errors += 1
+      counts.failed += 1
+    }
+    if (test.status === 'skipped') counts.skipped += 1
+    return counts
+  }, { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0 })
+  return {
+    success: false,
+    phase: 'cancelled',
+    summary,
+    tests,
+    diagnostics: [{ severity: 'error', message: 'Test run stopped by user.', origin: 'runner' }],
+    stdout,
+    stderr: 'Test run stopped by user.',
+    exitCode: null,
+  }
+}
+
 export function createDevMockBackend(): BackendClient & {
   getGitStatus(repoPath: string): Promise<unknown>
 } {
   const files = seedFiles()
   const originalFiles = new Map(files)
+  const activeTestRuns = new Map<number, { cancelled: boolean }>()
   const gitAddedPath = 'src/main/java/shane/leetcode/problems/easy/Q3618SplitArrayByPrimeIndices.java'
   let gitChanges: Array<GitFileChange & { additions: number | null; deletions: number | null }> = [
     {
@@ -404,15 +429,28 @@ export function createDevMockBackend(): BackendClient & {
     async runProblemTest(
       _repoPath: string,
       fullyQualifiedClassName: string,
+      testRunId: number,
       onProgress?: TestRunProgressHandler,
       testMethod?: string,
     ): Promise<TestResult> {
+      const run = { cancelled: false }
+      activeTestRuns.set(testRunId, run)
+      const finish = (result: TestResult): TestResult => {
+        if (activeTestRuns.get(testRunId) === run) {
+          activeTestRuns.delete(testRunId)
+        }
+        return result
+      }
       const scenario = activeScenario()
       const sourceFile = `src/main/java/${fullyQualifiedClassName.replace(/\./g, '/')}.java`
       const emit = onProgress ?? ((): void => {})
       emit({ kind: 'started' })
       emit({ kind: 'phase', phase: 'compiling' })
       await delay(600)
+
+      if (run.cancelled) {
+        return finish(stoppedMockTestResult([], ''))
+      }
 
       if (scenario === 'compile') {
         const diagnostics: TestDiagnostic[] = [
@@ -438,7 +476,7 @@ export function createDevMockBackend(): BackendClient & {
           },
         ]
         emit({ kind: 'log', stream: 'stderr', text: `${sourceFile}:24: error: cannot find symbol\n` })
-        return {
+        return finish({
           success: false,
           phase: 'compile',
           summary: { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, durationMs: 640 },
@@ -447,13 +485,16 @@ export function createDevMockBackend(): BackendClient & {
           stdout: '',
           stderr: `${sourceFile}:24: error: cannot find symbol\n2 errors\n`,
           exitCode: 1,
-        }
+        })
       }
 
       emit({ kind: 'phase', phase: 'runningTests' })
       if (scenario === 'notests') {
         await delay(400)
-        return {
+        if (run.cancelled) {
+          return finish(stoppedMockTestResult([], '> Task :test\n'))
+        }
+        return finish({
           success: false,
           phase: 'noTests',
           summary: { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, durationMs: 1040 },
@@ -462,7 +503,7 @@ export function createDevMockBackend(): BackendClient & {
           stdout: '> Task :test\n',
           stderr: '',
           exitCode: 0,
-        }
+        })
       }
 
       const failing = scenario === 'fail'
@@ -502,7 +543,7 @@ export function createDevMockBackend(): BackendClient & {
         return test.name.replace(/\(.*$/, '') === methodName
       })
       if (methodName && selectedCases.length === 0) {
-        return {
+        return finish({
           success: false,
           phase: 'noTests',
           summary: { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, durationMs: 600 },
@@ -511,17 +552,28 @@ export function createDevMockBackend(): BackendClient & {
           stdout: `No tests found for ${fullyQualifiedClassName}.${methodName}\n`,
           stderr: '',
           exitCode: 0,
-        }
+        })
       }
+      const completedCases: TestCaseResult[] = []
       for (const test of selectedCases) {
+        if (run.cancelled) {
+          return finish(stoppedMockTestResult(completedCases, '> Task :test\n'))
+        }
         emit({ kind: 'testStarted', test: { ...test, status: 'running' } })
         await delay(140)
+        if (run.cancelled) {
+          return finish(stoppedMockTestResult(completedCases, '> Task :test\n'))
+        }
         emit({ kind: 'testFinished', test })
+        completedCases.push(test)
       }
       emit({ kind: 'log', stream: 'stdout', text: '> Task :test\nBUILD ' + (failing ? 'FAILED' : 'SUCCESSFUL') + ' in 1s\n' })
       await delay(120)
+      if (run.cancelled) {
+        return finish(stoppedMockTestResult(completedCases, '> Task :test\n'))
+      }
       const failed = selectedCases.filter((test) => test.status === 'failed').length
-      return {
+      return finish({
         success: failed === 0,
         phase: 'test',
         summary: {
@@ -537,7 +589,16 @@ export function createDevMockBackend(): BackendClient & {
         stdout: `> Task :test\nBUILD ${failing ? 'FAILED' : 'SUCCESSFUL'} in 1s\n`,
         stderr: failing ? '5 tests completed, 1 failed\n' : '',
         exitCode: failed === 0 ? 0 : 1,
+      })
+    },
+
+    async stopProblemTest(testRunId: number): Promise<boolean> {
+      const run = activeTestRuns.get(testRunId)
+      if (!run) {
+        return false
       }
+      run.cancelled = true
+      return true
     },
 
     // The browser preview has no filesystem watcher behind it.

@@ -203,6 +203,8 @@ pub enum ProblemTestPhase {
     Compilation,
     NoTests,
     Runner,
+    Cancelled,
+    TimedOut,
 }
 
 /// Counts and elapsed time for one problem run.

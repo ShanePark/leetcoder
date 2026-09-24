@@ -42,6 +42,7 @@ export type TestRunMessageTone = 'info' | 'success' | 'error'
 export interface TestRunControllerContext {
   state: TestRunControllerState
   runProblemTest: TestRunnerBackend['runProblemTest']
+  stopProblemTest: TestRunnerBackend['stopProblemTest']
   flushPendingSave: () => Promise<boolean>
   setEditorIssues: (issues: readonly EditorIssue[]) => void
   setLiveDiagnosticsBlocked: (blocked: boolean) => void
@@ -58,14 +59,15 @@ export interface TestRunControllerContext {
 }
 
 /**
- * Owns one test process at a time and applies only results for its source
- * snapshot. The native process cannot be cancelled reliably, so generation
- * checks and source checks are the cancellation mechanism for its callbacks.
+ * Owns one test process at a time, stops invalidated runs, and applies only
+ * results for their source snapshot.
  */
 export class TestRunController {
   private readonly context: TestRunControllerContext
   private testRunGeneration = 0
   private runningRunId: number | null = null
+  private nativeRunRequestedId: number | null = null
+  private stopRequestedRunId: number | null = null
   private testSelectionExplicit = false
   private testResultSource: TestRunSourceSnapshot | null = null
   private liveRenderFrame: number | null = null
@@ -121,6 +123,7 @@ export class TestRunController {
       activeTest: null,
       error: null,
       testMethod: testMethod ?? null,
+      stopRequested: false,
     }
     this.runningRunId = runId
     state.busy = true
@@ -142,6 +145,10 @@ export class TestRunController {
             this.discardStaleTestRun(runId)
             return
           }
+          if (this.stopRequestedRunId === runId) {
+            this.completeResult(runSnapshot, run, stoppedRunResult(run))
+            return
+          }
           const failure = runnerFailureResult(
             run,
             state.saveError
@@ -152,12 +159,21 @@ export class TestRunController {
         return
       }
 
+      if (!this.isAcceptingTestRun(runId)) {
+        return
+      }
+      if (this.stopRequestedRunId === runId) {
+        this.completeResult(runSnapshot, run, stoppedRunResult(run))
+        return
+      }
+
       const onProgress = (progress: TestRunProgress): void => {
         this.applyTestRunProgress(runId, runSnapshot, progress)
       }
+      this.nativeRunRequestedId = runId
       const result = testMethod === undefined
-        ? await this.context.runProblemTest(runSnapshot.repoPath, runFqcn, onProgress)
-        : await this.context.runProblemTest(runSnapshot.repoPath, runFqcn, onProgress, testMethod)
+        ? await this.context.runProblemTest(runSnapshot.repoPath, runFqcn, runId, onProgress)
+        : await this.context.runProblemTest(runSnapshot.repoPath, runFqcn, runId, onProgress, testMethod)
       if (!this.isAcceptingTestRun(runId)) {
         return
       }
@@ -174,13 +190,19 @@ export class TestRunController {
         this.discardStaleTestRun(runId)
         return
       }
-      this.completeError(runSnapshot, run, runnerFailureResult(run, errorMessage(error)))
+      if (this.stopRequestedRunId === runId) {
+        this.completeResult(runSnapshot, run, stoppedRunResult(run))
+      } else {
+        this.completeError(runSnapshot, run, runnerFailureResult(run, errorMessage(error)))
+      }
     } finally {
       // A stale run cannot update visible results, but its native process still
       // owns the busy state and diagnostics block until this promise settles.
       // The run identity prevents it from releasing a newer operation.
       if (this.isInFlightRun(runId)) {
         this.runningRunId = null
+        this.nativeRunRequestedId = null
+        this.stopRequestedRunId = null
         this.context.setLiveDiagnosticsBlocked(false)
         this.context.state.busy = false
         this.context.renderAll()
@@ -193,7 +215,11 @@ export class TestRunController {
     if (this.disposed) {
       return
     }
-    const hadRunningRun = this.runningRunId !== null
+    const runningRunId = this.runningRunId
+    const hadRunningRun = runningRunId !== null
+    if (runningRunId !== null) {
+      this.requestNativeStop(runningRunId)
+    }
     this.testRunGeneration += 1
     this.cancelScheduledLiveRender()
     this.context.state.testResult = null
@@ -213,6 +239,33 @@ export class TestRunController {
   cancelCurrentRun(): void {
     if (this.runningRunId !== null) {
       this.discardStaleTestRun(this.runningRunId)
+    }
+  }
+
+  /** Request an explicit stop while keeping the run lock until it settles. */
+  async stopCurrentRun(): Promise<void> {
+    const runId = this.runningRunId
+    const run = this.context.state.testRun
+    if (runId === null || !run || run.id !== runId || run.status !== 'running') {
+      return
+    }
+    if (this.stopRequestedRunId === runId) {
+      return
+    }
+
+    this.stopRequestedRunId = runId
+    run.stopRequested = true
+    this.context.renderAll()
+    try {
+      await this.requestNativeStopUntilAccepted(runId)
+    } catch (error) {
+      if (!this.isAcceptingTestRun(runId)) {
+        return
+      }
+      this.stopRequestedRunId = null
+      run.stopRequested = false
+      this.context.setMessage(`Could not stop the test run: ${errorMessage(error)}`, 'error')
+      this.context.renderAll()
     }
   }
 
@@ -252,6 +305,9 @@ export class TestRunController {
       return
     }
     const hadRunningRun = this.runningRunId !== null
+    if (this.runningRunId !== null) {
+      this.requestNativeStop(this.runningRunId)
+    }
     this.disposed = true
     this.testRunGeneration += 1
     this.runningRunId = null
@@ -280,6 +336,10 @@ export class TestRunController {
     run.stderr = result.stderr
     run.activeTest = null
     run.error = result.success ? null : testFailureMessage(result)
+    run.stopRequested = false
+    if (this.stopRequestedRunId === run.id) {
+      this.stopRequestedRunId = null
+    }
     if (result.success) {
       // Failures never toast: the Tests panel is already front and center.
       this.context.setMessage(testResultBannerMessage(result), 'success')
@@ -295,6 +355,10 @@ export class TestRunController {
     run.phase = failure.phase
     run.error = testFailureMessage(failure)
     run.activeTest = null
+    run.stopRequested = false
+    if (this.stopRequestedRunId === run.id) {
+      this.stopRequestedRunId = null
+    }
     this.context.state.testResult = failure
     this.testResultSource = source
     this.autoSelectFailedTest(failure)
@@ -319,6 +383,7 @@ export class TestRunController {
     if (!this.isInFlightRun(runId)) {
       return
     }
+    this.requestNativeStop(runId)
     this.testRunGeneration += 1
     this.cancelScheduledLiveRender()
     this.context.state.testRun = null
@@ -371,6 +436,32 @@ export class TestRunController {
         break
     }
     this.scheduleLiveResultRender(runId, source)
+  }
+
+  private requestNativeStop(runId: number): void {
+    this.stopRequestedRunId = runId
+    const run = this.context.state.testRun
+    if (run?.id === runId) {
+      run.stopRequested = true
+    }
+    void this.requestNativeStopUntilAccepted(runId).catch(() => {})
+  }
+
+  private async requestNativeStopUntilAccepted(runId: number): Promise<void> {
+    if (this.nativeRunRequestedId !== runId) {
+      return
+    }
+    let delayMs = 20
+    while (this.isInFlightRun(runId) && this.stopRequestedRunId === runId) {
+      if (await this.context.stopProblemTest(runId)) {
+        return
+      }
+      if (!this.isInFlightRun(runId) || this.stopRequestedRunId !== runId) {
+        return
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+      delayMs = Math.min(delayMs * 2, 200)
+    }
   }
 
   private upsertLiveTest(run: TestRunSnapshot, test: TestCaseResult): void {
@@ -450,3 +541,13 @@ export class TestRunController {
 }
 
 export type { CurrentTestSource, TestRunSnapshot, TestRunSourceSnapshot, TestPhase }
+
+function stoppedRunResult(run: TestRunSnapshot): TestResult {
+  const result = liveSnapshotResult(run)
+  return {
+    ...result,
+    phase: 'cancelled',
+    diagnostics: [{ severity: 'info', message: 'Test run stopped by user.' }],
+    stderr: run.stderr || 'Test run stopped by user.',
+  }
+}

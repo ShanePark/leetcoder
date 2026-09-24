@@ -104,7 +104,15 @@ export function renderTestResults(
     const verdict = document.createElement('span')
     verdict.className = 'test-verdict'
     const factParts: string[] = []
-    if (!hasFailure) {
+    if (phase === 'cancelled') {
+      statusRow.classList.add('is-warning')
+      statusRow.append(iconFor('alert', 'test-status-svg'))
+      verdict.textContent = 'Stopped'
+    } else if (phase === 'timedOut') {
+      statusRow.classList.add('is-failure')
+      statusRow.append(iconFor('close', 'test-status-svg'))
+      verdict.textContent = 'Timed out after 5 seconds'
+    } else if (!hasFailure) {
       statusRow.classList.add('is-success')
       statusRow.append(iconFor('check', 'test-status-svg'))
       verdict.textContent = 'Passed'
@@ -136,7 +144,12 @@ export function renderTestResults(
       }
     }
     statusRow.append(verdict)
-    if (result.summary.durationMs !== null && result.summary.durationMs !== undefined && phase !== 'compile') {
+    if (
+      result.summary.durationMs !== null
+      && result.summary.durationMs !== undefined
+      && phase !== 'compile'
+      && phase !== 'timedOut'
+    ) {
       factParts.push(formatDuration(result.summary.durationMs))
     }
     appendFacts(statusRow, factParts)
@@ -153,7 +166,7 @@ export function renderTestResults(
   }
   appendLiveDiagnosticsStatus(statusRow, model.liveDiagnosticsError)
 
-  if (!isRunning) {
+  if (!isRunning && phase !== 'cancelled' && phase !== 'timedOut') {
     for (const diagnostic of errorDiagnostics) {
       body.append(renderDiagnostic(diagnostic, model.selectedPath, callbacks.onRevealLocation))
     }
@@ -172,7 +185,16 @@ export function renderTestResults(
 
   // A phase without per-test rows explains itself in a full-width note.
   const hasFailedTestRows = result.tests.some((test) => test.status === 'failed' || test.status === 'error')
-  if (!isRunning && hasFailure) {
+  if (!isRunning && (phase === 'cancelled' || phase === 'timedOut')) {
+    const note = document.createElement('div')
+    note.className = phase === 'timedOut' ? 'run-note run-note-runner' : 'run-note'
+    const message = document.createElement('p')
+    message.className = 'run-note-message'
+    message.textContent = presentation.failureMessage
+      ?? (phase === 'timedOut' ? 'Tests exceeded the 5-second execution limit.' : 'Test run stopped.')
+    note.append(message)
+    body.append(note)
+  } else if (!isRunning && hasFailure) {
     if (phase === 'noTests') {
       const note = document.createElement('div')
       note.className = 'run-note run-note-no-tests'
@@ -319,11 +341,15 @@ function renderTestTreeItem(
     ? test.status
     : isRunning
       ? 'running'
-      : result.success
-        ? 'passed'
-        : normalizeTestPhase(result.phase) === 'noTests'
-          ? 'skipped'
-          : 'failed'
+        : result.success
+          ? 'passed'
+          : normalizeTestPhase(result.phase) === 'noTests'
+            ? 'skipped'
+            : normalizeTestPhase(result.phase) === 'cancelled'
+              ? 'cancelled'
+              : normalizeTestPhase(result.phase) === 'timedOut'
+                ? 'timedOut'
+                : 'failed'
   item.append(statusIcon(status))
   const name = document.createElement('span')
   name.className = 'test-name'
@@ -531,6 +557,12 @@ function statusIcon(status: string): HTMLElement {
       break
     case 'running':
       icon.append(iconFor('loader', 'test-status-svg is-spinning'))
+      break
+    case 'cancelled':
+      icon.append(iconFor('alert', 'test-status-svg'))
+      break
+    case 'timedOut':
+      icon.append(iconFor('close', 'test-status-svg'))
       break
     case 'skipped':
       icon.textContent = '–'

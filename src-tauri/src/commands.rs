@@ -195,25 +195,33 @@ pub async fn run_problem_test(
     repo_path: String,
     fully_qualified_class_name: String,
     test_method: Option<String>,
+    test_run_id: u64,
     on_event: tauri::ipc::Channel<ProblemTestEvent>,
 ) -> Result<ProblemTestResult, String> {
+    let registration = runner::register_test_run(test_run_id)?;
     let sink = Arc::new(move |event| {
         // A disconnected webview should not turn an otherwise useful test
         // result into a runner failure.
         let _ = on_event.send(event);
     });
     tauri::async_runtime::spawn_blocking(move || {
-        runner::run_problem_test_with_sink(
+        runner::run_problem_test_with_registration(
             RunProblemTestArgs {
                 project_root: repo_path,
                 fully_qualified_class_name,
                 test_method,
             },
             Some(sink),
+            registration,
         )
     })
     .await
     .map_err(|error| format!("Problem test worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn stop_problem_test(test_run_id: u64) -> bool {
+    runner::stop_problem_test(test_run_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]

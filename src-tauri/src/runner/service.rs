@@ -23,11 +23,16 @@ use super::gradle::{
 };
 use super::java::{discover_compatible_java, elapsed_millis, path_with_java_home};
 use super::junit::{parse_junit_reports, ParsedReports};
-use super::process::{capture_child_output, emit_event};
+use super::process::{
+    capture_cancellable_child_output, capture_child_output, emit_event,
+    isolate_test_process_session, register_test_run as register_active_test_run, stop_test_run,
+    TestRunControl, TestRunRegistration,
+};
 use super::validation::{
     java_source_relative_path, validate_fully_qualified_class_name, validate_test_method,
 };
 use super::ProblemTestEventSink;
+use std::sync::Arc;
 
 #[allow(dead_code)]
 pub(crate) fn run_problem_test(args: RunProblemTestArgs) -> Result<ProblemTestResult, String> {
@@ -136,10 +141,28 @@ pub(crate) fn check_problem_diagnostics(
 
     Ok(ProblemDiagnosticsResult { diagnostics })
 }
-pub(crate) fn run_problem_test_with_sink(
+pub(crate) fn register_test_run(run_id: u64) -> Result<TestRunRegistration, String> {
+    register_active_test_run(run_id)
+}
+
+pub(crate) fn stop_problem_test(run_id: u64) -> bool {
+    stop_test_run(run_id)
+}
+
+pub(crate) fn run_problem_test_with_registration(
     args: RunProblemTestArgs,
     sink: Option<ProblemTestEventSink>,
+    registration: TestRunRegistration,
 ) -> Result<ProblemTestResult, String> {
+    run_problem_test_with_control(args, sink, registration.control())
+}
+
+fn run_problem_test_with_control(
+    args: RunProblemTestArgs,
+    sink: Option<ProblemTestEventSink>,
+    control: Arc<TestRunControl>,
+) -> Result<ProblemTestResult, String> {
+    let started = Instant::now();
     emit_event(&sink, ProblemTestEvent::Started);
     emit_event(
         &sink,
@@ -147,13 +170,19 @@ pub(crate) fn run_problem_test_with_sink(
             phase: ProblemTestProgressPhase::Starting,
         },
     );
+
+    if let Some(result) = cancellation_before_process(&control, &sink, started) {
+        return Ok(result);
+    }
     let root = canonical_project_root(&args.project_root)?;
+    if let Some(result) = cancellation_before_process(&control, &sink, started) {
+        return Ok(result);
+    }
     validate_fully_qualified_class_name(&args.fully_qualified_class_name)?;
     validate_test_method(args.test_method.as_deref())?;
 
     let wrapper = gradle_wrapper(&root);
     validate_gradle_wrapper(&wrapper)?;
-
     let validation = repository::validate_project(&args.project_root);
     if !validation.valid {
         return Err(format!(
@@ -163,15 +192,23 @@ pub(crate) fn run_problem_test_with_sink(
                 .unwrap_or_else(|| "required repository files are missing".to_string())
         ));
     }
+    if let Some(result) = cancellation_before_process(&control, &sink, started) {
+        return Ok(result);
+    }
 
-    let started = Instant::now();
     let java = match discover_compatible_java() {
         Ok(java) => java,
         Err(error) => return Ok(runner_failure_result(error, elapsed_millis(started))),
     };
+    if let Some(result) = cancellation_before_process(&control, &sink, started) {
+        return Ok(result);
+    }
 
     let compile_cache = create_compile_cache(&root, &java, &args.fully_qualified_class_name)?;
     let run_temp = create_init_script(&compile_cache)?;
+    if let Some(result) = cancellation_before_process(&control, &sink, started) {
+        return Ok(result);
+    }
     let test_filter = args
         .test_method
         .as_deref()
@@ -188,6 +225,7 @@ pub(crate) fn run_problem_test_with_sink(
         .current_dir(&root)
         .env("JAVA_HOME", &java.home)
         .env("PATH", path_with_java_home(&java.home))
+        .arg("--no-daemon")
         .arg("--init-script")
         .arg(&run_temp.path)
         .arg(format!(
@@ -211,7 +249,11 @@ pub(crate) fn run_problem_test_with_sink(
         .arg(test_filter)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    isolate_test_process_session(&mut command);
 
+    if let Some(result) = cancellation_before_process(&control, &sink, started) {
+        return Ok(result);
+    }
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -232,11 +274,12 @@ pub(crate) fn run_problem_test_with_sink(
                     phase: ProblemTestProgressPhase::Finishing,
                 },
             );
+            control.mark_process_finished();
             return Ok(runner_failure_result(message, elapsed_millis(started)));
         }
     };
 
-    let capture = capture_child_output(child, sink.clone());
+    let capture = capture_cancellable_child_output(child, sink.clone(), control);
     let elapsed_ms = elapsed_millis(started);
     emit_event(
         &sink,
@@ -244,14 +287,63 @@ pub(crate) fn run_problem_test_with_sink(
             phase: ProblemTestProgressPhase::Finishing,
         },
     );
-    Ok(build_problem_test_result(
+    let mut result = build_problem_test_result(
         &run_temp.result_dir,
         capture.exit_code,
         capture.process_success,
         capture.stdout,
         capture.stderr,
         elapsed_ms,
-    ))
+    );
+    if capture.timed_out {
+        apply_interruption(
+            &mut result,
+            ProblemTestPhase::TimedOut,
+            "Test execution exceeded the 5 second limit.",
+        );
+    } else if capture.cancelled {
+        apply_interruption(
+            &mut result,
+            ProblemTestPhase::Cancelled,
+            "Test run was cancelled.",
+        );
+    }
+    Ok(result)
+}
+
+fn cancellation_before_process(
+    control: &TestRunControl,
+    sink: &Option<ProblemTestEventSink>,
+    started: Instant,
+) -> Option<ProblemTestResult> {
+    if !control.is_cancel_requested() {
+        return None;
+    }
+    control.mark_process_finished();
+    emit_event(
+        sink,
+        ProblemTestEvent::Phase {
+            phase: ProblemTestProgressPhase::Finishing,
+        },
+    );
+    let (phase, message) = if control.is_timed_out() {
+        (
+            ProblemTestPhase::TimedOut,
+            "Test execution exceeded the 5 second limit.",
+        )
+    } else {
+        (ProblemTestPhase::Cancelled, "Test run was cancelled.")
+    };
+    let mut result = runner_failure_result(message.to_string(), elapsed_millis(started));
+    result.phase = phase;
+    Some(result)
+}
+
+pub(crate) fn run_problem_test_with_sink(
+    args: RunProblemTestArgs,
+    sink: Option<ProblemTestEventSink>,
+) -> Result<ProblemTestResult, String> {
+    run_problem_test_with_control(args, sink, Arc::new(TestRunControl::new()))
 }
 pub(crate) fn build_problem_test_result(
     result_dir: &Path,
@@ -368,6 +460,25 @@ fn runner_failure_result(message: String, duration_ms: u64) -> ProblemTestResult
         stdout: String::new(),
         stderr: message,
     }
+}
+
+fn apply_interruption(result: &mut ProblemTestResult, phase: ProblemTestPhase, message: &str) {
+    result.phase = phase;
+    result.success = false;
+    if !result.stderr.is_empty() && !result.stderr.ends_with('\n') {
+        result.stderr.push('\n');
+    }
+    result.stderr.push_str(message);
+    result.stderr.push('\n');
+    result.diagnostics.push(ProblemDiagnostic {
+        severity: ProblemDiagnosticSeverity::Error,
+        file: None,
+        line: None,
+        column: None,
+        message: message.to_string(),
+        source: Some("runner".to_string()),
+        caret: None,
+    });
 }
 
 pub(crate) fn summarize_tests(

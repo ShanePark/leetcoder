@@ -432,6 +432,7 @@ export class LeetcoderApp {
     this.testRunController = new TestRunController({
       state: this.state,
       runProblemTest: this.backend.runProblemTest.bind(this.backend),
+      stopProblemTest: this.backend.stopProblemTest.bind(this.backend),
       flushPendingSave: () => this.flushPendingSave(),
       setEditorIssues: (issues) => this.editor.setIssues(issues),
       setLiveDiagnosticsBlocked: (blocked) => this.liveDiagnostics.setBlocked(blocked),
@@ -688,7 +689,11 @@ export class LeetcoderApp {
       }
     })
     this.listen(this.element<HTMLButtonElement>('#run-test'), 'click', () => {
-      void this.testRunController.runCurrentTest()
+      if (this.state.testRun?.status === 'running') {
+        void this.testRunController.stopCurrentRun()
+      } else {
+        void this.testRunController.runCurrentTest()
+      }
     })
     this.listen(this.element<HTMLButtonElement>('#tests-tab'), 'click', () => {
       this.selectBottomPanelTab('tests')
@@ -1263,13 +1268,33 @@ export class LeetcoderApp {
 
   private updateRunButtonState(): void {
     const runButton = this.element<HTMLButtonElement>('#run-test')
-    runButton.disabled = this.state.busy || !this.state.selectedFqcn
+    const run = this.state.testRun?.status === 'running' ? this.state.testRun : null
+    const stopRequested = run?.stopRequested ?? false
+    const runLabel = this.element<HTMLElement>('#run-label')
+    const shortcut = this.element<HTMLElement>('#run-shortcut')
+    const isStopAction = run !== null
     const mac = currentIsMacPlatform()
     const runShortcut = shortcutLabel('run-test', mac)
-    runButton.setAttribute('aria-label', `Run all tests (${runShortcut})`)
-    runButton.title = this.state.selectedFqcn
-      ? `Run all tests (${runShortcut})`
-      : 'Select a Java problem file to run'
+    runLabel.textContent = isStopAction ? stopRequested ? 'Stopping…' : 'Stop' : 'Run'
+    shortcut.hidden = isStopAction
+    runButton.classList.toggle('is-stop-action', isStopAction)
+    runButton.disabled = isStopAction ? stopRequested : this.state.busy || !this.state.selectedFqcn
+    runButton.setAttribute('aria-busy', String(stopRequested))
+    runButton.setAttribute('aria-label', isStopAction
+      ? stopRequested ? 'Stopping the test run' : 'Stop test run'
+      : `Run all tests (${runShortcut})`)
+    runButton.title = isStopAction
+      ? stopRequested ? 'Stopping the test run…' : 'Stop test run'
+      : this.state.selectedFqcn
+        ? `Run all tests (${runShortcut})`
+        : 'Select a Java problem file to run'
+    const action = isStopAction ? 'stop' : 'run'
+    if (runButton.dataset.runAction !== action) {
+      runButton.querySelector<SVGElement>('.button-icon')?.replaceWith(
+        iconFor(isStopAction ? 'close' : 'play', 'button-icon'),
+      )
+      runButton.dataset.runAction = action
+    }
   }
 
   private updateEditorVisibility(): void {

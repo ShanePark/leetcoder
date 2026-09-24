@@ -15,6 +15,9 @@ const testMocks = vi.hoisted(() => ({
   fileViewCallbacks: [] as Array<{
     onFileSelect: (file: ProblemFileEntry) => void
   }>,
+  testRunControllers: [] as Array<{
+    stopCurrentRun: ReturnType<typeof vi.fn>
+  }>,
 }))
 
 vi.mock('../../../src/editor', () => {
@@ -159,8 +162,11 @@ vi.mock('../../../src/app/overlay-controller', () => ({
 vi.mock('../../../src/app/test-run-controller', () => ({
   TestRunController: class {
     resultSource: null = null
+    stopCurrentRun = vi.fn()
 
-    constructor(_options: unknown) {}
+    constructor(_options: unknown) {
+      testMocks.testRunControllers.push(this)
+    }
     runCurrentTest(_testMethod?: string): Promise<void> { return Promise.resolve() }
     resetTestState(): void {}
     cancelCurrentRun(): void {}
@@ -503,6 +509,7 @@ function createBackend(): BackendHarness {
       stdout: '',
       stderr: '',
     }),
+    stopProblemTest: vi.fn().mockResolvedValue(true),
     checkProblemDiagnostics: vi.fn().mockResolvedValue([]),
     watchRepository: vi.fn().mockResolvedValue(undefined),
     stopWatchingRepository: vi.fn().mockResolvedValue(undefined),
@@ -542,6 +549,7 @@ async function startApp(
 beforeEach(() => {
   testMocks.editorInstances.length = 0
   testMocks.fileViewCallbacks.length = 0
+  testMocks.testRunControllers.length = 0
 })
 
 afterEach(() => {
@@ -637,6 +645,60 @@ describe('LeetcoderApp lifecycle', () => {
     await second.destroy()
     expect(dom.window.totalListenerCount()).toBe(0)
     expect(dom.document.totalListenerCount()).toBe(0)
+  })
+
+  it('exposes Stop during a run and routes it to the test controller', async () => {
+    const { backend } = createBackend()
+    const app = await startApp(dom, backend)
+    const appInternals = app as unknown as {
+      state: {
+        testRun: {
+          id: number
+          status: 'running'
+          phase: string
+          startedAt: number
+          tests: []
+          stdout: string
+          stderr: string
+          activeTest: null
+          error: null
+          testMethod: null
+          stopRequested: boolean
+        } | null
+        busy: boolean
+      }
+      renderAll: () => void
+    }
+    appInternals.state.testRun = {
+      id: 1,
+      status: 'running',
+      phase: 'test',
+      startedAt: Date.now(),
+      tests: [],
+      stdout: '',
+      stderr: '',
+      activeTest: null,
+      error: null,
+      testMethod: null,
+      stopRequested: false,
+    }
+    appInternals.state.busy = true
+    appInternals.renderAll()
+
+    const button = dom.root.querySelector<FakeElement>('#run-test')
+    const label = dom.root.querySelector<FakeElement>('#run-label')
+    expect(label.textContent).toBe('Stop')
+    expect(button.disabled).toBe(false)
+    expect(button.classList.contains('is-stop-action')).toBe(true)
+
+    button.dispatch('click')
+    expect(testMocks.testRunControllers.at(-1)?.stopCurrentRun).toHaveBeenCalledOnce()
+    const activeRun = appInternals.state.testRun!
+    activeRun.stopRequested = true
+    appInternals.renderAll()
+    expect(label.textContent).toBe('Stopping…')
+    expect(button.disabled).toBe(true)
+    await app.destroy()
   })
 
   it('does not gate remembered repository startup on a pending daily request', async () => {

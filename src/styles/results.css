@@ -333,6 +333,8 @@ summary.test-row-summary:hover {
 .test-status-error { color: var(--amber); }
 .test-status-skipped { color: var(--text-faint); }
 .test-status-running { color: var(--text-dim); }
+.test-status-cancelled { color: var(--amber); }
+.test-status-timedOut { color: var(--red); }
 
 .test-name {
   flex: 1;

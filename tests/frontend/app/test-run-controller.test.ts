@@ -88,10 +88,11 @@ function harness(options: {
   const setIssues = vi.fn()
   const context: TestRunControllerContext = {
     state,
-    runProblemTest: vi.fn((_repoPath, _fqcn, onProgress) => {
+    runProblemTest: vi.fn((_repoPath, _fqcn, _testRunId, onProgress) => {
       progressHandler = onProgress
       return options.runResult ?? Promise.resolve(result())
     }),
+    stopProblemTest: vi.fn().mockResolvedValue(true),
     flushPendingSave: options.flushPendingSave ?? (() => Promise.resolve(true)),
     setEditorIssues: setIssues,
     setLiveDiagnosticsBlocked: (value) => blocked.push(value),
@@ -124,6 +125,7 @@ describe('TestRunController', () => {
     expect(context.runProblemTest).toHaveBeenCalledWith(
       '/repo',
       'shane.leetcode.Q1',
+      1,
       expect.any(Function),
       'fails',
     )
@@ -221,6 +223,7 @@ describe('TestRunController', () => {
     await flushMicrotasks()
 
     controller.cancelCurrentRun()
+    expect(context.stopProblemTest).toHaveBeenCalledWith(1)
     expect(state.testRun).toBeNull()
     expect(state.busy).toBe(true)
     expect(blocked).toEqual([true])
@@ -238,6 +241,61 @@ describe('TestRunController', () => {
     expect(blocked).toEqual([true, false])
     expect(renderAll).toHaveBeenCalledTimes(2)
     expect(renderResult).not.toHaveBeenCalled()
+  })
+
+  it('retries Stop until the native run registers, then waits for its result', async () => {
+    const run = deferred<TestResult>()
+    const { controller, state, context, blocked } = harness({ runResult: run.promise })
+    const operation = controller.runCurrentTest()
+    await flushMicrotasks()
+    vi.mocked(context.stopProblemTest)
+      .mockReset()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true)
+
+    await controller.stopCurrentRun()
+
+    expect(context.stopProblemTest).toHaveBeenCalledTimes(2)
+    expect(context.stopProblemTest).toHaveBeenCalledWith(1)
+    expect(state.testRun?.stopRequested).toBe(true)
+    expect(state.busy).toBe(true)
+    expect(state.testRun?.status).toBe('running')
+
+    run.resolve(result({
+      success: false,
+      phase: 'cancelled',
+      diagnostics: [{ severity: 'error', message: 'Test run stopped by user.', origin: 'runner' }],
+      stderr: 'Test run stopped by user.',
+    }))
+    await operation
+
+    expect(state.testRun?.phase).toBe('cancelled')
+    expect(state.testRun?.stopRequested).toBe(false)
+    expect(state.testResult?.phase).toBe('cancelled')
+    expect(state.busy).toBe(false)
+    expect(blocked).toEqual([true, false])
+  })
+
+  it('cancels locally when Stop is pressed while the pre-run save is pending', async () => {
+    const save = deferred<boolean>()
+    const { controller, state, context } = harness({
+      flushPendingSave: () => save.promise,
+    })
+    const operation = controller.runCurrentTest()
+    await flushMicrotasks()
+
+    await controller.stopCurrentRun()
+    expect(context.stopProblemTest).not.toHaveBeenCalled()
+    expect(context.runProblemTest).not.toHaveBeenCalled()
+    expect(state.busy).toBe(true)
+
+    save.resolve(true)
+    await operation
+
+    expect(context.runProblemTest).not.toHaveBeenCalled()
+    expect(state.testRun?.phase).toBe('cancelled')
+    expect(state.testResult?.phase).toBe('cancelled')
+    expect(state.busy).toBe(false)
   })
 
   it('disposes safely while the native runner is delayed', async () => {

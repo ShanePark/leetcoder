@@ -150,9 +150,11 @@ export interface BackendClient {
   runProblemTest(
     repoPath: string,
     fullyQualifiedClassName: string,
+    testRunId: number,
     onProgress?: TestRunProgressHandler,
     testMethod?: string,
   ): Promise<TestResult>
+  stopProblemTest(testRunId: number): Promise<boolean>
   /** Compile an editor snapshot without saving it or running tests. */
   checkProblemDiagnostics?(
     repoPath: string,

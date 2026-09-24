@@ -61,6 +61,7 @@ export interface TestRunSnapshot {
   activeTest: TestCaseResult | null
   error: string | null
   testMethod: string | null
+  stopRequested: boolean
 }
 
 export interface TestRunSourceSnapshot {
@@ -106,9 +107,11 @@ export interface TestRunnerBackend {
   runProblemTest: (
     projectRoot: string,
     fullyQualifiedClassName: string,
+    testRunId: number,
     onProgress?: (progress: TestRunProgress) => void,
     testMethod?: string,
   ) => Promise<TestResult>
+  stopProblemTest: (testRunId: number) => Promise<boolean>
 }
 
 export interface LiveDiagnosticsBackend {

@@ -6,13 +6,41 @@ import {
   defaultVisibleTests,
   filterTestDiagnostics,
   firstFailedTestKey,
+  presentTestResult,
   relevantTestStackFrames,
   testCaseDetailSectionOrder,
+  testFailureMessage,
   testOutputSegments,
+  testResultBannerMessage,
 } from '../../../src/app'
 import type { TestCaseResult, TestDiagnostic } from '../../../src/backend'
 
 describe('test failure and diagnostic presentation helpers', () => {
+  it('labels stopped and timed-out runs with their termination reason', () => {
+    const stopped = {
+      success: false,
+      phase: 'cancelled',
+      summary: { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0 },
+      tests: [],
+      diagnostics: [{ severity: 'error', message: 'Test run stopped by user.' }],
+      stdout: '',
+      stderr: 'Test run stopped by user.',
+    }
+    const timedOut = {
+      ...stopped,
+      phase: 'timedOut',
+      diagnostics: [{ severity: 'error', message: 'Tests exceeded the 5-second execution limit.' }],
+      stderr: 'Tests exceeded the 5-second execution limit.',
+    }
+
+    expect(presentTestResult(stopped).statusLabel).toBe('Stopped')
+    expect(testResultBannerMessage(stopped)).toBe('Test run stopped')
+    expect(testFailureMessage(stopped)).toBe('Test run stopped by user.')
+    expect(presentTestResult(timedOut).statusLabel).toBe('Timed out')
+    expect(testResultBannerMessage(timedOut)).toContain('timed out')
+    expect(testFailureMessage(timedOut)).toBe('Tests exceeded the 5-second execution limit.')
+  })
+
   it('creates continuous output segments without empty stream placeholders', () => {
     expect(testOutputSegments('hello\n', '')).toEqual([
       { stream: 'stdout', text: 'hello\n' },
