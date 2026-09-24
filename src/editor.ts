@@ -78,6 +78,7 @@ import {
   type EditorIssue,
 } from './editor/gutters'
 import {
+  cutSelectionOrLine,
   copySelectedText,
   expandJavaTemplateOnTab,
   extractJavaMethod,
@@ -86,7 +87,6 @@ import {
   minimalDocumentChange,
   planJavaDocInsertion,
   reformatJavaDocument,
-  selectedLineBlocks,
 } from './editor/editing'
 import {
   completeJavaStatement,
@@ -694,6 +694,7 @@ export class JavaEditor {
     const showIntentionsShortcuts = shortcutBindings('show-intentions')
     const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
+    const cut = (view: EditorView): boolean => cutSelectionOrLine(view, clipboard)
     const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
     const renameMethod = (view: EditorView): boolean => renameJavaMethod(view, callbacks.onRefactorError)
     const showIntentions = (view: EditorView): boolean => showJavaIntentions(view)
@@ -715,35 +716,6 @@ export class JavaEditor {
       copySelectedText(view.state, clipboard)
       return true
     }
-
-    /** Cut the selection, or the whole line when nothing is selected. */
-    const cutSelectionOrLine = (view: EditorView): boolean => {
-      const state = view.state
-      const selected = state.selection.ranges.filter((range) => !range.empty)
-      if (selected.length > 0) {
-        const text = selected
-          .map((range) => state.sliceDoc(range.from, range.to))
-          .join(state.lineBreak)
-        void clipboard.writeText(text)
-        view.dispatch({ ...state.replaceSelection(''), userEvent: 'delete.cut' })
-        return true
-      }
-      const text = selectedLineBlocks(state)
-        .map((block) => state.sliceDoc(block.from, block.to))
-        .join('')
-      if (!text) {
-        return false
-      }
-      void clipboard.writeText(text)
-      return deleteLine(view)
-    }
-
-    // Cmd/Ctrl+X already reaches the browser's own cut handling, which knows
-    // how to place a selection on the clipboard. Only the line form, which the
-    // browser has no notion of, needs to be taken over here.
-    const cutLineWithoutSelection = (view: EditorView): boolean => (
-      view.state.selection.ranges.every((range) => range.empty) && cutSelectionOrLine(view)
-    )
 
     const pasteFromClipboard = (view: EditorView): boolean => {
       void clipboard.readText().then((text) => {
@@ -824,7 +796,7 @@ export class JavaEditor {
         [isJavaDocAltShortcut, insertJavaDoc],
         [isLineDuplicateAltShortcut, copyLineDown],
         [isLineDeleteAltShortcut, deleteLine],
-        [isLineCutAltShortcut, cutSelectionOrLine],
+        [isLineCutAltShortcut, cut],
         [isCopyAltShortcut, copySelection],
         [isPasteAltShortcut, pasteFromClipboard],
         [isSelectAllAltShortcut, selectAll],
@@ -948,7 +920,7 @@ export class JavaEditor {
           // preserving the document's configured line separator.
           ...commandBindings(duplicateLineShortcuts, copyLineDown),
           ...commandBindings(deleteLineShortcuts, deleteLine),
-          ...commandBindings(cutLineShortcuts, macPlatform ? cutLineWithoutSelection : cutSelectionOrLine),
+          ...commandBindings(cutLineShortcuts, cut),
           ...commandBindings(copyShortcuts, copySelection),
           ...commandBindings(pasteShortcuts, pasteFromClipboard),
           ...commandBindings(selectAllShortcuts, selectAll),

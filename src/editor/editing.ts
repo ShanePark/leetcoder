@@ -2,6 +2,7 @@ import {
   acceptCompletion,
   nextSnippetField,
 } from '@codemirror/autocomplete'
+import { deleteLine } from '@codemirror/commands'
 import {
   indentRange,
   syntaxTree,
@@ -485,4 +486,29 @@ export function copySelectedText(
   }
   void clipboard.writeText(text)
   return true
+}
+
+/** Cut the selection, or the whole line when there is no selection. */
+export function cutSelectionOrLine(
+  view: EditorView,
+  clipboard: Pick<ClipboardBridge, 'writeText'>,
+): boolean {
+  const state = view.state
+  const selected = state.selection.ranges.filter((range) => !range.empty)
+  if (selected.length > 0) {
+    const text = selected
+      .map((range) => state.sliceDoc(range.from, range.to))
+      .join(state.lineBreak)
+    void clipboard.writeText(text)
+    view.dispatch({ ...state.replaceSelection(''), userEvent: 'delete.cut' })
+    return true
+  }
+  const text = selectedLineBlocks(state)
+    .map((block) => state.sliceDoc(block.from, block.to))
+    .join('')
+  if (!text) {
+    return false
+  }
+  void clipboard.writeText(text)
+  return deleteLine(view)
 }
