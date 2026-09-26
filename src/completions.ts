@@ -3,6 +3,7 @@ import { snippet, type Completion, type CompletionContext, type CompletionResult
 import {
   applyJavaType,
   JAVA_TYPE_IMPORTS,
+  importLines,
 } from './completions/imports'
 import {
   JAVA_KEYWORDS,
@@ -197,6 +198,10 @@ const CATALOG: Record<string, MethodSpec[]> = {
 }
 
 const STATIC_CATALOG: Record<string, MethodSpec[]> = {
+  Ps: specs([
+    ['strArray', ['input']], ['charArray', ['input']], ['intArray', ['input']],
+    ['intList', ['input']], ['strList', ['input']],
+  ]),
   List: specs([
     ['of'], ['of', ['element']], ['of', ['e1', 'e2']], ['of', ['elements']], ['copyOf', ['collection']],
   ]),
@@ -424,6 +429,23 @@ function uniqueMethodSpecs(items: MethodSpec[]): MethodSpec[] {
   })
 }
 
+function importedPsStaticCompletions(source: string): Completion[] {
+  const importPrefix = `${JAVA_TYPE_IMPORTS.Ps}.`
+  const importedNames = new Set<string>()
+  for (const line of importLines(source)) {
+    if (!line.static || !line.name.startsWith(importPrefix)) continue
+    const member = line.name.slice(importPrefix.length)
+    if (member === '*') {
+      for (const method of STATIC_CATALOG.Ps) importedNames.add(method.name)
+    } else if (STATIC_CATALOG.Ps.some((method) => method.name === member)) {
+      importedNames.add(member)
+    }
+  }
+  return STATIC_CATALOG.Ps
+    .filter((method) => importedNames.has(method.name))
+    .map((method) => methodCompletion(method, 'function'))
+}
+
 function receiverResolution(receiver: string, position: number, symbols: JavaSymbol[]): ReceiverResolution {
   if (receiver === 'this') {
     return { bases: [], static: false, unknown: false, primitive: false, array: false, thisReceiver: true }
@@ -539,6 +561,7 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
       ...symbolCompletions(symbols),
       ...methodCompletions(methods),
       ...javaIterCompletions(source, position, analysis),
+      ...importedPsStaticCompletions(analysis.maskedSource),
       ...JAVA_COMPLETIONS,
     ]),
     validFor: javaCompletionValidFor,

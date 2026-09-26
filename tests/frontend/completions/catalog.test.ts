@@ -37,6 +37,68 @@ it('keeps static imports in a separate group', () => {
     )
   })
 
+it('completes Ps static helpers and imports its type when selected', () => {
+    const source = 'package example;\n\nclass Solution { Ps| value; }'
+    expect(applyCompletion(source, 'Ps')).toBe(
+      'package example;\n\nimport io.github.shanepark.Ps;\n\nclass Solution { Ps value; }',
+    )
+
+    const imported = 'import io.github.shanepark.Ps;\nclass Solution { void test() { Ps.| } }'
+    expect(labels(imported)).toEqual(expect.arrayContaining([
+      'strArray(input)', 'charArray(input)', 'intArray(input)', 'intList(input)', 'strList(input)',
+    ]))
+    expect(labels(imported)).not.toContain('toString()')
+
+    const typed = 'import io.github.shanepark.Ps;\nclass Solution { void test() { Ps.intL| } }'
+    const result = complete(typed)
+    expect(result?.from).toBe(typed.indexOf('|') - 'intL'.length)
+    expect(result?.options.map((option) => option.label)).toContain('intList(input)')
+    expect(applyCompletion(typed, 'intList(input)')).toContain('Ps.intList(input)')
+  })
+
+it('does not duplicate the Ps import or offer its helpers without a static import', () => {
+    expect(applyCompletion(
+      'import io.github.shanepark.Ps;\nclass Solution { Ps| value; }',
+      'Ps',
+    )).toBe('import io.github.shanepark.Ps;\nclass Solution { Ps value; }')
+
+    expect(applyCompletion(
+      'import io.github.shanepark.*;\nclass Solution { Ps| value; }',
+      'Ps',
+    )).toBe('import io.github.shanepark.*;\nclass Solution { Ps value; }')
+
+    expect(labels('class Solution { void test() { intL| } }')).not.toContain('intList(input)')
+    expect(labels(`/*
+      import static io.github.shanepark.Ps.*;
+    */
+    class Solution { void test() { intL| } }`)).not.toContain('intList(input)')
+  })
+
+it('offers Ps helpers by exact and wildcard static imports', () => {
+    const exactImport = labels(
+      'import static io.github.shanepark.Ps.intList;\nclass Solution { void test() { intL| } }',
+    )
+    expect(exactImport).toContain('intList(input)')
+    expect(exactImport).not.toContain('strList(input)')
+
+    const wildcardImport = labels(
+      'import static io.github.shanepark.Ps.*;\nclass Solution { void test() { intL| } }',
+    )
+    expect(wildcardImport).toEqual(expect.arrayContaining([
+      'strArray(input)', 'charArray(input)', 'intArray(input)', 'intList(input)', 'strList(input)',
+    ]))
+    expect(applyCompletion(
+      'import static io.github.shanepark.Ps.intList;\nclass Solution { void test() { intL|; } }',
+      'intList(input)',
+    )).toContain('intList(input);')
+  })
+
+it('keeps a local Ps variable ahead of the Ps static type catalog', () => {
+    const options = labels('class Solution { void test() { Object Ps = null; Ps.| } }')
+    expect(options).toContain('toString()')
+    expect(options).not.toContain('intList(input)')
+  })
+
 it('does not import over a type declared in the same source file', () => {
     expect(applyCompletion(
       'class List {}\nclass Solution { Li| value; }',

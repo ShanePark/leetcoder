@@ -68,7 +68,7 @@ export const JAVA_TYPES = [
   'ArrayDeque', 'ArrayList', 'Arrays', 'BigDecimal', 'BigInteger', 'Boolean', 'Byte', 'Character',
   'Collections', 'Comparator', 'Deque', 'Double', 'Float', 'HashMap', 'HashSet', 'Integer',
   'InputStream', 'Iterable', 'Iterator', 'LinkedHashMap', 'LinkedHashSet', 'LinkedList', 'List', 'Long', 'Map',
-  'Math', 'Object', 'PrintStream', 'PriorityQueue', 'Queue', 'Set', 'Short', 'Stack', 'String', 'StringBuilder',
+  'Math', 'Object', 'PrintStream', 'PriorityQueue', 'Ps', 'Queue', 'Set', 'Short', 'Stack', 'String', 'StringBuilder',
   'StringBuffer', 'System', 'TreeMap', 'TreeSet',
 ]
 
@@ -92,6 +92,7 @@ export const JAVA_TYPE_IMPORTS: Readonly<Record<string, string>> = {
   Map: 'java.util.Map',
   PrintStream: 'java.io.PrintStream',
   PriorityQueue: 'java.util.PriorityQueue',
+  Ps: 'io.github.shanepark.Ps',
   Queue: 'java.util.Queue',
   Set: 'java.util.Set',
   Stack: 'java.util.Stack',
