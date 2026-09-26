@@ -5,6 +5,7 @@ import type {
   GitFileChange,
   GitPushResult,
   ProblemFileEntry,
+  PsLibraryMetadata,
   ProjectSearchMatch,
   ProjectSearchResult,
   ProjectValidation,
@@ -275,6 +276,10 @@ export function createDevMockBackend(): BackendClient & {
   return {
     async validateProject(): Promise<ProjectValidation> {
       return { valid: true }
+    },
+
+    async inspectPsLibrary(): Promise<PsLibraryMetadata> {
+      return { fingerprint: 'preview', methods: [] }
     },
 
     async fetchDailyProblem(): Promise<DailyProblem> {

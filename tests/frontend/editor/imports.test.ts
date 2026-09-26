@@ -3,9 +3,29 @@ import { java } from '@codemirror/lang-java'
 import { EditorState } from '@codemirror/state'
 import { describe, expect, it } from 'vitest'
 import { javaAutoImports } from '../../../src/editor'
+import { psLibraryExtension, setPsLibraryMetadata } from '../../../src/completions/library'
 import { applyUndo } from './helpers'
 
 describe('Java auto imports', () => {
+  it('imports Ps only when the project metadata exposes its methods', () => {
+    const source = 'class Solution { Object values = ; }'
+    const cursor = source.indexOf(';')
+    const base = EditorState.create({ doc: source, extensions: [java(), javaAutoImports, psLibraryExtension] })
+    const available = base.update({ effects: setPsLibraryMetadata.of({
+      fingerprint: 'fixture',
+      methods: [{ name: 'parse', returnType: 'java.lang.Object', parameters: [] }],
+    }) }).state
+    const unavailable = available.update({ effects: setPsLibraryMetadata.of(null) }).state
+    const insert = (state: EditorState) => state.update({
+      changes: { from: cursor, insert: 'Ps.parse()' },
+      userEvent: 'input.complete',
+    }).state.doc.toString()
+
+    expect(insert(base)).not.toContain('import io.github.shanepark.Ps;')
+    expect(insert(available)).toContain('import io.github.shanepark.Ps;')
+    expect(insert(unavailable)).not.toContain('import io.github.shanepark.Ps;')
+  })
+
   it('adds imports while a declaration is typed character by character', () => {
     const source = 'class Solution {\n    void test() {\n        |\n    }\n}'
     const cursor = source.indexOf('|')

@@ -49,6 +49,25 @@ export interface ProjectSearchResult {
   skippedFiles: number
 }
 
+/** A parameter in a method declared by the project's Ps library. */
+export interface PsParameter {
+  name: string | null
+  typeName: string
+}
+
+/** A method declared by the project's Ps library. */
+export interface PsMethod {
+  name: string
+  returnType: string
+  parameters: PsParameter[]
+}
+
+/** Public Ps methods discovered from the selected project's classpath. */
+export interface PsLibraryMetadata {
+  fingerprint: string
+  methods: PsMethod[]
+}
+
 /** Problem source files changed outside this application. */
 export interface RepositoryFilesChanged {
   /** Repository-relative POSIX paths, sorted and de-duplicated. */
@@ -148,6 +167,7 @@ export type TestRunProgressHandler = (progress: TestRunProgress) => void
 
 export interface BackendClient {
   validateProject(repoPath: string): Promise<ProjectValidation>
+  inspectPsLibrary(repoPath: string): Promise<PsLibraryMetadata>
   fetchDailyProblem(): Promise<DailyProblem>
   fetchProblemByNumber(frontendId: string): Promise<DailyProblem>
   listProblemFiles(repoPath: string): Promise<ProblemFileEntry[]>

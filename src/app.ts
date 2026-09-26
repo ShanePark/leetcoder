@@ -55,6 +55,7 @@ import { ProblemSelectionController } from './app/problem-selection-controller'
 import { DocumentController } from './app/document-controller'
 import { FileOperationsController } from './app/file-operations-controller'
 import { ProjectContentSearchController } from './app/project-search-controller'
+import { PsLibraryController, isPsBuildConfigurationPath } from './app/ps-library-controller'
 import { findProjectSearchLocation } from './app/project-search-location'
 import {
   createFileTabsView,
@@ -167,6 +168,7 @@ export class LeetcoderApp {
   }
   private editor: JavaEditor
   private readonly liveDiagnostics: LiveDiagnosticsScheduler
+  private readonly psLibraryController: PsLibraryController
   private readonly dailyProblemView: DailyProblemViewRenderer
   private readonly problemSelectionController: ProblemSelectionController
   private repositoryGeneration = 0
@@ -494,6 +496,11 @@ export class LeetcoderApp {
         return true
       },
     })
+    this.psLibraryController = new PsLibraryController({
+      backend: this.backend,
+      setMetadata: (metadata) => this.editor.setPsLibraryMetadata(metadata),
+      setMessage: (message, tone) => this.setMessage(message, tone),
+    })
     this.documentController = new DocumentController({
       state: this.state,
       backend: this.backend,
@@ -605,6 +612,7 @@ export class LeetcoderApp {
     await this.prepareToClose()
     this.destroyed = true
     this.projectContentSearchController.dispose()
+    this.psLibraryController.dispose()
     this.fileOperationsController.dispose()
     this.testRunController.dispose()
     this.liveDiagnostics.dispose()
@@ -871,6 +879,7 @@ export class LeetcoderApp {
       // paths can be identical across repositories and must never reuse the
       // previous source, FQCN, or test output.
       void this.backend.stopWatchingRepository().catch(() => {})
+      this.psLibraryController.setRepository(null)
       this.state.repoPath = null
       this.state.projectValid = false
       this.state.files = []
@@ -913,9 +922,15 @@ export class LeetcoderApp {
           await this.backend.stopWatchingRepository().catch(() => {})
         }
       }
+      if (this.isCurrentRepositorySelection(selectionGeneration)
+        && this.state.projectValid
+        && this.state.repoPath === path) {
+        this.psLibraryController.setRepository(path)
+      }
     } catch (error) {
       if (this.isCurrentRepositorySelection(selectionGeneration)) {
         this.state.projectValid = false
+        this.psLibraryController.setRepository(null)
         this.setMessage(errorMessage(error), 'error')
       }
     } finally {
@@ -1180,6 +1195,9 @@ export class LeetcoderApp {
     if (change.structural) {
       void this.refreshFiles()
     }
+    if (change.paths.some(isPsBuildConfigurationPath)) {
+      this.psLibraryController.invalidate()
+    }
     const path = this.state.selectedPath
     if (path && change.paths.some((changed) => sameFilePath(changed, path))) {
       void this.reloadOpenFileFromDisk(path)
@@ -1206,6 +1224,7 @@ export class LeetcoderApp {
       this.installUpdatePolling()
     }
     this.problemSelectionController.refreshDailyProblemIfStale()
+    this.psLibraryController.revalidateIfStale()
     // Filesystem events can be missed while the window is hidden, so returning
     // to it re-checks the open file the way an IDE syncs on frame activation.
     if (this.state.selectedPath && this.state.projectValid) {

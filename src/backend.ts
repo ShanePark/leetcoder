@@ -18,6 +18,9 @@ export type {
   ProblemFileEntry,
   ProjectSearchMatch,
   ProjectSearchResult,
+  PsLibraryMetadata,
+  PsMethod,
+  PsParameter,
   ProjectValidation,
   RepositoryFilesChanged,
   TestCaseResult,
@@ -51,3 +54,5 @@ export {
   normalizeTestResult,
   normalizeTestRunProgress,
 } from './backend/normalizers/test'
+
+export { normalizePsLibraryMetadata } from './backend/normalizers/java-library'

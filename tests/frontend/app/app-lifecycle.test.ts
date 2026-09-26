@@ -5,6 +5,7 @@ import type {
   ProblemFileEntry,
   ProjectSearchMatch,
   ProjectValidation,
+  PsLibraryMetadata,
   RepositoryFilesChanged,
 } from '../../../src/backend'
 import { UPDATE_CHECK_INTERVAL_MS } from '../../../src/update-controller'
@@ -13,6 +14,7 @@ const testMocks = vi.hoisted(() => ({
   editorInstances: [] as Array<{
     emitChange: (source: string) => void
     triggerProjectSearch: () => void
+    metadataUpdates: Array<PsLibraryMetadata | null>
     revealedLocations: Array<{ line: number; column?: number | null }>
   }>,
   fileViewCallbacks: [] as Array<{
@@ -37,6 +39,7 @@ vi.mock('../../../src/editor', () => {
   class FakeJavaEditor {
     readonly view = { state: {} }
     readonly revealedLocations: Array<{ line: number; column?: number | null }> = []
+    readonly metadataUpdates: Array<PsLibraryMetadata | null> = []
     private readonly callbacks: {
       onChange?: (source: string) => void
       onSearchProject?: () => void
@@ -54,6 +57,10 @@ vi.mock('../../../src/editor', () => {
     focus(): void {}
 
     setIssues(_issues: readonly unknown[], _options?: { reveal?: boolean }): void {}
+
+    setPsLibraryMetadata(metadata: PsLibraryMetadata | null): void {
+      this.metadataUpdates.push(metadata)
+    }
 
     revealLine(line: number, column?: number | null): void {
       this.revealedLocations.push({ line, column })
@@ -518,6 +525,11 @@ const dailyProblem = {
   content: null,
 }
 
+const psLibraryMetadata: PsLibraryMetadata = {
+  fingerprint: 'test-fingerprint',
+  methods: [],
+}
+
 interface BackendHarness {
   backend: BackendClient
   watcher: {
@@ -559,6 +571,7 @@ function createBackend(): BackendHarness {
     }),
     stopProblemTest: vi.fn().mockResolvedValue(true),
     checkProblemDiagnostics: vi.fn().mockResolvedValue([]),
+    inspectPsLibrary: vi.fn().mockResolvedValue(psLibraryMetadata),
     watchRepository: vi.fn().mockResolvedValue(undefined),
     stopWatchingRepository: vi.fn().mockResolvedValue(undefined),
     onRepositoryFilesChanged: vi.fn(async (handler: (change: RepositoryFilesChanged) => void) => {
@@ -796,6 +809,58 @@ describe('LeetcoderApp lifecycle', () => {
     expect(started).toBe(true)
   })
 
+  it('loads Ps metadata per repository and refreshes after Gradle config changes', async () => {
+    vi.useFakeTimers()
+    try {
+      const { backend, watcher } = createBackend()
+      const app = await startApp(dom, backend)
+      const editor = testMocks.editorInstances.at(-1)!
+
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(backend.inspectPsLibrary).toHaveBeenCalledOnce()
+      expect(backend.inspectPsLibrary).toHaveBeenCalledWith('/repo')
+      expect(editor.metadataUpdates.at(-1)).toEqual(psLibraryMetadata)
+
+      editor.emitChange('class Q1TwoSum { int value = 1; }')
+      watcher.current?.({ paths: [file.path], structural: false })
+      expect(backend.inspectPsLibrary).toHaveBeenCalledOnce()
+
+      watcher.current?.({ paths: ['gradle/libs.versions.toml'], structural: false })
+      expect(editor.metadataUpdates.at(-1)).toBeNull()
+      await vi.advanceTimersByTimeAsync(300)
+      expect(backend.inspectPsLibrary).toHaveBeenCalledTimes(2)
+      expect(editor.metadataUpdates.at(-1)).toEqual(psLibraryMetadata)
+      await app.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('revalidates Ps metadata on app focus without refetching repeatedly', async () => {
+    vi.useFakeTimers()
+    try {
+      const { backend } = createBackend()
+      const app = await startApp(dom, backend)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(backend.inspectPsLibrary).toHaveBeenCalledOnce()
+
+      dom.window.dispatch('focus')
+      dom.document.dispatch('visibilitychange')
+      expect(backend.inspectPsLibrary).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      dom.window.dispatch('focus')
+      expect(backend.inspectPsLibrary).toHaveBeenCalledTimes(2)
+      dom.window.dispatch('focus')
+      expect(backend.inspectPsLibrary).toHaveBeenCalledTimes(2)
+      await app.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('stops remembered repository startup when validation finishes after destroy', async () => {
     const { backend } = createBackend()
     const validation = deferred<ProjectValidation>()
@@ -862,7 +927,41 @@ describe('LeetcoderApp lifecycle', () => {
 
     expect(vi.mocked(backend.stopWatchingRepository).mock.calls.length)
       .toBe(stopsBeforeLateWatcher + 1)
+    expect(backend.inspectPsLibrary).not.toHaveBeenCalled()
     expect(testMocks.fileViewCallbacks).toHaveLength(rendersBeforeDestroy)
+  })
+
+  it('starts Ps inspection only after repository watching finishes', async () => {
+    const { backend } = createBackend()
+    const watching = deferred<void>()
+    backend.watchRepository = vi.fn(() => watching.promise)
+    const app = new LeetcoderApp(dom.root as unknown as HTMLElement, {
+      backend,
+      storage: rememberedStorage() as unknown as Storage,
+    })
+    const startup = app.start()
+
+    await vi.waitFor(() => {
+      expect(backend.watchRepository).toHaveBeenCalledWith('/repo')
+    })
+    expect(backend.inspectPsLibrary).not.toHaveBeenCalled()
+
+    watching.resolve()
+    await startup
+    expect(backend.inspectPsLibrary).toHaveBeenCalledOnce()
+    expect(backend.inspectPsLibrary).toHaveBeenCalledWith('/repo')
+    await app.destroy()
+  })
+
+  it('loads Ps metadata even when repository watching is unavailable', async () => {
+    const { backend } = createBackend()
+    backend.watchRepository = vi.fn().mockRejectedValue(new Error('watch unavailable'))
+    const app = await startApp(dom, backend)
+
+    await Promise.resolve()
+    expect(backend.inspectPsLibrary).toHaveBeenCalledOnce()
+    expect(backend.inspectPsLibrary).toHaveBeenCalledWith('/repo')
+    await app.destroy()
   })
 
   it('pauses update polling while hidden and resumes on visibility return', async () => {

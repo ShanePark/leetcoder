@@ -1,6 +1,61 @@
 import { describe, expect, it } from 'vitest'
-import { collectJavaSymbols } from '../../../src/completions'
+import { EditorState } from '@codemirror/state'
+import type { CompletionContext } from '@codemirror/autocomplete'
+import { collectJavaSymbols, javaCompletions, psLibraryExtension, setPsLibraryMetadata } from '../../../src/completions'
+import type { PsLibraryMetadata } from '../../../src/completions'
 import { complete, labels, applyCompletion } from './helpers'
+
+const psV1: PsLibraryMetadata = {
+  fingerprint: 'ps-v1',
+  methods: [
+    { name: 'strList', returnType: 'java.util.List<java.util.List<java.lang.String>>', parameters: [{ name: 'input', typeName: 'java.lang.String' }] },
+    { name: 'intList', returnType: 'java.util.List<java.util.List<java.lang.Integer>>', parameters: [{ name: null, typeName: 'java.lang.String' }] },
+    { name: 'intArray', returnType: 'int[][]', parameters: [{ name: null, typeName: 'int[]' }] },
+    { name: 'flag', returnType: 'boolean', parameters: [{ name: null, typeName: 'boolean' }] },
+  ],
+}
+
+function completeWithPs(source: string, metadata: PsLibraryMetadata | null = psV1) {
+  const marker = source.indexOf('|')
+  const cursor = marker >= 0 ? marker : source.length
+  const document = marker >= 0 ? `${source.slice(0, marker)}${source.slice(marker + 1)}` : source
+  let state = EditorState.create({ doc: document, extensions: [psLibraryExtension] })
+  if (metadata) state = state.update({ effects: setPsLibraryMetadata.of(metadata) }).state
+  const context = {
+    state,
+    pos: cursor,
+    explicit: false,
+    matchBefore(pattern: RegExp) {
+      const before = document.slice(0, cursor)
+      const anchoredPattern = new RegExp(`(?:${pattern.source})$`, pattern.flags.replace(/[gy]/g, ''))
+      const match = anchoredPattern.exec(before)
+      if (!match) return null
+      return { from: cursor - match[0].length, to: cursor, text: match[0] }
+    },
+  } as unknown as CompletionContext
+  return { state, result: javaCompletions(context), cursor, document }
+}
+
+function psLabels(source: string, metadata: PsLibraryMetadata | null = psV1): string[] {
+  return completeWithPs(source, metadata).result?.options.map((option) => option.label) ?? []
+}
+
+function applyPsCompletion(source: string, label: string, metadata: PsLibraryMetadata = psV1): string {
+  const { state: initialState, result, cursor } = completeWithPs(source, metadata)
+  if (!result) throw new Error('No completion result')
+  const completion = result.options.find((option) => option.label === label)
+  if (!completion) throw new Error(`Completion not found: ${label}`)
+  let state = initialState
+  const view = {
+    get state() { return state },
+    dispatch(spec: Parameters<EditorState['update']>[0]) {
+      state = state.update(spec).state
+    },
+  } as unknown as import('@codemirror/view').EditorView
+  if (typeof completion.apply === 'function') completion.apply(view, completion, result.from, cursor)
+  else state = state.update({ changes: { from: result.from, to: cursor, insert: completion.apply ?? completion.label } }).state
+  return state.doc.toString()
+}
 
 describe('lightweight Java completions', () => {
 it('adds a specific import after the package when a Java type completion is picked', () => {
@@ -37,66 +92,107 @@ it('keeps static imports in a separate group', () => {
     )
   })
 
-it('completes Ps static helpers and imports its type when selected', () => {
+it('uses project Ps metadata for type and method completions, including return types and snippets', () => {
     const source = 'package example;\n\nclass Solution { Ps| value; }'
-    expect(applyCompletion(source, 'Ps')).toBe(
+    expect(applyPsCompletion(source, 'Ps')).toBe(
       'package example;\n\nimport io.github.shanepark.Ps;\n\nclass Solution { Ps value; }',
     )
 
     const imported = 'import io.github.shanepark.Ps;\nclass Solution { void test() { Ps.| } }'
-    expect(labels(imported)).toEqual(expect.arrayContaining([
-      'strArray(input)', 'charArray(input)', 'intArray(input)', 'intList(input)', 'strList(input)',
+    expect(psLabels(imported)).toEqual(expect.arrayContaining([
+      'strList(java.lang.String input)',
+      'intList(java.lang.String value)',
+      'intArray(int[] array)',
+      'flag(boolean condition)',
     ]))
-    expect(labels(imported)).not.toContain('toString()')
+    expect(psLabels(imported)).not.toContain('toString()')
 
     const typed = 'import io.github.shanepark.Ps;\nclass Solution { void test() { Ps.intL| } }'
-    const result = complete(typed)
-    expect(result?.from).toBe(typed.indexOf('|') - 'intL'.length)
-    expect(result?.options.map((option) => option.label)).toContain('intList(input)')
-    expect(applyCompletion(typed, 'intList(input)')).toContain('Ps.intList(input)')
+    const result = completeWithPs(typed)
+    expect(result.result?.from).toBe(typed.indexOf('|') - 'intL'.length)
+    const option = result.result?.options.find((item) => item.label === 'intList(java.lang.String value)')
+    expect(option?.detail).toBe('java.util.List<java.util.List<java.lang.Integer>>')
+    expect(applyPsCompletion(typed, 'intList(java.lang.String value)')).toContain('Ps.intList(value)')
+    expect(applyPsCompletion(typed.replace('intL|', 'flag|'), 'flag(boolean condition)')).toContain('Ps.flag(condition)')
   })
 
-it('does not duplicate the Ps import or offer its helpers without a static import', () => {
-    expect(applyCompletion(
+it('does not suggest Ps when the project metadata is missing or has no public methods', () => {
+    expect(psLabels('class Solution { Ps| value; }', null)).not.toContain('Ps')
+    expect(psLabels('class Solution { void test() { Ps.| } }', null)).toEqual([])
+
+    const emptyMetadata: PsLibraryMetadata = { fingerprint: 'empty', methods: [] }
+    expect(psLabels('class Solution { Ps| value; }', emptyMetadata)).not.toContain('Ps')
+    expect(psLabels('class Solution { void test() { Ps.| } }', emptyMetadata)).toEqual([])
+
+    expect(psLabels('class Solution { void test() { intL| } }')).not.toContain('intList(java.lang.String value)')
+  })
+
+it('deduplicates Ps type imports and does not expose static helpers without a static import', () => {
+    expect(applyPsCompletion(
       'import io.github.shanepark.Ps;\nclass Solution { Ps| value; }',
       'Ps',
     )).toBe('import io.github.shanepark.Ps;\nclass Solution { Ps value; }')
-
-    expect(applyCompletion(
+    expect(applyPsCompletion(
       'import io.github.shanepark.*;\nclass Solution { Ps| value; }',
       'Ps',
     )).toBe('import io.github.shanepark.*;\nclass Solution { Ps value; }')
-
-    expect(labels('class Solution { void test() { intL| } }')).not.toContain('intList(input)')
-    expect(labels(`/*
-      import static io.github.shanepark.Ps.*;
-    */
-    class Solution { void test() { intL| } }`)).not.toContain('intList(input)')
+    expect(psLabels('class Solution { void test() { intL| } }')).not.toContain('intList(java.lang.String value)')
   })
 
-it('offers Ps helpers by exact and wildcard static imports', () => {
-    const exactImport = labels(
+it('reflects added, removed, and overloaded Ps methods when the project version changes', () => {
+    const source = 'import io.github.shanepark.Ps;\nclass Solution { void test() { Ps.| } }'
+    const versionOne: PsLibraryMetadata = {
+      fingerprint: 'ps-v1',
+      methods: [
+        { name: 'convert', returnType: 'java.lang.String', parameters: [{ name: 'input', typeName: 'java.lang.String' }] },
+        { name: 'removed', returnType: 'void', parameters: [] },
+      ],
+    }
+    const versionTwo: PsLibraryMetadata = {
+      fingerprint: 'ps-v2',
+      methods: [
+        { name: 'convert', returnType: 'java.lang.String', parameters: [{ name: 'input', typeName: 'java.lang.String' }] },
+        { name: 'convert', returnType: 'java.lang.String', parameters: [{ name: 'input', typeName: 'int' }] },
+        { name: 'added', returnType: 'java.lang.String', parameters: [{ name: null, typeName: 'java.lang.String' }] },
+      ],
+    }
+    const labelsV1 = psLabels(source, versionOne)
+    const labelsV2 = psLabels(source, versionTwo)
+    expect(labelsV1).toContain('convert(java.lang.String input)')
+    expect(labelsV1).toContain('removed()')
+    expect(labelsV2).toEqual(expect.arrayContaining([
+      'convert(java.lang.String input)', 'convert(int input)', 'added(java.lang.String value)',
+    ]))
+    expect(labelsV2).not.toContain('removed()')
+  })
+
+it('offers dynamic Ps methods through exact and wildcard static imports only', () => {
+    const exactImport = psLabels(
       'import static io.github.shanepark.Ps.intList;\nclass Solution { void test() { intL| } }',
     )
-    expect(exactImport).toContain('intList(input)')
-    expect(exactImport).not.toContain('strList(input)')
+    expect(exactImport).toContain('intList(java.lang.String value)')
+    expect(exactImport).not.toContain('strList(java.lang.String input)')
 
-    const wildcardImport = labels(
+    const wildcardImport = psLabels(
       'import static io.github.shanepark.Ps.*;\nclass Solution { void test() { intL| } }',
     )
     expect(wildcardImport).toEqual(expect.arrayContaining([
-      'strArray(input)', 'charArray(input)', 'intArray(input)', 'intList(input)', 'strList(input)',
+      'intList(java.lang.String value)', 'intArray(int[] array)', 'flag(boolean condition)',
     ]))
-    expect(applyCompletion(
+    expect(applyPsCompletion(
       'import static io.github.shanepark.Ps.intList;\nclass Solution { void test() { intL|; } }',
-      'intList(input)',
-    )).toContain('intList(input);')
+      'intList(java.lang.String value)',
+    )).toContain('intList(value);')
+    expect(psLabels(`/*
+      import static io.github.shanepark.Ps.*;
+    */
+    class Solution { void test() { intL| } }`)).not.toContain('intList(java.lang.String value)')
   })
 
-it('keeps a local Ps variable ahead of the Ps static type catalog', () => {
-    const options = labels('class Solution { void test() { Object Ps = null; Ps.| } }')
+it('keeps a local Ps variable ahead of the dynamic static type catalog', () => {
+    const options = psLabels('class Solution { void test() { Object Ps = null; Ps.| } }')
     expect(options).toContain('toString()')
-    expect(options).not.toContain('intList(input)')
+    expect(options).not.toContain('intList(java.lang.String value)')
   })
 
 it('does not import over a type declared in the same source file', () => {

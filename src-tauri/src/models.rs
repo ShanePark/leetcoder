@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub(crate) use crate::java_library::PsLibraryMetadata;
+
 /// The result of checking that a directory is the expected ps repository.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

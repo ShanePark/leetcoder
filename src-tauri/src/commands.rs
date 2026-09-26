@@ -1,5 +1,6 @@
 use crate::git;
 use crate::leetcode;
+use crate::models::PsLibraryMetadata;
 use crate::models::{
     CheckProblemDiagnosticsArgs, CreateProblemFileArgs, DailyProblem, GitCommitResult,
     GitFileChange, GitPushResult, ProblemDiagnosticsResult, ProblemFileArgs, ProblemFileContent,
@@ -73,6 +74,16 @@ pub async fn list_problem_files(repo_path: String) -> Result<ProblemFileList, St
     tauri::async_runtime::spawn_blocking(move || repository::list_problem_files(&repo_path))
         .await
         .map_err(|error| format!("Problem file listing worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn inspect_ps_library(repo_path: String) -> Result<PsLibraryMetadata, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = crate::security::canonical_project_root(&repo_path)?;
+        crate::java_library::inspect_ps_library(&root)
+    })
+    .await
+    .map_err(|error| format!("Library inspection worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
@@ -26,7 +27,8 @@ const COALESCE_WINDOW: Duration = Duration::from_millis(120);
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryFilesChanged {
-    /// Repository-relative POSIX paths, sorted and de-duplicated.
+    /// Repository-relative POSIX paths, sorted and de-duplicated. This also
+    /// includes root Gradle inputs and version catalog files.
     pub paths: Vec<String>,
     /// True when a source file was created, removed, or renamed. The file
     /// list itself is then stale, not just the content of an open buffer.
@@ -84,6 +86,23 @@ pub(crate) fn watch(
             })?;
     }
 
+    watcher
+        .watch(&root, RecursiveMode::NonRecursive)
+        .map_err(|error| format!("Unable to watch repository Gradle files: {error}"))?;
+    let gradle_directory = root.join("gradle");
+    if fs::symlink_metadata(&gradle_directory)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    {
+        watcher
+            .watch(&gradle_directory, RecursiveMode::Recursive)
+            .map_err(|error| {
+                format!(
+                    "Unable to watch Gradle configuration directory '{}': {error}",
+                    gradle_directory.display()
+                )
+            })?;
+    }
+
     thread::spawn(move || forward_changes(&app, &root, &receiver));
     state.replace(Some(watcher));
     Ok(())
@@ -130,22 +149,46 @@ fn absorb(root: &Path, event: &Event, paths: &mut BTreeSet<String>, structural: 
         return;
     }
 
-    let mut matched = false;
+    let mut source_matched = false;
     for path in &event.paths {
-        if !is_source_file(path) {
+        let source_file = is_source_file(path);
+        if !source_file && !is_gradle_configuration_path(root, path) {
             continue;
         }
         if let Ok(relative) = relative_path(root, path) {
             paths.insert(relative);
-            matched = true;
+            source_matched |= source_file;
         }
     }
 
     // Editors that save through a temporary file report the final name as a
     // rename, so renames count as structural alongside create and remove.
-    if matched && is_structural(&event.kind) {
+    if source_matched && is_structural(&event.kind) {
         *structural = true;
     }
+}
+
+fn is_gradle_configuration_path(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    if matches!(
+        relative.as_str(),
+        "build.gradle"
+            | "build.gradle.kts"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "gradle.properties"
+            | "gradle"
+    ) {
+        return true;
+    }
+    let Some(under_gradle) = relative.strip_prefix("gradle/") else {
+        return false;
+    };
+    under_gradle == "wrapper/gradle-wrapper.properties"
+        || (!under_gradle.contains('/') && under_gradle.ends_with(".versions.toml"))
 }
 
 fn is_structural(kind: &EventKind) -> bool {
@@ -200,6 +243,54 @@ mod tests {
             &event(
                 EventKind::Create(CreateKind::File),
                 &["/repo/easy/.Q1.java.swp", "/elsewhere/Q1.java"],
+            ),
+            &mut paths,
+            &mut structural,
+        );
+        assert!(paths.is_empty());
+        assert!(!structural);
+    }
+
+    #[test]
+    fn absorb_reports_gradle_inputs_without_marking_the_problem_file_list_stale() {
+        let root = Path::new("/repo");
+        for changed_path in [
+            "/repo/build.gradle",
+            "/repo/settings.gradle.kts",
+            "/repo/gradle.properties",
+            "/repo/gradle/libs.versions.toml",
+            "/repo/gradle/wrapper/gradle-wrapper.properties",
+        ] {
+            let mut paths = BTreeSet::new();
+            let mut structural = false;
+            absorb(
+                root,
+                &event(
+                    EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                    &[changed_path],
+                ),
+                &mut paths,
+                &mut structural,
+            );
+            assert_eq!(paths.len(), 1, "expected {changed_path} to be watched");
+            assert!(!structural, "Gradle files do not change the Java file list");
+        }
+    }
+
+    #[test]
+    fn absorb_ignores_unrelated_root_and_gradle_files() {
+        let root = Path::new("/repo");
+        let mut paths = BTreeSet::new();
+        let mut structural = false;
+        absorb(
+            root,
+            &event(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                &[
+                    "/repo/package.json",
+                    "/repo/gradle/verification-metadata.xml",
+                    "/repo/gradle/wrapper/gradle-wrapper.jar",
+                ],
             ),
             &mut paths,
             &mut structural,

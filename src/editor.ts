@@ -2,6 +2,7 @@ import {
   autocompletion,
   closeBrackets,
   closeBracketsKeymap,
+  closeCompletion,
   completionKeymap,
   completionStatus,
   startCompletion,
@@ -56,7 +57,15 @@ import {
   finishJavaTemplate,
   javaIdentifierAt,
   javaIterTemplateExtension,
+  maskJavaCommentsAndLiterals,
 } from './completions'
+import {
+  psLibraryAvailable,
+  psLibraryExtension,
+  readPsLibraryMetadata,
+  setPsLibraryMetadata,
+  type PsLibraryMetadata,
+} from './completions/library'
 import type { ClipboardBridge } from './clipboard'
 import { createClipboardBridge } from './clipboard'
 import { platformShortcutBindings, shortcutBindings, shortcutLabel } from './shortcuts'
@@ -233,6 +242,7 @@ function referencedJavaImportTypes(state: EditorState): Set<string> {
     enter(node) {
       const name = source.slice(node.from, node.to)
       if (!JAVA_TYPE_IMPORTS[name]) return
+      if (name === 'Ps' && !psLibraryAvailable(state)) return
 
       if (node.name === 'TypeName') {
         // The final component of a fully qualified type is also a TypeName.
@@ -836,6 +846,7 @@ export class JavaEditor {
         syntaxHighlighting(leetcoderHighlight),
         java(),
         javaIterTemplateExtension,
+        psLibraryExtension,
         javaAutoImports,
         javaImportPruning,
         javaFolding,
@@ -1104,6 +1115,21 @@ export class JavaEditor {
     if (first && options.reveal !== false) {
       this.revealLine(first.line, first.column)
     }
+  }
+
+  setPsLibraryMetadata(metadata: PsLibraryMetadata | null): void {
+    const current = readPsLibraryMetadata(this.view.state)
+    if (current === metadata || (current && metadata && current.fingerprint === metadata.fingerprint)) return
+    const state = this.view.state
+    const selection = state.selection.main
+    const beforeCursor = maskJavaCommentsAndLiterals(state.doc.toString()).slice(0, selection.head)
+    // A request made before library loading can have already finished with no candidates.
+    const waitingAtPs = metadata !== null && metadata.methods.length > 0 && selection.empty
+      && /(?:^|[^\w$])Ps(?:\s*\.\s*[\w$]*)?$/.test(beforeCursor)
+    const restartCompletion = completionStatus(state) !== null || waitingAtPs
+    closeCompletion(this.view)
+    this.view.dispatch({ effects: setPsLibraryMetadata.of(metadata) })
+    if (restartCompletion) startCompletion(this.view)
   }
 
   destroy(): void {

@@ -12,6 +12,7 @@ import {
   normalizeRepositoryFilesChanged,
 } from './normalizers/files'
 import { normalizeProjectSearchResult } from './normalizers/project-search'
+import { normalizePsLibraryMetadata } from './normalizers/java-library'
 import {
   normalizeGitChanges,
   normalizeGitCommitResult,
@@ -45,6 +46,11 @@ export function createBackendClient(
     async validateProject(repoPath) {
       const response = await invoke<unknown>('validate_project', { repoPath })
       return normalizeValidation(response)
+    },
+
+    async inspectPsLibrary(repoPath) {
+      const response = await invoke<unknown>('inspect_ps_library', { repoPath })
+      return normalizePsLibraryMetadata(response)
     },
 
     async fetchDailyProblem() {

@@ -2,6 +2,7 @@
 
 mod commands;
 mod git;
+mod java_library;
 mod leetcode;
 mod models;
 mod project_search;
@@ -35,6 +36,7 @@ pub fn run() {
             commands::fetch_problem_by_number,
             commands::list_problem_files,
             commands::search_project,
+            commands::inspect_ps_library,
             commands::read_problem_file,
             commands::create_problem_file,
             commands::save_problem_file,

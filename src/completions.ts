@@ -21,6 +21,12 @@ import {
   javaPrintCompletion,
   isJavaIterVariableNameField,
 } from './completions/templates'
+import {
+  psLibraryAvailable,
+  readPsLibraryMetadata,
+  type PsLibraryMetadata,
+  type PsMethod,
+} from './completions/library'
 
 export type {
   JavaDefinition,
@@ -31,6 +37,13 @@ export type {
   JavaIterableCandidate,
   JavaPrintTemplateKind,
 } from './completions/model'
+export type { PsLibraryMetadata, PsMethod, PsMethodParameter } from './completions/library'
+export {
+  psLibraryAvailable,
+  psLibraryExtension,
+  readPsLibraryMetadata,
+  setPsLibraryMetadata,
+} from './completions/library'
 export {
   addJavaTypeImports,
   JAVA_TYPE_IMPORTS,
@@ -73,6 +86,7 @@ interface ReceiverResolution {
   primitive: boolean
   array: boolean
   thisReceiver: boolean
+  unavailable?: boolean
 }
 
 const JAVA_COMPLETIONS: Completion[] = [
@@ -198,10 +212,6 @@ const CATALOG: Record<string, MethodSpec[]> = {
 }
 
 const STATIC_CATALOG: Record<string, MethodSpec[]> = {
-  Ps: specs([
-    ['strArray', ['input']], ['charArray', ['input']], ['intArray', ['input']],
-    ['intList', ['input']], ['strList', ['input']],
-  ]),
   List: specs([
     ['of'], ['of', ['element']], ['of', ['e1', 'e2']], ['of', ['elements']], ['copyOf', ['collection']],
   ]),
@@ -332,6 +342,43 @@ function methodCompletion(spec: MethodSpec, type: Completion['type'] = 'method')
   return { label, type, detail: spec.detail, apply: snippet(body) }
 }
 
+function psMethodCompletion(method: PsMethod, type: Completion['type'] = 'method'): Completion {
+  const usedNames = new Set<string>()
+  const parameters = method.parameters.map((parameter, index) => {
+    const declaredName = parameter.name?.trim()
+    const baseName = declaredName && /^[A-Za-z_$][\w$]*$/.test(declaredName)
+      ? declaredName
+      : psParameterName(parameter.typeName, index)
+    let name = baseName
+    let suffix = 2
+    while (usedNames.has(name)) name = `${baseName}${suffix++}`
+    usedNames.add(name)
+    return { name, typeName: parameter.typeName }
+  })
+  const label = `${method.name}(${parameters.map(({ name, typeName }) => `${typeName} ${name}`).join(', ')})`
+  const body = `${method.name}(${parameters.map(({ name }) => `\${${name}}`).join(', ')})`
+  return {
+    label,
+    type,
+    detail: method.returnType,
+    apply: parameters.length ? snippet(body) : `${method.name}()`,
+  }
+}
+
+function psParameterName(typeName: string, index: number): string {
+  const baseType = typeName.trim().replace(/<.*$/, '').replace(/\.\.\.$/, '[]')
+  const simpleType = baseType.slice(baseType.lastIndexOf('.') + 1)
+  if (/\[\]$/.test(baseType)) return 'array'
+  if (/^(?:boolean|Boolean)$/.test(simpleType)) return 'condition'
+  if (/^(?:char|Character)$/.test(simpleType)) return 'character'
+  if (/^(?:byte|short|int|long|float|double|Byte|Short|Integer|Long|Float|Double|Number|BigInteger|BigDecimal)$/.test(simpleType)) return 'number'
+  if (/^(?:String|CharSequence)$/.test(simpleType)) return 'value'
+  if (/^(?:Iterable|Collection|List|Set|Queue|Deque|Iterator|Stream)$/.test(simpleType)) return 'items'
+  if (/^(?:Map|SortedMap|NavigableMap)$/.test(simpleType)) return 'map'
+  if (/(?:Function|Predicate|Consumer|Operator|Supplier|Comparator)$/.test(simpleType)) return 'function'
+  return `arg${index + 1}`
+}
+
 function snippetCompletion(label: string, detail: string | undefined, body: string): Completion {
   return { label, type: 'snippet', detail, apply: snippet(body) }
 }
@@ -381,7 +428,8 @@ function staticFieldOptions(fields: StaticFieldSpec[]): Completion[] {
   }))
 }
 
-function methodOptions(resolution: ReceiverResolution, assertJ = false): Completion[] {
+function methodOptions(resolution: ReceiverResolution, assertJ = false, psLibrary: PsLibraryMetadata | null = null): Completion[] {
+  if (resolution.unavailable) return []
   if (assertJ) {
     return completionOptions([...ASSERTJ_METHODS, ...OBJECT_METHODS])
   }
@@ -395,11 +443,12 @@ function methodOptions(resolution: ReceiverResolution, assertJ = false): Complet
     return completionOptions(OBJECT_METHODS)
   }
   if (resolution.static) {
-    const allStatic = resolution.bases.flatMap((base) => STATIC_CATALOG[base] ?? [])
     const allFields = resolution.bases.flatMap((base) => STATIC_FIELDS[base] ?? [])
     return uniqueOptions([
       ...staticFieldOptions(allFields),
-      ...completionOptions(uniqueMethodSpecs(allStatic)),
+      ...resolution.bases.flatMap((base) => base === 'Ps'
+        ? (psLibrary?.methods ?? []).map((method) => psMethodCompletion(method))
+        : completionOptions(uniqueMethodSpecs(STATIC_CATALOG[base] ?? []))),
     ])
   }
 
@@ -429,24 +478,26 @@ function uniqueMethodSpecs(items: MethodSpec[]): MethodSpec[] {
   })
 }
 
-function importedPsStaticCompletions(source: string): Completion[] {
+function importedPsStaticCompletions(source: string, psLibrary: PsLibraryMetadata | null): Completion[] {
+  const methods = psLibrary?.methods ?? []
+  if (methods.length === 0) return []
   const importPrefix = `${JAVA_TYPE_IMPORTS.Ps}.`
   const importedNames = new Set<string>()
   for (const line of importLines(source)) {
     if (!line.static || !line.name.startsWith(importPrefix)) continue
     const member = line.name.slice(importPrefix.length)
     if (member === '*') {
-      for (const method of STATIC_CATALOG.Ps) importedNames.add(method.name)
-    } else if (STATIC_CATALOG.Ps.some((method) => method.name === member)) {
+      for (const method of methods) importedNames.add(method.name)
+    } else if (methods.some((method) => method.name === member)) {
       importedNames.add(member)
     }
   }
-  return STATIC_CATALOG.Ps
+  return methods
     .filter((method) => importedNames.has(method.name))
-    .map((method) => methodCompletion(method, 'function'))
+    .map((method) => psMethodCompletion(method, 'function'))
 }
 
-function receiverResolution(receiver: string, position: number, symbols: JavaSymbol[]): ReceiverResolution {
+function receiverResolution(receiver: string, position: number, symbols: JavaSymbol[], psAvailable: boolean): ReceiverResolution {
   if (receiver === 'this') {
     return { bases: [], static: false, unknown: false, primitive: false, array: false, thisReceiver: true }
   }
@@ -469,9 +520,13 @@ function receiverResolution(receiver: string, position: number, symbols: JavaSym
     }
   }
   const staticBase = receiver.replace(/^this\./, '')
-  const knownType = JAVA_TYPES.includes(staticBase)
+  const unavailable = staticBase === 'Ps' && !psAvailable
+  const knownType = JAVA_TYPES.includes(staticBase) && !unavailable
   if (knownType) {
-    return { bases: [staticBase], static: true, unknown: false, primitive: false, array: false, thisReceiver: false }
+    return { bases: [staticBase], static: true, unknown: false, primitive: false, array: false, thisReceiver: false, unavailable: false }
+  }
+  if (unavailable) {
+    return { bases: [], static: false, unknown: false, primitive: false, array: false, thisReceiver: false, unavailable: true }
   }
   if (/^new\s+StringBuilder/.test(receiver)) {
     return { bases: ['StringBuilder'], static: false, unknown: false, primitive: false, array: false, thisReceiver: false }
@@ -538,6 +593,8 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
   const dot = findDotContext(source, position)
   const analysis = analyzeJavaSource(source, position)
   const { symbols, methods } = analysis
+  const psLibrary = readPsLibraryMetadata(context.state)
+  const hasPsLibrary = psLibraryAvailable(context.state)
   if (dot) {
     if (dot.receiver === 'this') {
       return {
@@ -546,10 +603,10 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
         validFor: javaCompletionValidFor,
       }
     }
-    const resolution = receiverResolution(dot.receiver, position, symbols)
+    const resolution = receiverResolution(dot.receiver, position, symbols, hasPsLibrary)
     return {
       from: dot.from,
-      options: methodOptions(resolution, dot.assertJ),
+      options: methodOptions(resolution, dot.assertJ, psLibrary),
       validFor: javaCompletionValidFor,
     }
   }
@@ -561,8 +618,8 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
       ...symbolCompletions(symbols),
       ...methodCompletions(methods),
       ...javaIterCompletions(source, position, analysis),
-      ...importedPsStaticCompletions(analysis.maskedSource),
-      ...JAVA_COMPLETIONS,
+      ...importedPsStaticCompletions(analysis.maskedSource, psLibrary),
+      ...JAVA_COMPLETIONS.filter((completion) => completion.label !== 'Ps' || hasPsLibrary),
     ]),
     validFor: javaCompletionValidFor,
   }
