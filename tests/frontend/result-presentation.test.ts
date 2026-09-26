@@ -146,7 +146,7 @@ describe('editor failure locations', () => {
     expect(sourcePathsMatch('src/main/java/Q1TwoSum.java', 'Q2TwoSum.java')).toBe(false)
   })
 
-  it('collects matching failed tests and error diagnostics once per position', () => {
+  it('preserves distinct failed test and diagnostic messages at the same position', () => {
     const run = result({
       phase: 'test',
       tests: [
@@ -202,6 +202,12 @@ describe('editor failure locations', () => {
         line: 12,
         column: 8,
         message: 'expected 2 but was 3',
+      },
+      {
+        file: '/repo/src/main/java/Q1TwoSum.java',
+        line: 12,
+        column: 8,
+        message: 'duplicate position',
       },
       {
         file: 'src/main/java/Q1TwoSum.java',

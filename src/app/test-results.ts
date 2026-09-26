@@ -429,13 +429,16 @@ export function collectDiagnosticEditorIssues(
     lineValue: number | null | undefined,
     columnValue: number | null | undefined,
     message: string | null | undefined,
+    sourceLine?: string | null,
+    caret?: string | null,
   ): void => {
     const line = validSourceLine(lineValue)
     if (!file || line === null || !sourcePathsMatch(selectedPath, file)) {
       return
     }
     const column = validSourceColumn(columnValue)
-    const key = `${line}:${column ?? ''}`
+    const normalizedMessage = message?.trim() || null
+    const key = `${line}:${column ?? ''}:${normalizedMessage ?? ''}`
     if (seen.has(key)) {
       return
     }
@@ -444,7 +447,9 @@ export function collectDiagnosticEditorIssues(
       file,
       line,
       column,
-      message: message?.trim() || null,
+      message: normalizedMessage,
+      ...(sourceLine != null ? { sourceLine } : {}),
+      ...(caret != null ? { caret } : {}),
     })
   }
 
@@ -458,7 +463,7 @@ export function collectDiagnosticEditorIssues(
     if (diagnostic.severity.trim().toLowerCase() !== 'error') {
       continue
     }
-    add(diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message)
+    add(diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message, diagnostic.sourceLine, diagnostic.caret)
   }
   return issues
 }

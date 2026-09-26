@@ -77,6 +77,7 @@ import {
   testMethodMarkers,
   type EditorIssue,
 } from './editor/gutters'
+import { diagnosticHoverTooltips, showDiagnosticAtLine } from './editor/diagnostics'
 import {
   cutSelectionOrLine,
   copySelectedText,
@@ -845,10 +846,26 @@ export class JavaEditor {
         testMethodMarkers,
         failureMarkers,
         failureDecorations,
+        diagnosticHoverTooltips,
         definitionHover,
         gutter({
           class: 'cm-failure-gutter',
           markers: (view) => view.state.field(failureMarkers),
+          domEventHandlers: {
+            mousedown: (_view, _line, event) => {
+              const target = event.target
+              if (!(target instanceof Element) || !target.closest('.cm-failure-marker')) return false
+              event.stopPropagation()
+              return true
+            },
+            click: (view, line, event) => {
+              const target = event.target
+              if (!(target instanceof Element) || !target.closest('.cm-failure-marker')) return false
+              event.preventDefault()
+              event.stopPropagation()
+              return showDiagnosticAtLine(view, view.state.doc.lineAt(line.from).number)
+            },
+          },
         }),
         gutter({
           class: 'cm-test-gutter',

@@ -21,22 +21,31 @@ export interface EditorIssue {
   line: number
   column?: number | null
   message?: string | null
+  sourceLine?: string | null
+  caret?: string | null
 }
 
 class FailureMarker extends GutterMarker {
-  constructor(private readonly message: string) {
+  constructor(
+    private readonly line: number,
+    private readonly message: string,
+  ) {
     super()
   }
 
   eq(other: GutterMarker): boolean {
-    return other instanceof FailureMarker && other.message === this.message
+    return other instanceof FailureMarker
+      && other.line === this.line
+      && other.message === this.message
   }
 
   toDOM(): Node {
-    const marker = document.createElement('span')
+    const marker = document.createElement('button')
+    marker.type = 'button'
     marker.className = 'cm-failure-marker'
     marker.textContent = '●'
-    marker.setAttribute('aria-label', this.message || 'Test failure')
+    marker.dataset.diagnosticLine = String(this.line)
+    marker.setAttribute('aria-label', `Show diagnostics for line ${this.line}: ${this.message}`)
     if (this.message) {
       marker.title = this.message
     }
@@ -99,45 +108,56 @@ function safeLine(state: EditorState, line: number) {
   return state.doc.line(target)
 }
 
-function buildFailureMarkers(state: EditorState, issues: readonly EditorIssue[]): RangeSet<GutterMarker> {
-  const byLine = new Map<number, { issue: EditorIssue; line: NonNullable<ReturnType<typeof safeLine>> }>()
+export function buildFailureMarkers(state: EditorState, issues: readonly EditorIssue[]): RangeSet<GutterMarker> {
+  const byLine = new Map<number, {
+    messages: string[]
+    line: NonNullable<ReturnType<typeof safeLine>>
+  }>()
   for (const issue of issues) {
     const line = safeLine(state, issue.line)
-    if (line && !byLine.has(line.number)) {
-      byLine.set(line.number, { issue, line })
+    if (line) {
+      const entry = byLine.get(line.number) ?? { messages: [], line }
+      const message = issue.message?.trim() || 'Test failure'
+      if (!entry.messages.includes(message)) {
+        entry.messages.push(message)
+      }
+      byLine.set(line.number, entry)
     }
   }
   const entries = [...byLine.values()]
     .sort((left, right) => left.line.from - right.line.from)
   const builder = new RangeSetBuilder<GutterMarker>()
-  for (const { issue, line } of entries) {
-    const message = issue.message?.trim() || 'Test failure'
-    builder.add(line.from, line.from, new FailureMarker(message))
+  for (const { messages, line } of entries) {
+    builder.add(line.from, line.from, new FailureMarker(line.number, messages.join('\n')))
   }
   return builder.finish()
 }
 
 function buildFailureDecorations(state: EditorState, issues: readonly EditorIssue[]) {
-  const byLine = new Map<number, EditorIssue>()
+  const byLine = new Map<number, { messages: string[]; line: NonNullable<ReturnType<typeof safeLine>> }>()
   for (const issue of issues) {
     const line = safeLine(state, issue.line)
-    if (line && !byLine.has(line.number)) {
-      byLine.set(line.number, issue)
+    if (line) {
+      const entry = byLine.get(line.number) ?? { messages: [], line }
+      const message = issue.message?.trim() || 'Test failure'
+      if (!entry.messages.includes(message)) {
+        entry.messages.push(message)
+      }
+      byLine.set(line.number, entry)
     }
   }
   const entries = [...byLine.entries()]
-    .map(([lineNumber, issue]) => ({ issue, line: state.doc.line(lineNumber) }))
+    .map(([, entry]) => entry)
     .sort((left, right) => left.line.from - right.line.from)
   const builder = new RangeSetBuilder<Decoration>()
-  for (const { issue, line } of entries) {
-    const message = issue.message?.trim() || 'Test failure'
+  for (const { messages, line } of entries) {
     builder.add(
       line.from,
       line.from,
       Decoration.line({
         attributes: {
           class: 'cm-failure-line',
-          title: message,
+          title: messages.join('\n'),
         },
       }),
     )
