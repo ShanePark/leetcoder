@@ -26,17 +26,12 @@ export interface EditorIssue {
 }
 
 class FailureMarker extends GutterMarker {
-  constructor(
-    private readonly line: number,
-    private readonly message: string,
-  ) {
+  constructor(private readonly message: string) {
     super()
   }
 
   eq(other: GutterMarker): boolean {
-    return other instanceof FailureMarker
-      && other.line === this.line
-      && other.message === this.message
+    return other instanceof FailureMarker && other.message === this.message
   }
 
   toDOM(): Node {
@@ -44,8 +39,7 @@ class FailureMarker extends GutterMarker {
     marker.type = 'button'
     marker.className = 'cm-failure-marker'
     marker.textContent = '●'
-    marker.dataset.diagnosticLine = String(this.line)
-    marker.setAttribute('aria-label', `Show diagnostics for line ${this.line}: ${this.message}`)
+    marker.setAttribute('aria-label', `Show diagnostics: ${this.message}`)
     if (this.message) {
       marker.title = this.message
     }
@@ -128,7 +122,7 @@ export function buildFailureMarkers(state: EditorState, issues: readonly EditorI
     .sort((left, right) => left.line.from - right.line.from)
   const builder = new RangeSetBuilder<GutterMarker>()
   for (const { messages, line } of entries) {
-    builder.add(line.from, line.from, new FailureMarker(line.number, messages.join('\n')))
+    builder.add(line.from, line.from, new FailureMarker(messages.join('\n')))
   }
   return builder.finish()
 }

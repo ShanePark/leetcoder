@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EditorState } from '@codemirror/state'
 import { EditorView, showTooltip, type TooltipView } from '@codemirror/view'
 import type { EditorIssue } from '../../../src/editor/gutters'
-import { buildFailureMarkers, setEditorIssues } from '../../../src/editor/gutters'
+import { buildFailureMarkers, failureMarkers, setEditorIssues } from '../../../src/editor/gutters'
 import {
   buildDiagnosticRangeDecorations,
   diagnosticHoverTooltips,
@@ -119,9 +119,19 @@ describe('in-editor compiler diagnostics', () => {
     expect(marker).not.toBeNull()
     const button = marker!.toDOM() as unknown as FakeElement
     expect(button.tagName).toBe('button')
-    expect(button.dataset.diagnosticLine).toBe('2')
     expect(button.title).toBe('cannot find symbol\n\';\' expected\nincompatible types')
-    expect(button.attributes.get('aria-label')).toContain('incompatible types')
+    expect(button.attributes.get('aria-label')).toBe(`Show diagnostics: ${button.title}`)
+
+    const gutterState = EditorState.create({
+      doc: 'class X {}\nabcdef',
+      extensions: [failureMarkers],
+    }).update({ effects: setEditorIssues.of([issues[0]]) }).state
+    const movedGutter = gutterState.update({ changes: { from: 0, insert: '// heading\n' } }).state
+    const mappedMarker = movedGutter.field(failureMarkers).iter()
+    expect(mappedMarker.from).toBe(movedGutter.doc.line(3).from)
+    const mappedButton = mappedMarker.value!.toDOM() as unknown as FakeElement
+    expect(mappedButton.attributes.get('aria-label')).toBe('Show diagnostics: cannot find symbol')
+    expect(mappedButton.dataset.diagnosticLine).toBeUndefined()
   })
 
   it('keeps line-only issues clickable while clamping columns to valid line bounds', () => {
