@@ -33,6 +33,22 @@ export interface ProblemFileContent {
   content: string
 }
 
+/** One matching line from an on-demand project search. Coordinates are one-based. */
+export interface ProjectSearchMatch {
+  path: string
+  line: number
+  /** UTF-16 code-unit column, matching editor coordinates. */
+  column: number
+  preview: string
+}
+
+/** Results from searching saved text files in the selected repository. */
+export interface ProjectSearchResult {
+  matches: ProjectSearchMatch[]
+  truncated: boolean
+  skippedFiles: number
+}
+
 /** Problem source files changed outside this application. */
 export interface RepositoryFilesChanged {
   /** Repository-relative POSIX paths, sorted and de-duplicated. */
@@ -135,6 +151,12 @@ export interface BackendClient {
   fetchDailyProblem(): Promise<DailyProblem>
   fetchProblemByNumber(frontendId: string): Promise<DailyProblem>
   listProblemFiles(repoPath: string): Promise<ProblemFileEntry[]>
+  searchProject(
+    repoPath: string,
+    query: string,
+    caseSensitive: boolean,
+    excludePaths?: readonly string[],
+  ): Promise<ProjectSearchResult>
   readProblemFile(repoPath: string, path: string): Promise<string>
   createProblemFile(repoPath: string, plan: ProblemFilePlan): Promise<void>
   saveProblemFile(repoPath: string, path: string, content: string): Promise<void>

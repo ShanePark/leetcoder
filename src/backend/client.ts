@@ -11,6 +11,7 @@ import {
   normalizeProblemFiles,
   normalizeRepositoryFilesChanged,
 } from './normalizers/files'
+import { normalizeProjectSearchResult } from './normalizers/project-search'
 import {
   normalizeGitChanges,
   normalizeGitCommitResult,
@@ -59,6 +60,19 @@ export function createBackendClient(
     async listProblemFiles(repoPath) {
       const response = await invoke<unknown>('list_problem_files', { repoPath })
       return normalizeProblemFiles(response)
+    },
+
+    async searchProject(repoPath, query, caseSensitive, excludePaths) {
+      const args: Record<string, unknown> = {
+        repoPath,
+        query,
+        caseSensitive,
+      }
+      if (excludePaths !== undefined) {
+        args.excludePaths = [...excludePaths]
+      }
+      const response = await invoke<unknown>('search_project', args)
+      return normalizeProjectSearchResult(response)
     },
 
     async readProblemFile(repoPath, path) {

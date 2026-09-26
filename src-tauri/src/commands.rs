@@ -3,8 +3,8 @@ use crate::leetcode;
 use crate::models::{
     CheckProblemDiagnosticsArgs, CreateProblemFileArgs, DailyProblem, GitCommitResult,
     GitFileChange, GitPushResult, ProblemDiagnosticsResult, ProblemFileArgs, ProblemFileContent,
-    ProblemFileList, ProblemTestEvent, ProblemTestResult, ProjectValidation, RenameProblemFileArgs,
-    RunProblemTestArgs,
+    ProblemFileList, ProblemTestEvent, ProblemTestResult, ProjectSearchResult, ProjectValidation,
+    RenameProblemFileArgs, RunProblemTestArgs,
 };
 use crate::repository;
 use crate::runner;
@@ -73,6 +73,25 @@ pub async fn list_problem_files(repo_path: String) -> Result<ProblemFileList, St
     tauri::async_runtime::spawn_blocking(move || repository::list_problem_files(&repo_path))
         .await
         .map_err(|error| format!("Problem file listing worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn search_project(
+    repo_path: String,
+    query: String,
+    case_sensitive: bool,
+    exclude_paths: Option<Vec<String>>,
+) -> Result<ProjectSearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::project_search::search_project(
+            &repo_path,
+            &query,
+            case_sensitive,
+            exclude_paths.as_deref().unwrap_or_default(),
+        )
+    })
+    .await
+    .map_err(|error| format!("Project search worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

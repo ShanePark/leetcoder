@@ -37,13 +37,16 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
             <button id="refresh-files" class="icon-button" type="button" aria-label="Refresh problem files" title="Refresh"></button>
           </div>
           <div class="file-search">
-            <label class="sr-only" for="file-search">Search problems</label>
+            <label class="sr-only" for="file-search">Search filenames and project contents</label>
             <div class="file-search-field">
               <span id="file-search-icon" aria-hidden="true"></span>
-              <input id="file-search" type="search" placeholder="Search" autocomplete="off" spellcheck="false">
+              <input id="file-search" type="search" placeholder="Search" autocomplete="off" spellcheck="false" title="Search filenames and project contents (${shortcutLabel('search-project', options.macPlatform)})">
             </div>
           </div>
-          <div id="file-list" class="file-list"></div>
+          <div id="file-results-viewport" class="file-results-viewport">
+            <div id="file-list" class="file-list"></div>
+            <div id="project-content-search-results" class="project-content-search-results"></div>
+          </div>
         </aside>
 
         <div

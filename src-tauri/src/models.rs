@@ -32,6 +32,26 @@ pub struct ProblemFileList {
     pub files: Vec<String>,
 }
 
+/// A matching line in a repository text file. Line and column are one-based;
+/// column counts UTF-16 code units to match editor coordinates.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSearchMatch {
+    pub path: String,
+    pub line: usize,
+    pub column: usize,
+    pub preview: String,
+}
+
+/// Results from one on-demand project search.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSearchResult {
+    pub matches: Vec<ProjectSearchMatch>,
+    pub truncated: bool,
+    pub skipped_files: usize,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProblemFileArgs {

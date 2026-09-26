@@ -3,6 +3,7 @@ import {
   isCopyAltShortcut,
   isExtractMethodShortcut,
   isFileSearchAltShortcut,
+  isProjectSearchAltShortcut,
   isLineCutAltShortcut,
   isMoveLineDownAltShortcut,
   isMoveLineUpAltShortcut,
@@ -30,6 +31,7 @@ describe('Option shortcut matchers', () => {
     expect(isSaveAltShortcut({ ...base, code: 'KeyS' })).toBe(true)
     expect(isSettingsAltShortcut({ ...base, code: 'Comma' })).toBe(true)
     expect(isFileSearchAltShortcut({ ...base, code: 'KeyO', shiftKey: true })).toBe(true)
+    expect(isProjectSearchAltShortcut({ ...base, code: 'KeyF', shiftKey: true })).toBe(true)
     expect(isShortcutHelpAltShortcut({ ...base, code: 'Slash', shiftKey: true })).toBe(true)
     expect(isLineCutAltShortcut({ ...base, code: 'KeyV' })).toBe(false)
   })
@@ -51,7 +53,9 @@ describe('Option shortcut matchers', () => {
     expect(isSaveAltShortcut({ ...base, code: 'KeyS', ctrlKey: true })).toBe(false)
     expect(isSettingsAltShortcut({ ...base, code: 'Comma', shiftKey: true })).toBe(false)
     expect(isFileSearchAltShortcut({ ...base, code: 'KeyO' })).toBe(false)
+    expect(isProjectSearchAltShortcut({ ...base, code: 'KeyF' })).toBe(false)
     expect(isFileSearchAltShortcut({ ...base, code: 'KeyO', shiftKey: true, metaKey: true })).toBe(false)
+    expect(isProjectSearchAltShortcut({ ...base, code: 'KeyF', shiftKey: true, metaKey: true })).toBe(false)
     expect(isShortcutHelpAltShortcut({ ...base, code: 'Slash' })).toBe(false)
     expect(isShortcutHelpAltShortcut({ ...base, code: 'Slash', shiftKey: true, ctrlKey: true })).toBe(false)
   })

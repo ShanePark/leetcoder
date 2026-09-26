@@ -16,6 +16,8 @@ export type {
   ProblemDiagnostic,
   ProblemFileContent,
   ProblemFileEntry,
+  ProjectSearchMatch,
+  ProjectSearchResult,
   ProjectValidation,
   RepositoryFilesChanged,
   TestCaseResult,

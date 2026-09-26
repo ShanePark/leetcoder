@@ -4,6 +4,7 @@ import {
   SHORTCUT_SECTIONS,
   formatShortcut,
   isFileSearchShortcut,
+  isProjectSearchShortcut,
   isSettingsShortcut,
   platformBindings,
   platformShortcutBindings,
@@ -129,6 +130,8 @@ describe('shortcut table', () => {
     expect(shortcutLabel('open-settings', true)).toBe('⌘,')
     expect(shortcutLabel('focus-file-search', false)).toBe('Alt+Shift+O')
     expect(shortcutLabel('focus-file-search', true)).toBe('⇧⌘O')
+    expect(shortcutLabel('search-project', false)).toBe('Alt+Shift+F')
+    expect(shortcutLabel('search-project', true)).toBe('⇧⌘F')
     expect(shortcutLabel('extract-method', false)).toBe('Ctrl+Alt+M')
     expect(shortcutLabel('extract-method', true)).toBe('⌘⌥M')
     expect(shortcutLabel('rename-method', false)).toBe('Shift+F6')
@@ -194,6 +197,33 @@ describe('file search shortcut matching', () => {
     expect(isFileSearchShortcut({ ...base, metaKey: true }, false)).toBe(false)
     expect(isFileSearchShortcut({ ...base, altKey: true, ctrlKey: true }, false)).toBe(false)
     expect(isFileSearchShortcut({ ...base, altKey: true, shiftKey: false }, false)).toBe(false)
+  })
+})
+
+describe('project search shortcut matching', () => {
+  const base: ShortcutKeyEvent = {
+    key: 'f',
+    code: 'KeyF',
+    shiftKey: true,
+    altKey: false,
+    metaKey: false,
+    ctrlKey: false,
+  }
+
+  it('matches the platform primary modifier and the physical Alt-letter form', () => {
+    expect(shortcutBindings('search-project')).toEqual(['Shift-Mod-f', 'Shift-Alt-f'])
+    expect(isProjectSearchShortcut({ ...base, altKey: true }, false)).toBe(true)
+    expect(isProjectSearchShortcut({ ...base, ctrlKey: true }, false)).toBe(true)
+    expect(isProjectSearchShortcut({ ...base, metaKey: true }, true)).toBe(true)
+    expect(isProjectSearchShortcut({ ...base, altKey: true }, true)).toBe(true)
+    expect(isProjectSearchShortcut({ ...base, key: 'ƒ', altKey: true }, false)).toBe(true)
+  })
+
+  it('rejects the wrong Mod form and extra modifiers', () => {
+    expect(isProjectSearchShortcut({ ...base, metaKey: true }, false)).toBe(false)
+    expect(isProjectSearchShortcut({ ...base, ctrlKey: true }, true)).toBe(false)
+    expect(isProjectSearchShortcut({ ...base, altKey: true, ctrlKey: true }, false)).toBe(false)
+    expect(isProjectSearchShortcut({ ...base, altKey: true, shiftKey: false }, false)).toBe(false)
   })
 })
 

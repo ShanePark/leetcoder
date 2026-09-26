@@ -17,6 +17,7 @@ vi.mock('../../../src/icons', () => ({
 
 import {
   FILE_GROUPS,
+  getFilenameMatchedPaths,
   renderFilesView,
   type FilesViewModel,
 } from '../../../src/app/files-view'
@@ -341,12 +342,28 @@ describe('renderFilesView', () => {
     expect(testMetrics.innerHTMLWrites).toBe(initialWrites + 1)
 
     renderFilesView(view, { ...initial, fileSearch: 'no-match' }, callbacks())
-    expect(view.list.querySelector('.sidebar-empty')?.textContent).toBe('No matches')
+    expect(view.list.querySelector('.sidebar-empty')?.textContent).toBe('No filename matches')
     expect(testMetrics.innerHTMLWrites).toBe(initialWrites + 2)
 
     renderFilesView(view, { ...initial, projectValid: false }, callbacks())
     expect(view.list.querySelector('.sidebar-empty')?.textContent).toBe('Choose a repository to see problems')
     expect(testMetrics.innerHTMLWrites).toBe(initialWrites + 3)
+  })
+
+  it('exposes the exact filename-filtered paths and clears them for invalid or empty results', () => {
+    const view = elements()
+    const current = model()
+    const list = view.list as unknown as HTMLElement
+
+    expect(getFilenameMatchedPaths(list)).toEqual([])
+    renderFilesView(view, { ...current, fileSearch: 'q2' }, callbacks())
+    expect(getFilenameMatchedPaths(list)).toEqual([current.files[1].path])
+
+    renderFilesView(view, { ...current, fileSearch: 'missing' }, callbacks())
+    expect(getFilenameMatchedPaths(list)).toEqual([])
+
+    renderFilesView(view, { ...current, projectValid: false }, callbacks())
+    expect(getFilenameMatchedPaths(list)).toEqual([])
   })
 
   it('matches the legacy DOM semantics for an initial file snapshot', () => {

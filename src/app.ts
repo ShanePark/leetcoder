@@ -6,6 +6,7 @@ import {
   type BackendClient,
   type ProblemDiagnostic,
   type ProblemFileEntry,
+  type ProjectSearchMatch,
   type RepositoryFilesChanged,
 } from './backend'
 import {
@@ -17,6 +18,7 @@ import { iconFor } from './icons'
 import { createProblemWithRetry } from './problem-generator'
 import {
   isFileSearchShortcut,
+  isProjectSearchShortcut,
   isSettingsShortcut,
   runShortcutAction,
   shortcutHints,
@@ -52,6 +54,8 @@ import { createPaneLayoutController, type PaneLayoutController } from './app/pan
 import { ProblemSelectionController } from './app/problem-selection-controller'
 import { DocumentController } from './app/document-controller'
 import { FileOperationsController } from './app/file-operations-controller'
+import { ProjectContentSearchController } from './app/project-search-controller'
+import { findProjectSearchLocation } from './app/project-search-location'
 import {
   createFileTabsView,
   renderFileHeading as renderFileHeadingView,
@@ -98,6 +102,7 @@ import { renderTestResults } from './app/results-view'
 import {
   FILE_GROUPS,
   OTHER_GROUP,
+  getFilenameMatchedPaths,
   renderFilesView,
 } from './app/files-view'
 import {
@@ -182,12 +187,19 @@ export class LeetcoderApp {
   private readonly testRunController: TestRunController
   private readonly documentController: DocumentController
   private readonly fileOperationsController: FileOperationsController
+  private readonly projectContentSearchController: ProjectContentSearchController
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     accordionGroupKeys('easy', true),
   )
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
     if (this.gitController.commitPushInProgress) {
       event.preventDefault()
+      return
+    }
+    const editorTarget = event.target instanceof Node && this.element('#editor').contains(event.target)
+    if (isProjectSearchShortcut(event, currentIsMacPlatform())) {
+      event.preventDefault()
+      this.focusFileSearch()
       return
     }
     if (isFileSearchShortcut(event, currentIsMacPlatform())) {
@@ -227,7 +239,6 @@ export class LeetcoderApp {
     }
     // CodeMirror owns shortcuts while the editor has focus. Handling them
     // again on window would run/save the same document twice.
-    const editorTarget = event.target instanceof Node && this.element('#editor').contains(event.target)
     const runAction = runShortcutAction(event)
     if (runAction) {
       if (editorTarget) {
@@ -472,6 +483,9 @@ export class LeetcoderApp {
       onFocusFileSearch: () => {
         this.focusFileSearch()
       },
+      onSearchProject: () => {
+        this.focusFileSearch()
+      },
       onRefactorError: (message) => this.setMessage(message, 'error'),
       onRunTestAtCursor: (methodName) => {
         // A cursor miss falls back to the same all-tests run as Ctrl+R. This
@@ -520,6 +534,14 @@ export class LeetcoderApp {
       render: () => this.renderAll(),
       setMessage: (message, tone) => this.setMessage(message, tone),
       isDestroyed: () => this.destroyed,
+    })
+    this.projectContentSearchController = new ProjectContentSearchController({
+      host: this.element<HTMLElement>('#project-content-search-results'),
+      backend: this.backend,
+      getRepositoryPath: () => this.state.projectValid && !this.state.busy ? this.state.repoPath : null,
+      beforeSearch: () => this.documentController.flushPendingSave(),
+      canNavigate: (match) => this.canNavigateProjectSearchMatch(match),
+      onNavigate: (match, query) => this.navigateToProjectSearchMatch(match, query),
     })
     this.bindEvents()
     this.renderAll()
@@ -582,6 +604,7 @@ export class LeetcoderApp {
     }
     await this.prepareToClose()
     this.destroyed = true
+    this.projectContentSearchController.dispose()
     this.fileOperationsController.dispose()
     this.testRunController.dispose()
     this.liveDiagnostics.dispose()
@@ -825,6 +848,7 @@ export class LeetcoderApp {
     this.closeFileContextMenu()
     const switchingRepository = path !== this.state.repoPath
     if (switchingRepository) {
+      this.projectContentSearchController.reset()
       this.repositoryGeneration += 1
       this.refreshRequestId += 1
     }
@@ -857,6 +881,7 @@ export class LeetcoderApp {
       this.gitDiscardDialogFocusTarget = null
       this.gitController.reset()
       this.resetCurrentFile()
+      this.projectContentSearchController.reset()
     }
     try {
       const validation = await this.backend.validateProject(path)
@@ -1307,6 +1332,40 @@ export class LeetcoderApp {
     this.element<HTMLInputElement>('#file-search').focus()
   }
 
+  private canNavigateProjectSearchMatch(match: ProjectSearchMatch): boolean {
+    return this.state.projectValid
+      && this.state.files.some((file) => sameFilePath(file.path, match.path))
+  }
+
+  private async navigateToProjectSearchMatch(match: ProjectSearchMatch, query: string): Promise<void> {
+    const repoPath = this.state.repoPath
+    const repositoryGeneration = this.repositoryGeneration
+    const file = this.state.files.find((entry) => sameFilePath(entry.path, match.path))
+    if (!repoPath || !this.state.projectValid || !file) {
+      throw new Error('This search result is no longer available.')
+    }
+
+    await this.openFile(file)
+    if (!this.isAppActive()) {
+      return
+    }
+    if (this.state.repoPath !== repoPath || this.repositoryGeneration !== repositoryGeneration) {
+      return
+    }
+    if (this.state.fileSearch.trim() !== query) {
+      return
+    }
+    if (!this.state.projectValid || !sameFilePath(this.state.selectedPath ?? '', file.path)) {
+      throw new Error(`Could not open ${file.name}.`)
+    }
+
+    const location = findProjectSearchLocation(this.state.selectedSource, query)
+    if (!location) {
+      throw new Error('Matching text changed; search again.')
+    }
+    this.editor.revealLine(location.line, location.column)
+  }
+
   /** Update active/open explorer state without rebuilding the file list. */
   private updateFileExplorerState(): void {
     for (const { key } of [...FILE_GROUPS, OTHER_GROUP]) {
@@ -1428,9 +1487,10 @@ export class LeetcoderApp {
   }
 
   private renderFiles(): void {
+    const list = this.element<HTMLElement>('#file-list')
     renderFilesView(
       {
-        list: this.element<HTMLElement>('#file-list'),
+        list,
         searchInput: this.element<HTMLInputElement>('#file-search'),
         totalCount: this.element<HTMLElement>('#file-count'),
       },
@@ -1457,6 +1517,10 @@ export class LeetcoderApp {
         onRendered: () => this.scrollActiveFileIntoView(),
       },
     )
+    const titleMatchedPaths = getFilenameMatchedPaths(list)
+    this.projectContentSearchController.update(this.state.fileSearch, titleMatchedPaths)
+    this.element<HTMLElement>('#file-results-viewport')
+      .classList.toggle('is-searching', this.state.fileSearch.trim().length > 0)
     if (this.state.contextMenu && !this.state.files.some((file) => file.path === this.state.contextMenu?.file.path)) {
       this.state.contextMenu = null
     }

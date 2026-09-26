@@ -90,6 +90,7 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
     entries: [
       { id: 'move-to-line-end', bindings: ['Mod-ArrowRight', 'Alt-ArrowRight'], description: 'Move to line end' },
       { id: 'goto-definition', bindings: ['Mod-Click', 'Alt-Click'], description: 'Go to definition', hint: true },
+      { id: 'search-project', bindings: ['Shift-Mod-f', 'Shift-Alt-f'], description: 'Search project' },
       { id: 'focus-file-search', bindings: ['Shift-Mod-o', 'Shift-Alt-o'], description: 'Focus file search' },
       { id: 'open-settings', bindings: ['Mod-,', 'Alt-,'], description: 'Open settings' },
       // Alt+/ is the physical Linux twin of Cmd+/ (toggle comment). Keep the
@@ -216,6 +217,35 @@ export function isSettingsShortcut(event: ShortcutKeyEvent, macPlatform: boolean
 export function isFileSearchShortcut(event: ShortcutKeyEvent, macPlatform: boolean): boolean {
   return platformShortcutBindings('focus-file-search', macPlatform)
     .some((binding) => matchesShortcutBinding(event, binding))
+}
+
+/** Match the platform-specific shortcut that searches the open project. */
+export function isProjectSearchShortcut(event: ShortcutKeyEvent, macPlatform: boolean): boolean {
+  return shortcutBindings('search-project')
+    .some((binding) => matchesProjectSearchBinding(event, binding, macPlatform))
+}
+
+function matchesProjectSearchBinding(
+  event: ShortcutKeyEvent,
+  binding: string,
+  macPlatform: boolean,
+): boolean {
+  const parts = binding.split('-')
+  const key = parts.pop()
+  const physicalKeyCode = key && /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : null
+  const keyMatches = key && (
+    event.key.toLowerCase() === key.toLowerCase()
+    || (event.altKey && event.code === physicalKeyCode)
+  )
+  if (!keyMatches) {
+    return false
+  }
+  const modifiers = new Set(parts)
+  const hasMod = modifiers.has('Mod') || modifiers.has('Cmd')
+  return event.shiftKey === modifiers.has('Shift')
+    && event.altKey === modifiers.has('Alt')
+    && event.metaKey === (modifiers.has('Cmd') || (hasMod && macPlatform))
+    && event.ctrlKey === (modifiers.has('Ctrl') || (hasMod && !macPlatform))
 }
 
 /** Identify one of the fixed Ctrl run chords from a keyboard event. */

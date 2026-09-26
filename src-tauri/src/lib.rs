@@ -4,6 +4,7 @@ mod commands;
 mod git;
 mod leetcode;
 mod models;
+mod project_search;
 mod repository;
 mod runner;
 mod security;
@@ -33,6 +34,7 @@ pub fn run() {
             commands::fetch_daily_problem,
             commands::fetch_problem_by_number,
             commands::list_problem_files,
+            commands::search_project,
             commands::read_problem_file,
             commands::create_problem_file,
             commands::save_problem_file,

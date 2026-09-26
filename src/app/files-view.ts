@@ -180,7 +180,7 @@ export function renderFilesView(
   if (searchTerm && state.filteredFiles.length === 0) {
     const structureKey = `no-matches\u0000${searchTerm}\u0000${state.structureVersion}`
     if (state.structureKey !== structureKey) {
-      renderEmptyState(list, state, structureKey, 'No matches')
+      renderEmptyState(list, state, structureKey, 'No filename matches')
     }
     return
   }
@@ -202,6 +202,15 @@ export function renderFilesView(
     // provided, even when the initial row state already matches the model.
     callbacks.onRendered?.()
   }
+}
+
+/** The exact filename-filtered set currently visible in the sidebar. */
+export function getFilenameMatchedPaths(list: HTMLElement): readonly string[] {
+  const state = renderStates.get(list)
+  if (!state || state.structureKey === 'invalid-project') {
+    return []
+  }
+  return state.filteredFiles.map((file) => file.path)
 }
 
 function renderEmptyState(

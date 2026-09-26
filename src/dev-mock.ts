@@ -5,6 +5,8 @@ import type {
   GitFileChange,
   GitPushResult,
   ProblemFileEntry,
+  ProjectSearchMatch,
+  ProjectSearchResult,
   ProjectValidation,
   TestCaseResult,
   TestDiagnostic,
@@ -293,6 +295,42 @@ export function createDevMockBackend(): BackendClient & {
 
     async listProblemFiles(): Promise<ProblemFileEntry[]> {
       return [...files.keys()].sort().map(entryFor)
+    },
+
+    async searchProject(
+      _repoPath: string,
+      query: string,
+      caseSensitive: boolean,
+      excludePaths: readonly string[] = [],
+    ): Promise<ProjectSearchResult> {
+      if (query.length === 0) {
+        return { matches: [], truncated: false, skippedFiles: 0 }
+      }
+      const needle = caseSensitive ? query : query.toLowerCase()
+      const matches: ProjectSearchMatch[] = []
+      const excludedPaths = new Set(excludePaths)
+      for (const [path, content] of [...files.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+        if (excludedPaths.has(path)) {
+          continue
+        }
+        const lines = content.split(/\r?\n/)
+        const matchIndex = lines.findIndex((line) => {
+          const candidate = caseSensitive ? line : line.toLowerCase()
+          return candidate.indexOf(needle) >= 0
+        })
+        if (matchIndex < 0) {
+          continue
+        }
+        if (matches.length === 500) {
+          return { matches, truncated: true, skippedFiles: 0 }
+        }
+        const line = lines[matchIndex] ?? ''
+        const candidate = caseSensitive ? line : line.toLowerCase()
+        const index = candidate.indexOf(needle)
+        const column = index + 1
+        matches.push({ path, line: matchIndex + 1, column, preview: line.slice(0, 240) })
+      }
+      return { matches, truncated: false, skippedFiles: 0 }
     },
 
     async readProblemFile(_repoPath: string, path: string): Promise<string> {

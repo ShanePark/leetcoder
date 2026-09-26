@@ -1,0 +1,119 @@
+/* ---------------------------------------------------------------- */
+/* Sidebar project-content results                                    */
+/* ---------------------------------------------------------------- */
+
+.file-results-viewport {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.file-results-viewport.is-searching {
+  overflow-y: auto;
+}
+
+.file-results-viewport.is-searching > .file-list {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.file-results-viewport.is-searching .file-group[data-expanded="true"] {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.file-results-viewport.is-searching .file-group-list {
+  flex: 0 0 auto;
+  overflow: visible;
+  scrollbar-gutter: auto;
+}
+
+.project-content-search {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 8px 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.project-content-search-heading {
+  padding: 2px 4px 6px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.project-content-search-status {
+  padding: 2px 4px 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.project-content-search-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 4px 6px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.project-content-search-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-content-search-row {
+  min-width: 0;
+}
+
+.project-content-search-hit {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 6px 6px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+
+.project-content-search-hit-button:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.project-content-search-hit-button:disabled {
+  opacity: 0.6;
+}
+
+.project-content-search-path {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-content-search-preview {
+  display: block;
+  overflow: hidden;
+  width: 100%;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-content-search-preview-only {
+  color: var(--text-faint);
+  font-size: 9px;
+}
