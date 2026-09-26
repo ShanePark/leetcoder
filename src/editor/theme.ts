@@ -125,8 +125,16 @@ export const leetcoderTheme = EditorView.theme({
     color: editorPalette.red,
   },
   '.cm-matchingBracket, &.cm-focused .cm-matchingBracket': {
-    backgroundColor: 'var(--editor-link-background)',
-    outline: 'none',
+    backgroundColor: editorPalette.amber,
+    color: 'var(--on-accent)',
+    borderRadius: '2px',
+    boxShadow: 'inset 0 0 0 1px var(--text)',
+  },
+  '.cm-nonmatchingBracket, &.cm-focused .cm-nonmatchingBracket': {
+    backgroundColor: editorPalette.red,
+    color: 'var(--on-danger)',
+    borderRadius: '2px',
+    boxShadow: 'inset 0 0 0 1px var(--text)',
   },
   '.cm-tooltip': {
     backgroundColor: editorPalette.surface,
