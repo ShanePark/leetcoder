@@ -93,6 +93,10 @@ import {
   moveToJavaLineEnd,
 } from './editor/statement-completion'
 import {
+  handleJavaStringPaste,
+  pasteJavaClipboard,
+} from './editor/paste'
+import {
   renameJavaMethod,
 } from './editor/rename'
 import {
@@ -732,23 +736,7 @@ export class JavaEditor {
       return true
     }
 
-    const pasteFromClipboard = (view: EditorView): boolean => {
-      void clipboard.readText().then((text) => {
-        if (!text) {
-          return
-        }
-        const state = view.state
-        const insert = state.selection.ranges.length === 1
-          ? formatJavaDocClipboard(text, state.doc.toString(), state.selection.main.head)
-          : text
-        view.dispatch({
-          ...state.replaceSelection(insert),
-          userEvent: 'input.paste',
-          scrollIntoView: true,
-        })
-      })
-      return true
-    }
+    const pasteFromClipboard = (view: EditorView): boolean => pasteJavaClipboard(view, clipboard)
 
     const testMethodFromGutterEvent = (event: Event): string | null => {
       const target = event.target
@@ -950,6 +938,7 @@ export class JavaEditor {
           ...commandBindings(reformatShortcuts, reformatJavaDocument),
           ...commandBindings(completeShortcuts, startCompletion, false),
         ])),
+        EditorView.domEventHandlers({ paste: handleJavaStringPaste }),
         EditorView.clipboardInputFilter.of((text, state) => state.selection.ranges.length === 1
           ? formatJavaDocClipboard(text, state.doc.toString(), state.selection.main.head)
           : text),
