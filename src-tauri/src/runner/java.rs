@@ -18,6 +18,17 @@ pub(crate) fn discover_compatible_java() -> Result<JavaInstallation, String> {
     discover_compatible_java_with_parallel_queries(true)
 }
 
+/// Discover a JDK for reflective type metadata without changing the Gradle
+/// runner's supported Java range. Prefer its compatible Java when available.
+pub(crate) fn discover_metadata_java() -> Result<JavaInstallation, String> {
+    let installations = discover_java_installations(true, true);
+    select_metadata_java(&installations).ok_or_else(|| {
+        format!(
+            "No usable JDK version {MIN_SUPPORTED_JAVA_MAJOR} or newer was found for Java metadata. Install a JDK or set JAVA_HOME."
+        )
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn discover_compatible_java_baseline() -> Result<JavaInstallation, String> {
     discover_compatible_java_with_parallel_queries(false)
@@ -26,6 +37,13 @@ pub(crate) fn discover_compatible_java_baseline() -> Result<JavaInstallation, St
 fn discover_compatible_java_with_parallel_queries(
     enable_parallel_queries: bool,
 ) -> Result<JavaInstallation, String> {
+    finish_java_selection(discover_java_installations(enable_parallel_queries, false))
+}
+
+fn discover_java_installations(
+    enable_parallel_queries: bool,
+    include_macos_default_java: bool,
+) -> Vec<JavaInstallation> {
     let mut homes = Vec::new();
     for variable in ["JAVA_HOME", "JDK_HOME"] {
         if let Some(home) = std::env::var_os(variable) {
@@ -52,18 +70,24 @@ fn discover_compatible_java_with_parallel_queries(
         homes.extend(discover_macos_java_homes_sequential());
     }
 
+    #[cfg(target_os = "macos")]
+    if include_macos_default_java {
+        if let Some(home) = discover_macos_default_java_home(Path::new("/usr/libexec/java_home")) {
+            homes.push(home);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     homes.extend(discover_linux_java_homes());
 
     #[cfg(not(target_os = "macos"))]
-    let _ = enable_parallel_queries;
+    let _ = (enable_parallel_queries, include_macos_default_java);
 
     let homes = deduplicate_paths(homes);
-    let installations = homes
+    homes
         .iter()
         .filter_map(|home| probe_java_home(home))
-        .collect();
-    finish_java_selection(installations)
+        .collect()
 }
 
 fn finish_java_selection(installations: Vec<JavaInstallation>) -> Result<JavaInstallation, String> {
@@ -93,6 +117,16 @@ pub(crate) fn select_compatible_java(candidates: &[JavaInstallation]) -> Option<
         })
         .max_by_key(|candidate| candidate.major_version)
         .cloned()
+}
+
+pub(crate) fn select_metadata_java(candidates: &[JavaInstallation]) -> Option<JavaInstallation> {
+    select_compatible_java(candidates).or_else(|| {
+        candidates
+            .iter()
+            .filter(|candidate| candidate.major_version >= MIN_SUPPORTED_JAVA_MAJOR)
+            .max_by_key(|candidate| candidate.major_version)
+            .cloned()
+    })
 }
 
 pub(crate) fn probe_java_home(home: &Path) -> Option<JavaInstallation> {
@@ -270,6 +304,16 @@ fn query_macos_java_home(command: &Path, version: u32) -> Option<PathBuf> {
         .args(["-v", version.as_str()])
         .output()
         .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!home.is_empty()).then(|| PathBuf::from(home))
+}
+
+#[cfg(target_os = "macos")]
+fn discover_macos_default_java_home(command: &Path) -> Option<PathBuf> {
+    let output = Command::new(command).output().ok()?;
     if !output.status.success() {
         return None;
     }

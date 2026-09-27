@@ -37,6 +37,7 @@ pub fn run() {
             commands::list_problem_files,
             commands::search_project,
             commands::inspect_ps_library,
+            commands::inspect_java_type_members,
             commands::read_problem_file,
             commands::create_problem_file,
             commands::save_problem_file,

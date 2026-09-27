@@ -56,6 +56,7 @@ import { DocumentController } from './app/document-controller'
 import { FileOperationsController } from './app/file-operations-controller'
 import { ProjectContentSearchController } from './app/project-search-controller'
 import { PsLibraryController, isPsBuildConfigurationPath } from './app/ps-library-controller'
+import { JavaTypeMembersController } from './app/java-type-members-controller'
 import { findProjectSearchLocation } from './app/project-search-location'
 import {
   createFileTabsView,
@@ -169,6 +170,7 @@ export class LeetcoderApp {
   private editor: JavaEditor
   private readonly liveDiagnostics: LiveDiagnosticsScheduler
   private readonly psLibraryController: PsLibraryController
+  private readonly javaTypeMembersController: JavaTypeMembersController
   private readonly dailyProblemView: DailyProblemViewRenderer
   private readonly problemSelectionController: ProblemSelectionController
   private repositoryGeneration = 0
@@ -464,6 +466,7 @@ export class LeetcoderApp {
       },
       isDestroyed: () => this.destroyed,
     })
+    this.javaTypeMembersController = new JavaTypeMembersController({ backend: this.backend })
     this.editor = new JavaEditor(this.element('#editor'), {
       // JavaEditor may emit a bootstrap change while it is being constructed;
       // the document controller is wired immediately afterwards.
@@ -489,6 +492,9 @@ export class LeetcoderApp {
         this.focusFileSearch()
       },
       onRefactorError: (message) => this.setMessage(message, 'error'),
+      requestJavaTypeMembers: typeof this.backend.inspectJavaTypeMembers === 'function'
+        ? (typeNames) => this.javaTypeMembersController.inspect(typeNames)
+        : undefined,
       onRunTestAtCursor: (methodName) => {
         // A cursor miss falls back to the same all-tests run as Ctrl+R. This
         // keeps the editor keymap and the window-level shortcut consistent.
@@ -613,6 +619,7 @@ export class LeetcoderApp {
     this.destroyed = true
     this.projectContentSearchController.dispose()
     this.psLibraryController.dispose()
+    this.javaTypeMembersController.dispose()
     this.fileOperationsController.dispose()
     this.testRunController.dispose()
     this.liveDiagnostics.dispose()
@@ -880,6 +887,7 @@ export class LeetcoderApp {
       // previous source, FQCN, or test output.
       void this.backend.stopWatchingRepository().catch(() => {})
       this.psLibraryController.setRepository(null)
+      this.javaTypeMembersController.setRepository(null)
       this.state.repoPath = null
       this.state.projectValid = false
       this.state.files = []
@@ -926,11 +934,13 @@ export class LeetcoderApp {
         && this.state.projectValid
         && this.state.repoPath === path) {
         this.psLibraryController.setRepository(path)
+        this.javaTypeMembersController.setRepository(path)
       }
     } catch (error) {
       if (this.isCurrentRepositorySelection(selectionGeneration)) {
         this.state.projectValid = false
         this.psLibraryController.setRepository(null)
+        this.javaTypeMembersController.setRepository(null)
         this.setMessage(errorMessage(error), 'error')
       }
     } finally {
@@ -1197,6 +1207,7 @@ export class LeetcoderApp {
     }
     if (change.paths.some(isPsBuildConfigurationPath)) {
       this.psLibraryController.invalidate()
+      this.javaTypeMembersController.invalidate()
     }
     const path = this.state.selectedPath
     if (path && change.paths.some((changed) => sameFilePath(changed, path))) {
@@ -1225,6 +1236,7 @@ export class LeetcoderApp {
     }
     this.problemSelectionController.refreshDailyProblemIfStale()
     this.psLibraryController.revalidateIfStale()
+    this.javaTypeMembersController.revalidateIfStale()
     // Filesystem events can be missed while the window is hidden, so returning
     // to it re-checks the open file the way an IDE syncs on frame activation.
     if (this.state.selectedPath && this.state.projectValid) {

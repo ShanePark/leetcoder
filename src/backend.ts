@@ -13,6 +13,11 @@ export type {
   GitPushResult,
   Listen,
   Invoke,
+  JavaFieldMember,
+  JavaMemberParameter,
+  JavaMethodMember,
+  JavaTypeMembers,
+  JavaTypeMembersMetadata,
   ProblemDiagnostic,
   ProblemFileContent,
   ProblemFileEntry,
@@ -55,4 +60,7 @@ export {
   normalizeTestRunProgress,
 } from './backend/normalizers/test'
 
-export { normalizePsLibraryMetadata } from './backend/normalizers/java-library'
+export {
+  normalizeJavaTypeMembersMetadata,
+  normalizePsLibraryMetadata,
+} from './backend/normalizers/java-library'

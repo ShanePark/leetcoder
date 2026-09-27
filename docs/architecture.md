@@ -31,12 +31,14 @@ names, and serialized result shapes. Keep that boundary explicit when a
 feature crosses the halves.
 
 `src/app/ps-library-controller.ts` loads Ps method metadata in the background
-for the selected repository and refreshes it after dependency changes. The
-native `java_library.rs` resolves the root project's main Java compile classpath through
-its Gradle wrapper and reads public static method signatures without
-initializing library classes. `src/completions/library.ts` stores this metadata
-in each editor state; completion requests use that state without spawning
-external processes.
+for the selected repository and refreshes it after dependency changes.
+`src/app/java-type-members-controller.ts` lazily batches and caches public
+members requested by Java member completion, keyed to the selected repository;
+it drops stale results when the repository or Gradle inputs change and
+revalidates known types when the app becomes active again. The native
+`java_library.rs` resolves the project's Java classpath through Gradle and
+reads public method and field signatures without initializing library
+classes. The Ps completion state remains in `src/completions/library.ts`.
 
 ## Module map
 
@@ -50,9 +52,9 @@ external processes.
 | Frontend backend boundary | `src/backend.ts`, `src/backend/contracts.ts`, `src/backend/client.ts`, `src/backend/transport.ts`, `src/backend/errors.ts` | Keep `src/backend.ts` as the compatibility barrel; define frontend DTOs and `BackendClient` in `contracts.ts`; compose command calls in `client.ts`; isolate Tauri invoke/listen/channel details in `transport.ts`; keep error classification in `errors.ts`. | Domain `ProblemFilePlan` and Tauri APIs |
 | Backend response adapters | `src/backend/normalizers/{common,problem,files,git,test,project-search,java-library}.ts` | Convert native and older response shapes into frontend contracts. `common.ts` owns shared guards and primitive coercions. | Backend contracts and common helpers |
 | Problem domain | `src/domain/index.ts`, `class-name.ts`, `method-signature.ts`, `problem-file.ts`, `public.ts`, `template.ts` | Pure naming, difficulty/package mapping, Java method extraction, scaffold planning, and source rendering. | TypeScript standard library only |
-| Editor | `src/editor.ts`, `src/editor/{editing,intentions,statement-completion,definition-navigation,theme,test-markers,gutters,diagnostics,paste}.ts` | Keep the `JavaEditor` CodeMirror facade and keymap/wiring in `editor.ts`; separate editing commands, missing-method creation and its action menu, statement completion, definition navigation, theme, diagnostics/gutters, string-aware paste, and syntax-based test markers into focused modules. | Completions, Java format/refactor, clipboard, shortcuts, CSS variables |
-| Completions | `src/completions.ts`, `src/completions/{model,source,imports,templates,library}.ts` | Keep the completion facade and built-in catalog while separating Java metadata, source analysis, import edits, snippet/template behavior, and project library metadata. `source.ts` exposes an internal `JavaSourceAnalysis` so one completion/definition request can reuse its masked source, symbols, and methods. | CodeMirror and Java completion model |
-| Java library metadata | `src/app/ps-library-controller.ts`, `src-tauri/src/java_library.rs` | Load metadata per repository, refresh after Gradle configuration changes, discard stale asynchronous results, and cache extraction by the resolved classpath content fingerprint. | Backend contracts, editor metadata state, security, Gradle and JDK tools |
+| Editor | `src/editor.ts`, `src/editor/{editing,intentions,statement-completion,definition-navigation,theme,test-markers,gutters,diagnostics,paste}.ts` | Keep the `JavaEditor` CodeMirror facade and keymap/wiring in `editor.ts`; supply the optional project-member inspector to completion while keeping editing commands, missing-method creation and its action menu, statement completion, definition navigation, theme, diagnostics/gutters, string-aware paste, and syntax-based test markers in focused modules. | Completions, Java format/refactor, clipboard, shortcuts, CSS variables |
+| Completions | `src/completions.ts`, `src/completions/{model,source,type-resolution,imports,templates,library}.ts` | Keep the completion facade and built-in catalog while separating Java metadata, lightweight source type resolution, import edits, snippet/template behavior, and Ps library metadata. `source.ts` exposes an internal `JavaSourceAnalysis` so one completion/definition request can reuse its masked source, symbols, and methods; member completion requests public members lazily through an injected inspector. | CodeMirror, Java completion model, optional member inspector |
+| Java library metadata | `src/app/ps-library-controller.ts`, `src/app/java-type-members-controller.ts`, `src-tauri/src/java_library.rs` | Load Ps metadata and lazily requested public Java members for the selected repository, batch and cache results, refresh after Gradle configuration changes, discard stale asynchronous results, and use the resolved classpath fingerprint to detect changes. | Backend contracts, completion callbacks, security, Gradle and JDK tools |
 | Frontend services | `src/problem-generator.ts`, `src/live-diagnostics.ts`, `src/update-controller.ts`, `src/update-progress.ts`, `src/java-format.ts`, `src/java-refactor.ts`, `src/clipboard.ts`, `src/icons.ts`, `src/sanitize.ts` | Coordinate retries, debounced compiler snapshots, updates, Java transformations, clipboard access, icons, and safe problem markup. | Backend/domain/editor boundaries as appropriate |
 | Native wiring and shared models | `src-tauri/src/lib.rs`, `commands.rs`, `models.rs` | Register commands, adapt command arguments, and define serialized native DTOs. Keep this layer thin. | Native feature modules and Tauri |
 | Native repository and network features | `src-tauri/src/repository.rs`, `leetcode.rs`, `watcher.rs`, `update.rs`, `security.rs` | Validate and mutate repository files, fetch LeetCode data, watch source changes, perform updates, and enforce path/symlink containment. | `models.rs`; security is shared by filesystem-facing features |
@@ -78,6 +80,7 @@ flowchart LR
   appControllers --> fileOpsCtrl[file operations controller]
   appControllers --> overlayCtrl[overlay controller]
   appControllers --> toastCtrl[toast controller]
+  appControllers --> javaMembersCtrl[Java type members controller]
   documentCtrl --> appParts
   fileOpsCtrl --> appParts
   overlayCtrl --> appViews
@@ -89,6 +92,9 @@ flowchart LR
   app --> services[frontend services]
   appControllers --> appParts
   editor --> completion[src/completions.ts]
+  completion --> memberInspector[member inspector callback]
+  memberInspector --> javaMembersCtrl
+  javaMembersCtrl --> backend
   editor --> shortcuts[src/shortcuts.ts]
   editor --> editorParts[src/editor/*]
   completion --> completionParts[src/completions/*]
@@ -155,7 +161,7 @@ completion facades remain available for compatibility coverage.
 
 | Feature | Focused tests | Shared fixture/contract notes |
 | --- | --- | --- |
-| App state and views | `tests/frontend/app/{app-lifecycle,autosave,document-controller,file-actions,file-index,file-operations-controller,git-controller,git-presentation,git-progress,git-selection,layout,navigation,overlay-controller,pane-layout,problem-lifecycle,problem-selection-controller,tabs-view,test-results,test-run-controller,toast-controller}.test.ts` | `app.ts` integration changes and the public app lifecycle suite are owned together; focused controller/view suites exercise document saving and reloads, file mutations, Git, overlays/toasts, problem selection, and test lifecycles, pane persistence, tab rendering, file indexing, and Git selection directly. |
+| App state and views | `tests/frontend/app/{app-lifecycle,autosave,document-controller,file-actions,file-index,file-operations-controller,git-controller,git-presentation,git-progress,git-selection,java-type-members-controller,layout,navigation,overlay-controller,pane-layout,problem-lifecycle,problem-selection-controller,tabs-view,test-results,test-run-controller,toast-controller}.test.ts` | `app.ts` integration changes and the public app lifecycle suite are owned together; focused controller/view suites exercise document saving and reloads, file mutations, Git, Java member metadata caching, overlays/toasts, problem selection, and test lifecycles, pane persistence, tab rendering, file indexing, and Git selection directly. |
 | Completion catalog and analysis | `tests/frontend/completions/{catalog,source,templates}.test.ts`, `tests/frontend/completions-analysis.test.ts` | `tests/frontend/completions/helpers.ts` is a read-only shared fixture helper. `source.ts` analysis changes and its focused test should be integrated together. |
 | Editor | `tests/frontend/editor/{commands,imports,javadoc,refactoring,shortcuts,templates,test-markers}.test.ts` | `tests/frontend/editor/helpers.ts` is a read-only shared fixture helper. `editor.ts` remains the facade/integration owner. |
 | Backend adapters and transport | `tests/frontend/backend/{files-problem,git,test-results,transport-client}.test.ts` | Assign one adapter owner per normalizer and keep transport/client changes with their focused test. |

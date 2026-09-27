@@ -1,4 +1,4 @@
-import { snippet, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
+import { snippet, type Completion, type CompletionContext, type CompletionResult, type CompletionSource } from '@codemirror/autocomplete'
 
 import {
   applyJavaType,
@@ -15,6 +15,8 @@ import {
 import {
   analyzeJavaSource,
 } from './completions/source'
+import { resolveJavaReceiverTypes } from './completions/type-resolution'
+import type { JavaTypeMembersMetadata } from './backend'
 import {
   javaTestCompletion,
   javaIterCompletions,
@@ -376,6 +378,7 @@ function psParameterName(typeName: string, index: number): string {
   if (/^(?:Iterable|Collection|List|Set|Queue|Deque|Iterator|Stream)$/.test(simpleType)) return 'items'
   if (/^(?:Map|SortedMap|NavigableMap)$/.test(simpleType)) return 'map'
   if (/(?:Function|Predicate|Consumer|Operator|Supplier|Comparator)$/.test(simpleType)) return 'function'
+  if (/^[A-Z]$/.test(simpleType)) return ({ E: 'element', K: 'key', R: 'result' } as Record<string, string>)[simpleType] ?? 'value'
   return `arg${index + 1}`
 }
 
@@ -561,6 +564,51 @@ function methodCompletions(methods: JavaMethod[]): Completion[] {
   }).map((method) => methodCompletion({ name: method.name, parameters: method.parameters }, 'function'))
 }
 
+function javaMemberCompletions(metadata: JavaTypeMembersMetadata, typeNames: string[], isStatic: boolean): Completion[] {
+  const requested = new Set(typeNames)
+  const types = metadata.types.filter((type) => type.available && requested.has(type.typeName))
+  const methods = types.flatMap((type) => type.methods.filter((method) => method.isStatic === isStatic))
+  const methodLabels = new Map<string, number>()
+  for (const method of methods) {
+    const names = method.parameters.map((parameter, index) => parameter.name?.trim()
+      && /^[A-Za-z_$][\w$]*$/.test(parameter.name)
+      ? parameter.name
+      : psParameterName(parameter.typeName, index))
+    const label = `${method.name}(${names.join(', ')})`
+    methodLabels.set(label, (methodLabels.get(label) ?? 0) + 1)
+  }
+  const completions: Completion[] = methods.map((method) => {
+    const usedNames = new Set<string>()
+    const parameters = method.parameters.map((parameter, index) => {
+      const declaredName = parameter.name?.trim()
+      const baseName = declaredName && /^[A-Za-z_$][\w$]*$/.test(declaredName)
+        ? declaredName
+        : psParameterName(parameter.typeName, index)
+      let name = baseName
+      let suffix = 2
+      while (usedNames.has(name)) name = `${baseName}${suffix++}`
+      usedNames.add(name)
+      return { name, typeName: parameter.typeName }
+    })
+    const argumentNames = parameters.map(({ name }) => name)
+    const simpleLabel = `${method.name}(${argumentNames.join(', ')})`
+    const label = (methodLabels.get(simpleLabel) ?? 0) > 1
+      ? `${method.name}(${parameters.map(({ name, typeName }) => `${typeName} ${name}`).join(', ')})`
+      : simpleLabel
+    const body = `${method.name}(${argumentNames.map((name) => `\${${name}}`).join(', ')})`
+    return {
+      label,
+      type: 'method',
+      detail: method.returnType || undefined,
+      apply: parameters.length ? snippet(body) : `${method.name}()`,
+    }
+  })
+  completions.push(...types.flatMap((type) => type.fields
+    .filter((field) => field.isStatic === isStatic)
+    .map((field) => ({ label: field.name, type: 'field' as const, detail: field.typeName, apply: field.name }))))
+  return uniqueOptions(completions)
+}
+
 function thisMemberCompletions(symbols: JavaSymbol[], methods: JavaMethod[]): Completion[] {
   return uniqueOptions([
     ...symbolCompletions(symbols.filter((symbol) => symbol.kind === 'field')),
@@ -622,6 +670,40 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
       ...JAVA_COMPLETIONS.filter((completion) => completion.label !== 'Ps' || hasPsLibrary),
     ]),
     validFor: javaCompletionValidFor,
+  }
+}
+
+/** Create a completion source that reads Java members from project/JDK metadata. */
+export function createJavaMemberCompletionSource(
+  inspect: (typeNames: string[]) => Promise<JavaTypeMembersMetadata>,
+): CompletionSource {
+  return async (context) => {
+    const source = context.state.doc.toString()
+    const position = context.pos
+    if (isJavaIterVariableNameField(context.state, position)) return null
+    const dot = findDotContext(source, position)
+    if (!dot) return javaCompletions(context)
+
+    const analysis = analyzeJavaSource(source, position)
+    const resolution = resolveJavaReceiverTypes(source, dot.receiver, position, analysis.symbols, dot.assertJ)
+    if (resolution.kind === 'legacy') return javaCompletions(context)
+
+    const result: CompletionResult = {
+      from: dot.from,
+      options: [],
+      validFor: javaCompletionValidFor,
+    }
+    if (resolution.kind === 'unresolved') return result
+
+    try {
+      const metadata = await inspect(resolution.typeNames)
+      return {
+        ...result,
+        options: javaMemberCompletions(metadata, resolution.typeNames, resolution.isStatic),
+      }
+    } catch {
+      return result
+    }
   }
 }
 

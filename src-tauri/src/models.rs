@@ -2,6 +2,51 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) use crate::java_library::PsLibraryMetadata;
 
+/// Public Java members returned for a bounded batch of requested types.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JavaTypeMembersMetadata {
+    pub(crate) fingerprint: String,
+    pub(crate) types: Vec<JavaTypeMembers>,
+}
+
+/// Public members discovered for one requested type.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JavaTypeMembers {
+    pub(crate) type_name: String,
+    pub(crate) available: bool,
+    pub(crate) methods: Vec<JavaMethodMember>,
+    pub(crate) fields: Vec<JavaFieldMember>,
+}
+
+/// One public method, including whether it is static.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JavaMethodMember {
+    pub(crate) name: String,
+    pub(crate) return_type: String,
+    pub(crate) parameters: Vec<JavaMemberParameter>,
+    pub(crate) is_static: bool,
+}
+
+/// One method parameter.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JavaMemberParameter {
+    pub(crate) name: Option<String>,
+    pub(crate) type_name: String,
+}
+
+/// One public field, including whether it is static.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JavaFieldMember {
+    pub(crate) name: String,
+    pub(crate) type_name: String,
+    pub(crate) is_static: bool,
+}
+
 /// The result of checking that a directory is the expected ps repository.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

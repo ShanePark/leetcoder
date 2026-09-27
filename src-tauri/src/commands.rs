@@ -1,11 +1,11 @@
 use crate::git;
 use crate::leetcode;
-use crate::models::PsLibraryMetadata;
 use crate::models::{
     CheckProblemDiagnosticsArgs, CreateProblemFileArgs, DailyProblem, GitCommitResult,
-    GitFileChange, GitPushResult, ProblemDiagnosticsResult, ProblemFileArgs, ProblemFileContent,
-    ProblemFileList, ProblemTestEvent, ProblemTestResult, ProjectSearchResult, ProjectValidation,
-    RenameProblemFileArgs, RunProblemTestArgs,
+    GitFileChange, GitPushResult, JavaTypeMembersMetadata, ProblemDiagnosticsResult,
+    ProblemFileArgs, ProblemFileContent, ProblemFileList, ProblemTestEvent, ProblemTestResult,
+    ProjectSearchResult, ProjectValidation, PsLibraryMetadata, RenameProblemFileArgs,
+    RunProblemTestArgs,
 };
 use crate::repository;
 use crate::runner;
@@ -84,6 +84,18 @@ pub async fn inspect_ps_library(repo_path: String) -> Result<PsLibraryMetadata, 
     })
     .await
     .map_err(|error| format!("Library inspection worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn inspect_java_type_members(
+    repo_path: String,
+    type_names: Vec<String>,
+) -> Result<JavaTypeMembersMetadata, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::java_library::inspect_java_type_members(repo_path, type_names)
+    })
+    .await
+    .map_err(|error| format!("Java type inspection worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

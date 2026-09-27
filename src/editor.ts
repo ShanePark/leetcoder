@@ -51,6 +51,7 @@ import {
 } from '@codemirror/view'
 import {
   addJavaTypeImports,
+  createJavaMemberCompletionSource,
   JAVA_TYPE_IMPORTS,
   javaCompletions,
   finishJavaTemplate,
@@ -58,6 +59,7 @@ import {
   javaIterTemplateExtension,
   maskJavaCommentsAndLiterals,
 } from './completions'
+import type { JavaTypeMembersMetadata } from './backend'
 import {
   psLibraryAvailable,
   psLibraryExtension,
@@ -189,6 +191,8 @@ export interface EditorCallbacks {
   onRefactorError?: (message: string) => void
   /** Overridable so tests can drive clipboard shortcuts without a system clipboard. */
   clipboard?: ClipboardBridge
+  /** Inspect requested Java types for member completion in the active project. */
+  requestJavaTypeMembers?: (typeNames: string[]) => Promise<JavaTypeMembersMetadata>
 }
 
 export type TestRunShortcutPlatform = 'mac' | 'other'
@@ -971,7 +975,9 @@ export class JavaEditor {
           ? formatJavaDocClipboard(text, state.doc.toString(), state.selection.main.head)
           : text),
         autocompletion({
-          override: [javaCompletions],
+          override: [callbacks.requestJavaTypeMembers
+            ? createJavaMemberCompletionSource(callbacks.requestJavaTypeMembers)
+            : javaCompletions],
           activateOnTyping: true,
           maxRenderedOptions: 24,
         }),

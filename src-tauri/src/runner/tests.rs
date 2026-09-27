@@ -11,8 +11,9 @@ use crate::runner::{
     java_source_relative_path, marker_status, parse_compilation_diagnostics,
     parse_java_major_version, parse_junit_xml, parse_test_progress_marker,
     progress_case_from_marker, read_stream, remap_snapshot_diagnostics, run_problem_test,
-    select_compatible_java, validate_fully_qualified_class_name, validate_gradle_wrapper,
-    validate_test_method, JavaInstallation, ProblemTestEventSink, TEST_EVENT_MARKER,
+    select_compatible_java, select_metadata_java, validate_fully_qualified_class_name,
+    validate_gradle_wrapper, validate_test_method, JavaInstallation, ProblemTestEventSink,
+    TEST_EVENT_MARKER,
 };
 use serde_json::Value;
 use std::fs;
@@ -289,6 +290,34 @@ fn java_selection_falls_back_to_java_11() {
             major_version: 11,
         })
     );
+}
+
+#[test]
+fn metadata_java_prefers_gradle_compatible_jdk_then_accepts_newer_jdk() {
+    let candidates = vec![
+        JavaInstallation {
+            home: PathBuf::from("/jdk-21"),
+            major_version: 21,
+        },
+        JavaInstallation {
+            home: PathBuf::from("/jdk-17"),
+            major_version: 17,
+        },
+    ];
+    assert_eq!(
+        select_metadata_java(&candidates),
+        Some(candidates[1].clone())
+    );
+    assert_eq!(
+        select_metadata_java(&candidates[..1]),
+        Some(candidates[0].clone())
+    );
+    assert!(select_metadata_java(&candidates[1..]).is_some());
+    assert!(select_metadata_java(&[JavaInstallation {
+        home: PathBuf::from("/jdk-8"),
+        major_version: 8,
+    }])
+    .is_none());
 }
 
 #[cfg(unix)]

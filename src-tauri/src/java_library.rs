@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::models::{JavaTypeMembers, JavaTypeMembersMetadata};
 use serde::{Deserialize, Serialize};
 use tempfile::{Builder, TempDir};
 
@@ -22,6 +23,13 @@ const MAX_FINGERPRINT_FILES: usize = 200_000;
 const MAX_FINGERPRINT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const INIT_SCRIPT_NAME: &str = "leetcoder-ps-classpath.gradle";
 const JAVA_HELPER_NAME: &str = "LeetcoderPsMetadata.java";
+const JAVA_TYPE_MEMBERS_HELPER_NAME: &str = "LeetcoderJavaTypeMembers.java";
+const TYPE_MEMBERS_SCHEMA: &str = "java-type-members-v1";
+const MAX_REQUESTED_TYPES: usize = 16;
+const MAX_TYPE_NAME_BYTES: usize = 256;
+const MAX_CACHED_TYPE_MEMBERS: usize = 512;
+const PROJECT_CLASSPATH_REVALIDATION: Duration = Duration::from_secs(30);
+const CLASSPATH_FAILURE_RETRY: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +71,31 @@ struct OutputCapture {
 
 static LAST_METADATA: OnceLock<Mutex<Option<(PathBuf, String, PsLibraryMetadata)>>> =
     OnceLock::new();
+static TYPE_MEMBERS_CACHE: OnceLock<Mutex<TypeMembersCache>> = OnceLock::new();
+
+#[derive(Default)]
+struct TypeMembersCache {
+    java_environment_fingerprint: String,
+    metadata_java: Option<(String, crate::runner::JavaInstallation)>,
+    jdk_members: HashMap<(String, String), JavaTypeMembers>,
+    jdk_unavailable: HashSet<(String, String)>,
+    project_classpath: Option<CachedProjectClasspath>,
+    project_members: HashMap<(String, String, String, String), JavaTypeMembers>,
+}
+
+#[derive(Clone)]
+struct CachedProjectClasspath {
+    root: PathBuf,
+    java_identity: String,
+    config_fingerprint: String,
+    checked_at: Instant,
+    result: Result<(Vec<PathBuf>, String), String>,
+}
+
+#[derive(Deserialize)]
+struct TypeMembersHelperResult {
+    types: Vec<JavaTypeMembers>,
+}
 
 /// Resolve the selected Gradle project's main compile classpath and inspect its Ps class.
 /// The Gradle wrapper is run only when the caller explicitly refreshes library metadata.
@@ -114,6 +147,439 @@ pub(crate) fn inspect_ps_library(project_root: &Path) -> Result<PsLibraryMetadat
     };
     store_cached_metadata(root, metadata.clone());
     Ok(metadata)
+}
+
+/// Inspect public methods and fields for a bounded set of Java types.
+/// JDK types are resolved without invoking Gradle; project types use the
+/// selected repository's main compile classpath when it can be resolved.
+pub(crate) fn inspect_java_type_members(
+    repo_path: String,
+    type_names: Vec<String>,
+) -> Result<JavaTypeMembersMetadata, String> {
+    let type_names = validate_type_names(type_names)?;
+    let root = fs::canonicalize(&repo_path).map_err(|error| {
+        format!(
+            "Unable to resolve Java project root '{}': {error}",
+            repo_path
+        )
+    })?;
+    if !root.is_dir() {
+        return Err(format!(
+            "Java project root is not a directory: {}",
+            root.display()
+        ));
+    }
+    let config_fingerprint = project_config_fingerprint(&root)?;
+    let environment_fingerprint = java_environment_fingerprint();
+    let cache = TYPE_MEMBERS_CACHE.get_or_init(|| Mutex::new(TypeMembersCache::default()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if cache.java_environment_fingerprint != environment_fingerprint {
+        cache.java_environment_fingerprint = environment_fingerprint;
+        cache.metadata_java = None;
+        cache.jdk_members.clear();
+        cache.jdk_unavailable.clear();
+        cache.project_classpath = None;
+        cache.project_members.clear();
+    }
+
+    let (java_identity, metadata_java) = match cache.metadata_java.clone() {
+        Some((identity, java)) => (identity, java),
+        None => {
+            let java = crate::runner::discover_metadata_java()?;
+            let identity = java_identity(&java);
+            cache.metadata_java = Some((identity.clone(), java.clone()));
+            (identity, java)
+        }
+    };
+
+    if let Some(project_classpath) = cache.project_classpath.as_ref() {
+        if project_classpath.root != root
+            || project_classpath.java_identity != java_identity
+            || project_classpath.config_fingerprint != config_fingerprint
+        {
+            cache.project_classpath = None;
+            cache.project_members.clear();
+        }
+    }
+
+    let jdk_missing = type_names
+        .iter()
+        .filter(|type_name| {
+            !cache
+                .jdk_members
+                .contains_key(&(java_identity.clone(), (*type_name).clone()))
+                && !cache
+                    .jdk_unavailable
+                    .contains(&(java_identity.clone(), (*type_name).clone()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !jdk_missing.is_empty() {
+        let inspected = inspect_type_members_on_classpath(&metadata_java.home, &[], &jdk_missing)?;
+        for member in inspected {
+            let key = (java_identity.clone(), member.type_name.clone());
+            if member.available {
+                cache.jdk_members.insert(key, member);
+            } else {
+                cache.jdk_unavailable.insert(key);
+            }
+        }
+        let protected = type_names
+            .iter()
+            .map(|type_name| (java_identity.clone(), type_name.clone()))
+            .collect::<HashSet<_>>();
+        bound_type_member_cache(&mut cache, &protected, &HashSet::new());
+    }
+
+    let project_requested = type_names
+        .iter()
+        .filter(|type_name| {
+            !cache
+                .jdk_members
+                .contains_key(&(java_identity.clone(), (*type_name).clone()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !project_requested.is_empty() {
+        let cached_classpath = cache.project_classpath.clone();
+        let cached_fingerprint = cached_classpath.as_ref().and_then(|state| {
+            state
+                .result
+                .as_ref()
+                .ok()
+                .map(|(_, fingerprint)| fingerprint.clone())
+        });
+        let now = Instant::now();
+        let should_resolve = cached_classpath
+            .as_ref()
+            .is_none_or(|state| project_classpath_needs_refresh(state, now));
+        if should_resolve {
+            let result = resolve_project_classpath(&root);
+            if result.as_ref().is_ok_and(|(_, fingerprint)| {
+                cached_fingerprint
+                    .as_ref()
+                    .is_some_and(|cached| cached != fingerprint)
+            }) {
+                cache.project_members.clear();
+            }
+            cache.project_classpath = Some(CachedProjectClasspath {
+                root: root.clone(),
+                java_identity: java_identity.clone(),
+                config_fingerprint: config_fingerprint.clone(),
+                checked_at: now,
+                result,
+            });
+        }
+
+        if let Some(Ok((classpath, fingerprint))) = cache
+            .project_classpath
+            .as_ref()
+            .map(|state| state.result.clone())
+        {
+            let root_key = root.to_string_lossy().into_owned();
+            let types_to_inspect = project_requested
+                .iter()
+                .filter(|type_name| {
+                    !cache.project_members.contains_key(&(
+                        root_key.clone(),
+                        java_identity.clone(),
+                        fingerprint.clone(),
+                        (*type_name).clone(),
+                    ))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !types_to_inspect.is_empty() {
+                if let Ok(inspected) = inspect_type_members_on_classpath(
+                    &metadata_java.home,
+                    &classpath,
+                    &types_to_inspect,
+                ) {
+                    for member in inspected {
+                        cache.project_members.insert(
+                            (
+                                root_key.clone(),
+                                java_identity.clone(),
+                                fingerprint.clone(),
+                                member.type_name.clone(),
+                            ),
+                            member,
+                        );
+                    }
+                    let protected = project_requested
+                        .iter()
+                        .map(|type_name| {
+                            (
+                                root_key.clone(),
+                                java_identity.clone(),
+                                fingerprint.clone(),
+                                type_name.clone(),
+                            )
+                        })
+                        .collect::<HashSet<_>>();
+                    bound_type_member_cache(&mut cache, &HashSet::new(), &protected);
+                }
+            }
+        }
+    }
+
+    let root_key = root.to_string_lossy().into_owned();
+    let types = type_names
+        .into_iter()
+        .map(|type_name| {
+            cache
+                .jdk_members
+                .get(&(java_identity.clone(), type_name.clone()))
+                .cloned()
+                .or_else(|| {
+                    let fingerprint = cache
+                        .project_classpath
+                        .as_ref()
+                        .and_then(|state| state.result.as_ref().ok())
+                        .map(|(_, fingerprint)| fingerprint)?;
+                    cache
+                        .project_members
+                        .get(&(
+                            root_key.clone(),
+                            java_identity.clone(),
+                            fingerprint.clone(),
+                            type_name.clone(),
+                        ))
+                        .cloned()
+                })
+                .unwrap_or_else(|| unavailable_type(type_name))
+        })
+        .collect();
+
+    Ok(JavaTypeMembersMetadata {
+        fingerprint: metadata_fingerprint(
+            &root,
+            &config_fingerprint,
+            &java_identity,
+            cache.project_classpath.as_ref(),
+        ),
+        types,
+    })
+}
+
+fn validate_type_names(type_names: Vec<String>) -> Result<Vec<String>, String> {
+    if type_names.len() > MAX_REQUESTED_TYPES {
+        return Err(format!(
+            "At most {MAX_REQUESTED_TYPES} Java types can be inspected at once."
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut unique = Vec::with_capacity(type_names.len());
+    for type_name in type_names {
+        if type_name.len() > MAX_TYPE_NAME_BYTES || !is_valid_binary_type_name(&type_name) {
+            return Err(format!("Invalid Java type name: {type_name}"));
+        }
+        if seen.insert(type_name.clone()) {
+            unique.push(type_name);
+        }
+    }
+    Ok(unique)
+}
+
+fn is_valid_binary_type_name(type_name: &str) -> bool {
+    if type_name.is_empty()
+        || matches!(
+            type_name,
+            "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
+        )
+    {
+        return false;
+    }
+    let mut at_segment_start = true;
+    for character in type_name.chars() {
+        if character == '.' {
+            if at_segment_start {
+                return false;
+            }
+            at_segment_start = true;
+        } else if at_segment_start {
+            if !(character == '$' || character == '_' || character.is_alphabetic()) {
+                return false;
+            }
+            at_segment_start = false;
+        } else if !(character == '$' || character == '_' || character.is_alphanumeric()) {
+            return false;
+        }
+    }
+    !at_segment_start
+}
+
+fn unavailable_type(type_name: String) -> JavaTypeMembers {
+    JavaTypeMembers {
+        type_name,
+        available: false,
+        methods: Vec::new(),
+        fields: Vec::new(),
+    }
+}
+
+fn bound_type_member_cache(
+    cache: &mut TypeMembersCache,
+    protected_jdk: &HashSet<(String, String)>,
+    protected_project: &HashSet<(String, String, String, String)>,
+) {
+    while cache.jdk_members.len() > MAX_CACHED_TYPE_MEMBERS {
+        let Some(key) = cache
+            .jdk_members
+            .keys()
+            .find(|key| !protected_jdk.contains(*key))
+            .cloned()
+        else {
+            break;
+        };
+        cache.jdk_members.remove(&key);
+    }
+    while cache.jdk_unavailable.len() > MAX_CACHED_TYPE_MEMBERS {
+        let Some(key) = cache
+            .jdk_unavailable
+            .iter()
+            .find(|key| !protected_jdk.contains(*key))
+            .cloned()
+        else {
+            break;
+        };
+        cache.jdk_unavailable.remove(&key);
+    }
+    while cache.project_members.len() > MAX_CACHED_TYPE_MEMBERS {
+        let Some(key) = cache
+            .project_members
+            .keys()
+            .find(|key| !protected_project.contains(*key))
+            .cloned()
+        else {
+            break;
+        };
+        cache.project_members.remove(&key);
+    }
+}
+
+fn project_classpath_needs_refresh(state: &CachedProjectClasspath, now: Instant) -> bool {
+    let ttl = if state.result.is_ok() {
+        PROJECT_CLASSPATH_REVALIDATION
+    } else {
+        CLASSPATH_FAILURE_RETRY
+    };
+    now.duration_since(state.checked_at) >= ttl
+}
+
+fn java_environment_fingerprint() -> String {
+    let mut hash = StableHash::new();
+    for variable in ["JAVA_HOME", "JDK_HOME", "PATH"] {
+        hash.update(variable.as_bytes());
+        hash.update(&[0]);
+        if let Some(value) = std::env::var_os(variable) {
+            hash.update(value.to_string_lossy().as_bytes());
+        }
+        hash.update(&[0xff]);
+    }
+    format!("env-{:016x}", hash.finish())
+}
+
+fn java_identity(java: &crate::runner::JavaInstallation) -> String {
+    let release = fs::read(java.home.join("release")).unwrap_or_default();
+    let mut hash = StableHash::new();
+    hash.update(java.home.to_string_lossy().as_bytes());
+    hash.update(&release);
+    let version = String::from_utf8_lossy(&release)
+        .lines()
+        .find_map(|line| line.strip_prefix("JAVA_VERSION=\""))
+        .and_then(|version| version.strip_suffix('"'))
+        .unwrap_or("unknown")
+        .to_string();
+    format!(
+        "jdk-{version}-{}#{:016x}",
+        java.major_version,
+        hash.finish()
+    )
+}
+
+fn project_config_fingerprint(root: &Path) -> Result<String, String> {
+    let mut candidates = vec![
+        root.join("settings.gradle"),
+        root.join("settings.gradle.kts"),
+        root.join("build.gradle"),
+        root.join("build.gradle.kts"),
+        root.join("gradle.properties"),
+        root.join("gradle/wrapper/gradle-wrapper.properties"),
+        root.join("gradle/libs.versions.toml"),
+    ];
+    if let Ok(entries) = fs::read_dir(root.join("gradle")) {
+        candidates.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".versions.toml"))
+        }));
+    }
+    candidates.sort();
+    candidates.dedup();
+    let mut hash = StableHash::new();
+    hash.update(root.to_string_lossy().as_bytes());
+    let mut total_bytes = 0_u64;
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        let contents = fs::read(&path).map_err(|error| {
+            format!(
+                "Unable to fingerprint Gradle configuration '{}': {error}",
+                path.display()
+            )
+        })?;
+        total_bytes = total_bytes.saturating_add(contents.len() as u64);
+        if total_bytes > 4 * 1024 * 1024 {
+            return Err(
+                "Gradle configuration files exceed the metadata fingerprint limit.".to_string(),
+            );
+        }
+        hash.update(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .as_bytes(),
+        );
+        hash.update(&contents);
+    }
+    Ok(format!("config-{:016x}", hash.finish()))
+}
+
+fn resolve_project_classpath(root: &Path) -> Result<(Vec<PathBuf>, String), String> {
+    let wrapper = gradle_wrapper(root);
+    validate_gradle_wrapper(&wrapper)?;
+    let gradle_java = crate::runner::discover_compatible_java()?;
+    let classpath = resolve_main_compile_classpath(root, &wrapper, &gradle_java.home)?;
+    let fingerprint = classpath_fingerprint(root, &classpath)?;
+    Ok((classpath, fingerprint))
+}
+
+fn metadata_fingerprint(
+    root: &Path,
+    config_fingerprint: &str,
+    java_identity: &str,
+    project_classpath: Option<&CachedProjectClasspath>,
+) -> String {
+    let root_key = root.to_string_lossy();
+    let mut root_hash = StableHash::new();
+    root_hash.update(root_key.as_bytes());
+    let classpath_fingerprint = match project_classpath {
+        Some(state) => match &state.result {
+            Ok((_, fingerprint)) => fingerprint.clone(),
+            Err(_) => "unavailable".to_string(),
+        },
+        None => "unresolved".to_string(),
+    };
+    format!(
+        "{TYPE_MEMBERS_SCHEMA}:root-{:016x}:{config_fingerprint}:{java_identity}:classpath-{classpath_fingerprint}",
+        root_hash.finish()
+    )
 }
 
 fn cached_metadata(root: &Path, fingerprint: &str) -> Option<PsLibraryMetadata> {
@@ -489,6 +955,67 @@ fn inspect_classpath(java_home: &Path, classpath: &[PathBuf]) -> Result<Vec<PsMe
     Ok(result.methods)
 }
 
+fn inspect_type_members_on_classpath(
+    java_home: &Path,
+    classpath: &[PathBuf],
+    type_names: &[String],
+) -> Result<Vec<JavaTypeMembers>, String> {
+    let temp = create_private_temp_dir("leetcoder-java-type-members")?;
+    let source = temp.path().join(JAVA_TYPE_MEMBERS_HELPER_NAME);
+    write_private_file(
+        &source,
+        JAVA_TYPE_MEMBERS_HELPER.as_bytes(),
+        "Java type metadata helper",
+    )?;
+    let java = java_home.join("bin").join(java_executable_name());
+    if !java.is_file() {
+        return Err(format!(
+            "The selected JDK Java executable was not found: {}",
+            java.display()
+        ));
+    }
+    let classpath = std::env::join_paths(classpath).map_err(|error| {
+        format!("Unable to construct the Java classpath for type inspection: {error}")
+    })?;
+
+    let mut command = Command::new(java);
+    command
+        .arg("--class-path")
+        .arg(classpath)
+        .arg(source)
+        .args(type_names)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_bounded(
+        &mut command,
+        JAVA_HELPER_TIMEOUT,
+        "Java type member inspection",
+    )?;
+    if !output.success {
+        return Err(format_process_failure(
+            "Unable to inspect public Java type members",
+            &output,
+        ));
+    }
+    let result: TypeMembersHelperResult =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            format!(
+                "The Java type metadata helper returned invalid metadata: {error}. Output: {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        })?;
+    if result.types.len() != type_names.len()
+        || result
+            .types
+            .iter()
+            .zip(type_names)
+            .any(|(member, requested)| member.type_name != *requested)
+    {
+        return Err("The Java type metadata helper returned an unexpected type list.".to_string());
+    }
+    Ok(result.types)
+}
+
 fn create_private_temp_dir(prefix: &str) -> Result<TempDir, String> {
     let directory = Builder::new()
         .prefix(prefix)
@@ -842,6 +1369,198 @@ public class LeetcoderPsMetadata {
 }
 "#;
 
+const JAVA_TYPE_MEMBERS_HELPER: &str = r#"
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Parameter;
+import java.lang.reflect.Type;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public class LeetcoderJavaTypeMembers {
+    public static void main(String[] args) throws Exception {
+        String classPath = System.getProperty("java.class.path", "");
+        List<URL> urls = Arrays.stream(classPath.split(
+                java.util.regex.Pattern.quote(System.getProperty("path.separator"))))
+            .filter(value -> !value.isEmpty())
+            .map(Paths::get)
+            .map(LeetcoderJavaTypeMembers::toUrl)
+            .collect(Collectors.toList());
+
+        List<TypeMetadata> types = new ArrayList<>();
+        try (URLClassLoader loader = new URLClassLoader(urls.toArray(new URL[0]),
+                ClassLoader.getPlatformClassLoader())) {
+            for (String requested : args) {
+                types.add(inspect(requested, loader));
+            }
+        }
+        System.out.println("{\"types\":[" + types.stream()
+                .map(TypeMetadata::toJson).collect(Collectors.joining(",")) + "]}");
+    }
+
+    private static TypeMetadata inspect(String requested, ClassLoader loader) {
+        List<MethodMetadata> methods = new ArrayList<>();
+        List<FieldMetadata> fields = new ArrayList<>();
+        try {
+            Class<?> type = loadType(requested, loader);
+            for (Method method : type.getMethods()) {
+                int modifiers = method.getModifiers();
+                if (!Modifier.isPublic(modifiers) || method.isBridge() || method.isSynthetic()) {
+                    continue;
+                }
+                Type[] genericTypes = method.getGenericParameterTypes();
+                Parameter[] reflectedParameters = method.getParameters();
+                List<ParameterMetadata> parameters = new ArrayList<>();
+                for (int index = 0; index < genericTypes.length; index++) {
+                    String typeName = genericTypes[index].getTypeName();
+                    if (method.isVarArgs() && index == genericTypes.length - 1
+                            && typeName.endsWith("[]")) {
+                        typeName = typeName.substring(0, typeName.length() - 2) + "...";
+                    }
+                    Parameter parameter = reflectedParameters[index];
+                    parameters.add(new ParameterMetadata(
+                        parameter.isNamePresent() ? parameter.getName() : null, typeName));
+                }
+                methods.add(new MethodMetadata(method.getName(),
+                        method.getGenericReturnType().getTypeName(), parameters,
+                        Modifier.isStatic(modifiers)));
+            }
+            for (Field field : type.getFields()) {
+                int modifiers = field.getModifiers();
+                if (!Modifier.isPublic(modifiers)) continue;
+                fields.add(new FieldMetadata(field.getName(),
+                        field.getGenericType().getTypeName(), Modifier.isStatic(modifiers)));
+            }
+        } catch (ClassNotFoundException | LinkageError | RuntimeException absentOrUnresolvable) {
+            return new TypeMetadata(requested, false, new ArrayList<>(), new ArrayList<>());
+        }
+        methods.sort(Comparator.comparing(MethodMetadata::sortKey));
+        fields.sort(Comparator.comparing(FieldMetadata::sortKey));
+        return new TypeMetadata(requested, true, methods, fields);
+    }
+
+    private static Class<?> loadType(String name, ClassLoader loader)
+            throws ClassNotFoundException {
+        try {
+            return Class.forName(name, false, loader);
+        } catch (ClassNotFoundException original) {
+            int separator = name.lastIndexOf('.');
+            while (separator > 0) {
+                String nestedName = name.substring(0, separator) + "$"
+                        + name.substring(separator + 1).replace('.', '$');
+                try {
+                    return Class.forName(nestedName, false, loader);
+                } catch (ClassNotFoundException ignored) {
+                    separator = name.lastIndexOf('.', separator - 1);
+                }
+            }
+            throw original;
+        }
+    }
+
+    private static URL toUrl(java.nio.file.Path path) {
+        try {
+            return path.toUri().toURL();
+        } catch (Exception exception) {
+            throw new IllegalArgumentException("Invalid classpath entry: " + path, exception);
+        }
+    }
+
+    private static String json(String value) {
+        if (value == null) return "null";
+        StringBuilder result = new StringBuilder("\"");
+        for (char character : value.toCharArray()) {
+            switch (character) {
+                case '"': result.append("\\\""); break;
+                case '\\': result.append("\\\\"); break;
+                case '\b': result.append("\\b"); break;
+                case '\f': result.append("\\f"); break;
+                case '\n': result.append("\\n"); break;
+                case '\r': result.append("\\r"); break;
+                case '\t': result.append("\\t"); break;
+                default:
+                    if (character < 0x20) result.append(String.format("\\u%04x", (int) character));
+                    else result.append(character);
+            }
+        }
+        return result.append('"').toString();
+    }
+
+    private static class TypeMetadata {
+        private final String typeName;
+        private final boolean available;
+        private final List<MethodMetadata> methods;
+        private final List<FieldMetadata> fields;
+        TypeMetadata(String typeName, boolean available, List<MethodMetadata> methods,
+                List<FieldMetadata> fields) {
+            this.typeName = typeName; this.available = available;
+            this.methods = methods; this.fields = fields;
+        }
+        String toJson() {
+            return "{\"typeName\":" + json(typeName) + ",\"available\":" + available
+                    + ",\"methods\":[" + methods.stream().map(MethodMetadata::toJson)
+                        .collect(Collectors.joining(",")) + "],\"fields\":["
+                    + fields.stream().map(FieldMetadata::toJson)
+                        .collect(Collectors.joining(",")) + "]}";
+        }
+    }
+
+    private static class MethodMetadata {
+        private final String name;
+        private final String returnType;
+        private final List<ParameterMetadata> parameters;
+        private final boolean isStatic;
+        MethodMetadata(String name, String returnType, List<ParameterMetadata> parameters,
+                boolean isStatic) {
+            this.name = name; this.returnType = returnType;
+            this.parameters = parameters; this.isStatic = isStatic;
+        }
+        String sortKey() {
+            return name + parameters.stream().map(parameter -> parameter.typeName)
+                    .collect(Collectors.joining(";", "(", ")")) + returnType;
+        }
+        String toJson() {
+            return "{\"name\":" + json(name) + ",\"returnType\":" + json(returnType)
+                    + ",\"parameters\":[" + parameters.stream()
+                        .map(ParameterMetadata::toJson).collect(Collectors.joining(","))
+                    + "],\"isStatic\":" + isStatic + "}";
+        }
+    }
+
+    private static class ParameterMetadata {
+        private final String name;
+        private final String typeName;
+        ParameterMetadata(String name, String typeName) {
+            this.name = name; this.typeName = typeName;
+        }
+        String toJson() {
+            return "{\"name\":" + json(name) + ",\"typeName\":" + json(typeName) + "}";
+        }
+    }
+
+    private static class FieldMetadata {
+        private final String name;
+        private final String typeName;
+        private final boolean isStatic;
+        FieldMetadata(String name, String typeName, boolean isStatic) {
+            this.name = name; this.typeName = typeName; this.isStatic = isStatic;
+        }
+        String sortKey() { return name + ":" + typeName + ":" + isStatic; }
+        String toJson() {
+            return "{\"name\":" + json(name) + ",\"typeName\":" + json(typeName)
+                    + ",\"isStatic\":" + isStatic + "}";
+        }
+    }
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,6 +1569,229 @@ mod tests {
     use crate::runner::discover_compatible_java;
 
     const PS_CLASS_RESOURCE: &str = "io/github/shanepark/Ps.class";
+
+    #[test]
+    fn validates_bounded_type_batches_and_deduplicates_in_order() {
+        assert_eq!(
+            validate_type_names(vec![
+                "java.util.Stack".to_string(),
+                "example.Outer$Nested".to_string(),
+                "java.util.Stack".to_string(),
+            ])
+            .expect("valid names"),
+            ["java.util.Stack", "example.Outer$Nested"]
+        );
+        assert!(validate_type_names(vec!["int".to_string()]).is_err());
+        assert!(validate_type_names(vec!["java.lang.String[]".to_string()]).is_err());
+        assert!(validate_type_names(vec!["java.lang.String);System.exit(0)".to_string()]).is_err());
+        assert!(validate_type_names(vec!["x".repeat(MAX_TYPE_NAME_BYTES + 1)]).is_err());
+        assert!(validate_type_names(
+            (0..=MAX_REQUESTED_TYPES)
+                .map(|index| format!("example.Type{index}"))
+                .collect()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn project_classpath_revalidates_after_success_and_failure_ttls() {
+        let now = Instant::now();
+        let fresh_success = CachedProjectClasspath {
+            root: PathBuf::from("/project"),
+            java_identity: "jdk".to_string(),
+            config_fingerprint: "config".to_string(),
+            checked_at: now,
+            result: Ok((Vec::new(), "classpath".to_string())),
+        };
+        let stale_success = CachedProjectClasspath {
+            checked_at: now - PROJECT_CLASSPATH_REVALIDATION,
+            ..fresh_success.clone()
+        };
+        let fresh_failure = CachedProjectClasspath {
+            checked_at: now,
+            result: Err("unavailable".to_string()),
+            ..fresh_success.clone()
+        };
+        let stale_failure = CachedProjectClasspath {
+            checked_at: now - CLASSPATH_FAILURE_RETRY,
+            ..fresh_failure.clone()
+        };
+        assert!(!project_classpath_needs_refresh(&fresh_success, now));
+        assert!(project_classpath_needs_refresh(&stale_success, now));
+        assert!(!project_classpath_needs_refresh(&fresh_failure, now));
+        assert!(project_classpath_needs_refresh(&stale_failure, now));
+    }
+
+    #[test]
+    fn project_config_fingerprint_tracks_all_gradle_version_catalogs() {
+        let project = tempfile::tempdir().expect("project");
+        let catalogs = project.path().join("gradle");
+        fs::create_dir_all(&catalogs).expect("Gradle catalog directory");
+        let first_catalog = catalogs.join("libs.versions.toml");
+        let second_catalog = catalogs.join("test.versions.toml");
+        fs::write(&first_catalog, "[versions]\nfirst = '1'\n").expect("first catalog");
+        let first = project_config_fingerprint(project.path()).expect("first config signature");
+        fs::write(&second_catalog, "[versions]\nsecond = '1'\n").expect("second catalog");
+        let second = project_config_fingerprint(project.path()).expect("second config signature");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn reflects_jdk_stack_methods_without_gradle_and_reuses_cached_metadata() {
+        let project = tempfile::tempdir().expect("project without Gradle wrapper");
+        let first_started = Instant::now();
+        let first = inspect_java_type_members(
+            project.path().to_string_lossy().into_owned(),
+            vec!["java.util.Stack".to_string()],
+        )
+        .expect("JDK Stack metadata");
+        let first_elapsed = first_started.elapsed();
+        let stack = first.types.first().expect("Stack type");
+        assert!(stack.available);
+        for method in ["push", "pop", "peek", "iterator"] {
+            assert!(
+                stack.methods.iter().any(|member| member.name == method),
+                "missing Stack or inherited method {method}"
+            );
+        }
+        assert!(first.fingerprint.contains("classpath-unresolved"));
+
+        let cached_started = Instant::now();
+        let cached = inspect_java_type_members(
+            project.path().to_string_lossy().into_owned(),
+            vec!["java.util.Stack".to_string()],
+        )
+        .expect("cached JDK Stack metadata");
+        let cached_elapsed = cached_started.elapsed();
+        assert_eq!(cached.fingerprint, first.fingerprint);
+        assert_eq!(cached.types, first.types);
+        eprintln!(
+            "Stack metadata timings: first={}ms cached={}us; no Gradle wrapper present and classpath remains unresolved",
+            first_elapsed.as_millis(),
+            cached_elapsed.as_micros()
+        );
+
+        let mixed = inspect_java_type_members(
+            project.path().to_string_lossy().into_owned(),
+            vec![
+                "java.util.Stack".to_string(),
+                "java.lang.Integer".to_string(),
+                "java.lang.Cloneable".to_string(),
+            ],
+        )
+        .expect("mixed JDK metadata");
+        assert_eq!(mixed.fingerprint, first.fingerprint);
+        let integer = mixed.types.get(1).expect("Integer type");
+        assert!(integer.available);
+        assert!(integer
+            .methods
+            .iter()
+            .any(|method| method.name == "parseInt" && method.is_static));
+        assert!(integer
+            .fields
+            .iter()
+            .any(|field| field.name == "MAX_VALUE" && field.is_static));
+        let empty = mixed.types.get(2).expect("Cloneable type");
+        assert!(empty.available);
+        assert!(empty.methods.is_empty());
+        assert!(empty.fields.is_empty());
+    }
+
+    #[test]
+    fn reflects_public_inherited_generic_members_without_initializing_classes() {
+        let java = crate::runner::discover_metadata_java().expect("metadata JDK");
+        let workspace = tempfile::tempdir().expect("fixture workspace");
+        let source_dir = workspace.path().join("src/fixture");
+        let classes = workspace.path().join("compiled classes");
+        fs::create_dir_all(&source_dir).expect("fixture source directory");
+        fs::create_dir_all(&classes).expect("class output directory");
+        let parent = source_dir.join("Parent.java");
+        let child = source_dir.join("Child.java");
+        fs::write(
+            &parent,
+            r#"package fixture;
+public class Parent<T> {
+    static { if (Boolean.parseBoolean("true")) throw new AssertionError("initialized"); }
+    public static Object explosive = failIfInitialized();
+    public static Object failIfInitialized() { throw new AssertionError("initialized"); }
+    public static int inheritedStatic;
+    public T inheritedField;
+    public T inherited(T value) { return value; }
+}"#,
+        )
+        .expect("Parent source");
+        fs::write(
+            &child,
+            r#"package fixture;
+import java.util.List;
+public class Child extends Parent<String> {
+    static { if (Boolean.parseBoolean("true")) throw new AssertionError("initialized"); }
+    public static int CODE;
+    public String own(String value) { return value; }
+    public <X extends CharSequence> List<X> convert(List<X> values) { return values; }
+}"#,
+        )
+        .expect("Child source");
+        let javac = java.home.join("bin").join(executable_name("javac"));
+        let mut compile = Command::new(javac);
+        compile
+            .arg("-parameters")
+            .arg("-d")
+            .arg(&classes)
+            .arg(&parent)
+            .arg(&child);
+        run_test_command(&mut compile, "compile generic member fixture");
+
+        let members = inspect_type_members_on_classpath(
+            &java.home,
+            std::slice::from_ref(&classes),
+            &["fixture.Child".to_string()],
+        )
+        .expect("fixture metadata");
+        let child = members.first().expect("Child result");
+        assert!(child.available, "class initialization must not run");
+        assert!(child
+            .methods
+            .iter()
+            .any(|method| { method.name == "inherited" && method.return_type == "T" }));
+        let convert = child
+            .methods
+            .iter()
+            .find(|method| method.name == "convert")
+            .expect("generic method");
+        assert_eq!(convert.return_type, "java.util.List<X>");
+        assert_eq!(convert.parameters[0].type_name, "java.util.List<X>");
+        assert!(child
+            .methods
+            .iter()
+            .any(|method| method.name == "own" && !method.is_static));
+        assert!(child
+            .fields
+            .iter()
+            .any(|field| field.name == "CODE" && field.is_static));
+        assert!(child
+            .fields
+            .iter()
+            .any(|field| field.name == "inheritedStatic" && field.is_static));
+        assert!(child
+            .fields
+            .iter()
+            .any(|field| field.name == "inheritedField" && !field.is_static));
+    }
+
+    #[test]
+    fn missing_java_type_returns_a_negative_result() {
+        let project = tempfile::tempdir().expect("project without Gradle wrapper");
+        let metadata = inspect_java_type_members(
+            project.path().to_string_lossy().into_owned(),
+            vec!["example.missing.NeverThere".to_string()],
+        )
+        .expect("missing class is metadata, not an error");
+        let missing = metadata.types.first().expect("missing result");
+        assert!(!missing.available);
+        assert!(missing.methods.is_empty());
+        assert!(missing.fields.is_empty());
+    }
 
     #[test]
     fn classpath_fingerprint_tracks_jar_and_inherited_class_content() {

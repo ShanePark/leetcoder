@@ -68,6 +68,42 @@ export interface PsLibraryMetadata {
   methods: PsMethod[]
 }
 
+/** One parameter in a public method discovered from a Java type. */
+export interface JavaMemberParameter {
+  name: string | null
+  typeName: string
+}
+
+/** One public method discovered from a Java type, including inherited methods. */
+export interface JavaMethodMember {
+  name: string
+  returnType: string
+  parameters: JavaMemberParameter[]
+  isStatic: boolean
+}
+
+/** One public field discovered from a Java type. */
+export interface JavaFieldMember {
+  name: string
+  typeName: string
+  isStatic: boolean
+}
+
+/** Public members for one requested Java type. */
+export interface JavaTypeMembers {
+  typeName: string
+  /** False means the type was not present on the resolved project classpath. */
+  available: boolean
+  methods: JavaMethodMember[]
+  fields: JavaFieldMember[]
+}
+
+/** Public Java members for a bounded batch of requested types. */
+export interface JavaTypeMembersMetadata {
+  fingerprint: string
+  types: JavaTypeMembers[]
+}
+
 /** Problem source files changed outside this application. */
 export interface RepositoryFilesChanged {
   /** Repository-relative POSIX paths, sorted and de-duplicated. */
@@ -168,6 +204,10 @@ export type TestRunProgressHandler = (progress: TestRunProgress) => void
 export interface BackendClient {
   validateProject(repoPath: string): Promise<ProjectValidation>
   inspectPsLibrary(repoPath: string): Promise<PsLibraryMetadata>
+  inspectJavaTypeMembers?(
+    repoPath: string,
+    typeNames: string[],
+  ): Promise<JavaTypeMembersMetadata>
   fetchDailyProblem(): Promise<DailyProblem>
   fetchProblemByNumber(frontendId: string): Promise<DailyProblem>
   listProblemFiles(repoPath: string): Promise<ProblemFileEntry[]>
