@@ -83,7 +83,7 @@ function rangeSummary(state: EditorState) {
     found.push({
       from: cursor.from,
       to: cursor.to,
-      className: decoration.spec.class ?? '',
+      className: decoration.spec.class ?? decoration.spec.attributes?.class ?? '',
       title: decoration.spec.attributes?.title ?? '',
     })
     cursor.next()
@@ -105,13 +105,13 @@ describe('in-editor compiler diagnostics', () => {
         from: state.doc.line(2).from + 1,
         to: state.doc.line(2).from + 4,
         className: 'cm-diagnostic-range',
-        title: 'cannot find symbol\nincompatible types',
+        title: '',
       },
       {
         from: state.doc.line(2).from + 6,
         to: state.doc.line(2).from + 7,
         className: 'cm-diagnostic-range',
-        title: "';' expected",
+        title: '',
       },
     ])
 
@@ -119,8 +119,8 @@ describe('in-editor compiler diagnostics', () => {
     expect(marker).not.toBeNull()
     const button = marker!.toDOM() as unknown as FakeElement
     expect(button.tagName).toBe('button')
-    expect(button.title).toBe('cannot find symbol\n\';\' expected\nincompatible types')
-    expect(button.attributes.get('aria-label')).toBe(`Show diagnostics: ${button.title}`)
+    expect(button.title).toBe('')
+    expect(button.attributes.get('aria-label')).toBe("Show diagnostics: cannot find symbol\n';' expected\nincompatible types")
 
     const gutterState = EditorState.create({
       doc: 'class X {}\nabcdef',
@@ -134,28 +134,36 @@ describe('in-editor compiler diagnostics', () => {
     expect(mappedButton.dataset.diagnosticLine).toBeUndefined()
   })
 
-  it('keeps line-only issues clickable while clamping columns to valid line bounds', () => {
+  it('underlines line-only and end-of-line issues and keeps blank-line diagnostics targetable', () => {
     const issues: EditorIssue[] = [
       { file: 'Solution.java', line: 1, column: 0, message: 'missing location' },
       { file: 'Solution.java', line: 2, column: 99, caret: '^', message: 'end of line' },
       { file: 'Solution.java', line: 2, message: 'column unavailable' },
-      { file: 'Solution.java', line: 3, column: 1, message: 'invalid line' },
+      { file: 'Solution.java', line: 3, column: 1, message: 'blank line' },
+      { file: 'Solution.java', line: 5, column: 1, message: 'invalid line' },
     ]
-    const state = stateWithIssues('abc\nx', issues)
+    const state = stateWithIssues('abc\nx\n\nz', issues)
     const entries = state.field(diagnosticViewState).issues
 
-    expect(entries).toHaveLength(3)
-    expect(entries[0]).toMatchObject({ from: 0, to: 0 })
-    expect(entries[1]).toMatchObject({ from: 4, to: 4 })
-    expect(entries[2]).toMatchObject({ from: 5, to: 5 })
-    expect(rangeSummary(state)).toEqual([])
+    expect(entries).toHaveLength(4)
+    expect(entries[0]).toMatchObject({ from: 0, to: 3 })
+    expect(entries[1]).toMatchObject({ from: 4, to: 5 })
+    expect(entries[2]).toMatchObject({ from: 4, to: 5 })
+    expect(entries[3]).toMatchObject({ from: 6, to: 6 })
+    expect(rangeSummary(state)).toEqual([
+      { from: 0, to: 3, className: 'cm-diagnostic-range', title: '' },
+      { from: 4, to: 5, className: 'cm-diagnostic-range', title: '' },
+      { from: 6, to: 6, className: 'cm-diagnostic-empty-line', title: '' },
+    ])
 
     const { view } = mutableView(state)
     expect(showDiagnosticAtLine(view, 1)).toBe(true)
     expect(view.state.field(diagnosticViewState).activeIds).toEqual([0])
     expect(showDiagnosticAtLine(view, 2)).toBe(true)
-    expect(view.state.field(diagnosticViewState).activeIds).toEqual([2, 1])
-    expect(showDiagnosticAtLine(view, 3)).toBe(false)
+    expect(view.state.field(diagnosticViewState).activeIds).toEqual([1, 2])
+    expect(showDiagnosticAtLine(view, 3)).toBe(true)
+    expect(view.state.field(diagnosticViewState).activeIds).toEqual([3])
+    expect(showDiagnosticAtLine(view, 5)).toBe(false)
   })
 
   it('maps diagnostics through edits, closes an open tooltip, and clears stale results on replacement', () => {
@@ -183,8 +191,24 @@ describe('in-editor compiler diagnostics', () => {
     expect(rangeSummary(view.state)).toEqual([])
   })
 
-  it('shows compiler text and only shows a source snippet while it still matches', () => {
+  it('reattaches an underline after its source character is deleted', () => {
+    const initial = stateWithIssues('abc', [
+      { file: 'Solution.java', line: 1, column: 2, caret: ' ^', message: 'invalid token' },
+    ])
+    const { view, state } = mutableView(initial)
+
+    view.dispatch({ changes: { from: 1, to: 2, insert: '' } })
+
+    expect(state().doc.toString()).toBe('ac')
+    expect(state().field(diagnosticViewState).issues[0]).toMatchObject({ from: 1, to: 2 })
+    expect(rangeSummary(state())).toEqual([
+      { from: 1, to: 2, className: 'cm-diagnostic-range', title: '' },
+    ])
+  })
+
+  it('shows compact escaped messages without paths or source dumps', () => {
     const sourceLine = '  <script>&value'
+    const longMessage = `cannot resolve ${'MissingType.'.repeat(24)}`
     const issue: EditorIssue = {
       file: 'Solution.java',
       line: 2,
@@ -193,7 +217,7 @@ describe('in-editor compiler diagnostics', () => {
       sourceLine,
       caret: '  ^~~~~',
     }
-    const initial = stateWithIssues(`class X {}\n${sourceLine}`, [issue])
+    const initial = stateWithIssues(`class X {}\n${sourceLine}`, [issue, { ...issue, message: longMessage }])
     const { view, state, focus } = mutableView(initial)
 
     expect(showDiagnosticAtLine(view, 2)).toBe(true)
@@ -203,10 +227,9 @@ describe('in-editor compiler diagnostics', () => {
     const rendered = tooltip!.create(view) as TooltipView
     const container = rendered.dom as unknown as FakeElement
     expect(container.className).toBe('cm-diagnostic-tooltip')
-    expect(container.children[0].textContent).toBe(issue.message)
-    expect(container.children[1].textContent).toBe('Solution.java:2:3')
-    expect(container.children[2].tagName).toBe('pre')
-    expect(container.children[2].textContent).toBe(`${sourceLine}\n${issue.caret}`)
+    expect(container.children.map((child) => child.textContent)).toEqual([issue.message, longMessage])
+    expect(container.children.some((child) => child.tagName === 'pre')).toBe(false)
+    expect(container.children.map((child) => child.textContent).join(' ')).not.toContain('Solution.java')
 
     view.dispatch({ changes: { from: initial.doc.line(2).from, insert: 'changed ' } })
     expect(state().field(diagnosticViewState).activeIds).toBeNull()

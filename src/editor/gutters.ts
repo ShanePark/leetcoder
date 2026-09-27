@@ -40,9 +40,6 @@ class FailureMarker extends GutterMarker {
     marker.className = 'cm-failure-marker'
     marker.textContent = '●'
     marker.setAttribute('aria-label', `Show diagnostics: ${this.message}`)
-    if (this.message) {
-      marker.title = this.message
-    }
     return marker
   }
 }
@@ -144,14 +141,13 @@ function buildFailureDecorations(state: EditorState, issues: readonly EditorIssu
     .map(([, entry]) => entry)
     .sort((left, right) => left.line.from - right.line.from)
   const builder = new RangeSetBuilder<Decoration>()
-  for (const { messages, line } of entries) {
+  for (const { line } of entries) {
     builder.add(
       line.from,
       line.from,
       Decoration.line({
         attributes: {
           class: 'cm-failure-line',
-          title: messages.join('\n'),
         },
       }),
     )

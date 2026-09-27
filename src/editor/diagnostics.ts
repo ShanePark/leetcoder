@@ -69,8 +69,12 @@ function resolveIssue(state: EditorState, issue: EditorIssue, id: number): Posit
   const line = state.doc.line(lineNumber)
   const rawColumn = issue.column ?? columnFromCaret(issue.caret)
   const column = validColumn(rawColumn, line.length)
-  const from = column === null ? line.from : line.from + column - 1
-  const to = column === null ? from : Math.min(line.to, from + caretRangeLength(issue.caret))
+  let from = column === null ? line.from : line.from + column - 1
+  let to = column === null ? line.to : Math.min(line.to, from + caretRangeLength(issue.caret))
+  if (from === to && line.length > 0) {
+    from -= 1
+    to = line.to
+  }
   return { id, issue, from, to }
 }
 
@@ -94,32 +98,17 @@ function tooltipFor(entries: readonly PositionedIssue[]): Tooltip | null {
     end: to,
     above: true,
     arrow: true,
-    create(view) {
-      const state = view.state
+    create() {
       const dom = document.createElement('div')
       dom.className = 'cm-diagnostic-tooltip'
       dom.setAttribute('role', 'group')
       dom.setAttribute('aria-label', 'Compiler diagnostics')
 
       for (const entry of entries) {
-        const location = currentLocation(state, entry)
         const message = document.createElement('div')
         message.className = 'cm-diagnostic-tooltip-message'
         message.textContent = diagnosticMessage(entry.issue)
         dom.append(message)
-
-        const locationLabel = document.createElement('div')
-        locationLabel.className = 'cm-diagnostic-tooltip-location'
-        locationLabel.textContent = `${entry.issue.file}:${location.line}:${location.column}`
-        dom.append(locationLabel)
-
-        const currentLine = state.doc.line(location.line).text
-        if (entry.issue.sourceLine === currentLine && entry.issue.caret) {
-          const source = document.createElement('pre')
-          source.className = 'cm-diagnostic-tooltip-source'
-          source.textContent = `${currentLine}\n${entry.issue.caret}`
-          dom.append(source)
-        }
       }
       return { dom }
     },
@@ -138,9 +127,24 @@ function resolveIssues(state: EditorState, issues: readonly EditorIssue[]): read
 }
 
 function mapIssue(transaction: Transaction, entry: PositionedIssue): PositionedIssue {
-  const from = transaction.changes.mapPos(entry.from, 1)
-  const to = transaction.changes.mapPos(entry.to, -1)
-  return { ...entry, from, to: Math.max(from, to) }
+  let from = transaction.changes.mapPos(entry.from, 1)
+  let to = transaction.changes.mapPos(entry.to, -1)
+  if (to > from) {
+    return { ...entry, from, to }
+  }
+
+  const line = transaction.state.doc.lineAt(from)
+  if (line.length === 0) {
+    return { ...entry, from: line.from, to: line.from }
+  }
+  from = Math.max(line.from, Math.min(from, line.to))
+  if (from === line.to) {
+    from -= 1
+    to = line.to
+  } else {
+    to = from + 1
+  }
+  return { ...entry, from, to }
 }
 
 export const diagnosticViewState = StateField.define<DiagnosticViewState>({
@@ -180,8 +184,10 @@ export const diagnosticViewState = StateField.define<DiagnosticViewState>({
 /** Build inline ranges from compiler columns and javac's caret span. */
 export function buildDiagnosticRangeDecorations(issues: readonly PositionedIssue[]) {
   const groups = new Map<string, PositionedIssue[]>()
+  const emptyLinePositions = new Set<number>()
   for (const entry of issues) {
     if (entry.to <= entry.from) {
+      emptyLinePositions.add(entry.from)
       continue
     }
     const key = `${entry.from}:${entry.to}`
@@ -189,15 +195,21 @@ export function buildDiagnosticRangeDecorations(issues: readonly PositionedIssue
     group.push(entry)
     groups.set(key, group)
   }
-  const ranges = [...groups.values()].sort((left, right) => left[0].from - right[0].from || left[0].to - right[0].to)
+  const ranges = [
+    ...[...groups.values()].map((entries) => ({
+      from: entries[0].from,
+      to: entries[0].to,
+      decoration: Decoration.mark({ class: 'cm-diagnostic-range' }),
+    })),
+    ...[...emptyLinePositions].map((from) => ({
+      from,
+      to: from,
+      decoration: Decoration.line({ attributes: { class: 'cm-diagnostic-empty-line' } }),
+    })),
+  ].sort((left, right) => left.from - right.from || left.to - right.to)
   const builder = new RangeSetBuilder<Decoration>()
-  for (const group of ranges) {
-    const { from, to } = group[0]
-    const message = group.map(({ issue }) => diagnosticMessage(issue)).join('\n')
-    builder.add(from, to, Decoration.mark({
-      class: 'cm-diagnostic-range',
-      attributes: { title: message },
-    }))
+  for (const { from, to, decoration } of ranges) {
+    builder.add(from, to, decoration)
   }
   return builder.finish()
 }
@@ -231,7 +243,7 @@ const hoverDiagnostics = hoverTooltip((view, position) => {
   if (current.activeIds) {
     return null
   }
-  const matching = current.issues.filter((entry) => entry.from <= position && position < entry.to)
+  const matching = current.issues.filter((entry) => entry.from <= position && position <= entry.to)
   return tooltipFor(matching)
 }, { hideOnChange: true })
 

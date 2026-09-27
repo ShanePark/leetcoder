@@ -246,7 +246,6 @@
 
 .editor .cm-line.cm-failure-line {
   box-shadow: inset 2px 0 var(--red);
-  background: var(--red-soft);
 }
 
 .editor .cm-diagnostic-range {
@@ -257,12 +256,28 @@
   text-underline-offset: 2px;
 }
 
+.editor .cm-line.cm-diagnostic-empty-line::after {
+  display: inline-block;
+  width: 0.7em;
+  content: '\00a0';
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: var(--red);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
+}
+
 .editor .cm-tooltip.cm-diagnostic-tooltip {
+  box-sizing: border-box;
+  width: max-content;
   max-width: min(420px, calc(100vw - 24px));
-  padding: 9px 12px;
-  border-left: 3px solid var(--red);
+  max-height: min(240px, calc(100vh - 24px));
+  overflow: auto;
+  padding: 8px 10px;
+  border-left: 2px solid var(--red);
   box-shadow: var(--shadow-menu);
-  white-space: normal;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .editor .cm-diagnostic-tooltip-message {
@@ -271,30 +286,7 @@
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
-}
-
-.editor .cm-diagnostic-tooltip-location {
-  display: block;
-  margin-top: 5px;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.editor .cm-diagnostic-tooltip-source {
-  display: block;
-  max-width: 100%;
-  margin: 7px 0 0;
-  overflow: auto;
-  padding: 7px;
-  border-radius: 4px;
-  background: var(--surface-2);
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.4;
-  white-space: pre;
+  white-space: pre-wrap;
 }
 
 .editor .cm-definition-link {
