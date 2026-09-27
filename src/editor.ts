@@ -9,7 +9,6 @@ import {
 } from '@codemirror/autocomplete'
 import { java } from '@codemirror/lang-java'
 import {
-  bracketMatching,
   codeFolding,
   foldEffect,
   foldGutter,
@@ -74,6 +73,7 @@ import {
   removeUnusedJavaTypeImports,
 } from './java-format'
 import { leetcoderHighlight, leetcoderTheme } from './editor/theme'
+import { javaBracketMatching } from './editor/bracket-matching'
 import {
   findJavaTestMethodAt,
   findJavaTestMethodMarkers,
@@ -912,7 +912,7 @@ export class JavaEditor {
         // report the printable `(` key.
         Prec.high(EditorView.inputHandler.of(handleJavaIdentifierCallInput)),
         closeBrackets(),
-        bracketMatching(),
+        javaBracketMatching(),
         indentUnit.of('    '),
         EditorState.tabSize.of(4),
         EditorState.allowMultipleSelections.of(true),

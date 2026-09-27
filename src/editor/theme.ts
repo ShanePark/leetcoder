@@ -125,10 +125,9 @@ export const leetcoderTheme = EditorView.theme({
     color: editorPalette.red,
   },
   '.cm-matchingBracket, &.cm-focused .cm-matchingBracket': {
-    backgroundColor: editorPalette.amber,
-    color: 'var(--on-accent)',
+    backgroundColor: 'var(--amber-soft)',
+    color: editorPalette.text,
     borderRadius: '2px',
-    boxShadow: 'inset 0 0 0 1px var(--text)',
   },
   '.cm-nonmatchingBracket, &.cm-focused .cm-nonmatchingBracket': {
     backgroundColor: editorPalette.red,
