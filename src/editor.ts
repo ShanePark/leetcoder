@@ -9,14 +9,11 @@ import {
 } from '@codemirror/autocomplete'
 import { java } from '@codemirror/lang-java'
 import {
-  codeFolding,
   foldEffect,
   foldGutter,
-  foldService,
   indentOnInput,
   indentUnit,
   syntaxHighlighting,
-  syntaxTree,
 } from '@codemirror/language'
 import {
   copyLineDown,
@@ -39,7 +36,6 @@ import {
 } from '@codemirror/state'
 import {
   EditorView,
-  ViewPlugin,
   drawSelection,
   gutter,
   highlightActiveLine,
@@ -47,21 +43,16 @@ import {
   highlightSpecialChars,
   keymap,
   lineNumbers,
-  type ViewUpdate,
 } from '@codemirror/view'
 import {
-  addJavaTypeImports,
   createJavaMemberCompletionSource,
-  JAVA_TYPE_IMPORTS,
   javaCompletions,
   finishJavaTemplate,
-  javaIdentifierAt,
   javaIterTemplateExtension,
   maskJavaCommentsAndLiterals,
 } from './completions'
 import type { JavaTypeMembersMetadata } from './backend'
 import {
-  psLibraryAvailable,
   psLibraryExtension,
   readPsLibraryMetadata,
   setPsLibraryMetadata,
@@ -70,10 +61,17 @@ import {
 import type { ClipboardBridge } from './clipboard'
 import { createClipboardBridge } from './clipboard'
 import { platformShortcutBindings, shortcutBindings, shortcutLabel } from './shortcuts'
+import { importBlockRange } from './java-format'
 import {
-  importBlockRange,
-  removeUnusedJavaTypeImports,
-} from './java-format'
+  javaAutoImports,
+  javaFolding,
+  javaImportFolding,
+  javaImportPruning,
+} from './editor/auto-import'
+import {
+  handleJavaIdentifierCallInput,
+  handleJavaIdentifierCallKey,
+} from './editor/method-call-input'
 import { leetcoderHighlight, leetcoderTheme } from './editor/theme'
 import { javaBracketMatching } from './editor/bracket-matching'
 import {
@@ -96,7 +94,6 @@ import {
   extractJavaMethod,
   formatJavaDocClipboard,
   introduceJavaVariable,
-  minimalDocumentChange,
   planJavaDocInsertion,
   reformatJavaDocument,
 } from './editor/editing'
@@ -128,6 +125,12 @@ import {
   showJavaIntentions,
 } from './editor/intentions'
 
+export { javaAutoImports } from './editor/auto-import'
+export {
+  handleJavaIdentifierCallInput,
+  handleJavaIdentifierCallKey,
+  prepareSelectedJavaIdentifierCall,
+} from './editor/method-call-input'
 export {
   expandJavaTemplateOnTab,
   extractJavaMethod,
@@ -208,155 +211,6 @@ function isMacPlatform(): boolean {
   }
   return /Mac|iPhone|iPad|iPod/i.test(`${navigator.platform} ${navigator.userAgent}`)
 }
-
-const JAVA_IDENTIFIER_START = /^(?:[$_]|\p{ID_Start})$/u
-const JAVA_IDENTIFIER_PART = /^(?:[$\p{ID_Continue}])$/u
-
-function isJavaIdentifier(value: string): boolean {
-  const characters = [...value]
-  return characters.length > 0
-    && JAVA_IDENTIFIER_START.test(characters[0])
-    && characters.slice(1).every((character) => JAVA_IDENTIFIER_PART.test(character))
-}
-
-function previousNonWhitespace(source: string, position: number): string {
-  let cursor = position - 1
-  while (cursor >= 0 && /\s/.test(source[cursor])) cursor -= 1
-  return cursor >= 0 ? source[cursor] : ''
-}
-
-function nextNonWhitespace(source: string, position: number): string {
-  let cursor = position
-  while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1
-  return cursor < source.length ? source[cursor] : ''
-}
-
-function referencedJavaImportTypes(state: EditorState): Set<string> {
-  const source = state.doc.toString()
-  const definitions = new Set<string>()
-  const tree = syntaxTree(state)
-  tree.iterate({
-    enter(node) {
-      if (node.name === 'Definition') definitions.add(source.slice(node.from, node.to))
-    },
-  })
-
-  const typeNames = new Set<string>()
-  tree.iterate({
-    enter(node) {
-      const name = source.slice(node.from, node.to)
-      if (!JAVA_TYPE_IMPORTS[name]) return
-      if (name === 'Ps' && !psLibraryAvailable(state)) return
-
-      if (node.name === 'TypeName') {
-        // The final component of a fully qualified type is also a TypeName.
-        // Only an unqualified first component should request an import.
-        if (previousNonWhitespace(source, node.from) !== '.') typeNames.add(name)
-        return
-      }
-
-      // Static factories and utilities such as List.of() and Arrays.sort()
-      // are parsed as Identifier receivers rather than TypeName nodes.
-      if (node.name === 'Identifier'
-        && !definitions.has(name)
-        && previousNonWhitespace(source, node.from) !== '.'
-        && nextNonWhitespace(source, node.to) === '.') {
-        typeNames.add(name)
-      }
-    },
-  })
-  return typeNames
-}
-
-export const javaAutoImports = EditorState.transactionFilter.of((transaction) => {
-  if (!transaction.docChanged || !transaction.isUserEvent('input')) return transaction
-
-  const source = transaction.newDoc.toString()
-  const updated = addJavaTypeImports(source, referencedJavaImportTypes(transaction.state))
-  if (updated === source) return transaction
-
-  return [
-    transaction,
-    { changes: minimalDocumentChange(source, updated), sequential: true },
-  ]
-})
-
-/**
- * Imports this editor added stop being useful once their last reference is
- * gone. Pruning waits for a short pause instead of running on every keystroke
- * so an import does not vanish and come back while its type name is retyped,
- * and it leaves the type currently under the cursor alone for the same reason.
- */
-const IMPORT_PRUNE_DELAY_MS = 700
-
-const javaImportPruning = ViewPlugin.fromClass(class {
-  private timer: ReturnType<typeof setTimeout> | null = null
-
-  constructor(private readonly view: EditorView) {}
-
-  update(update: ViewUpdate): void {
-    if (!update.docChanged) {
-      return
-    }
-    if (this.timer !== null) {
-      clearTimeout(this.timer)
-    }
-    this.timer = setTimeout(() => {
-      this.timer = null
-      this.prune()
-    }, IMPORT_PRUNE_DELAY_MS)
-  }
-
-  destroy(): void {
-    if (this.timer !== null) {
-      clearTimeout(this.timer)
-    }
-  }
-
-  private prune(): void {
-    const state = this.view.state
-    if (completionStatus(state) === 'active') {
-      return
-    }
-    const source = state.doc.toString()
-    const typing = javaIdentifierAt(source, state.selection.main.head)?.name ?? null
-    const updated = removeUnusedJavaTypeImports(source, typing)
-    if (updated === source) {
-      return
-    }
-    this.view.dispatch({
-      changes: minimalDocumentChange(source, updated),
-      userEvent: 'delete.import',
-    })
-  }
-})
-
-/**
- * Fold the leading `import` block as one unit. Only its first line reports a
- * range, which is the shape CodeMirror's fold gutter and `foldable` expect.
- */
-const javaImportFolding = foldService.of((state, lineStart) => {
-  const block = importBlockRange(state.doc.toString())
-  if (!block || block.count < 2 || block.from !== lineStart || block.to <= block.from) {
-    return null
-  }
-  return { from: block.from, to: block.to }
-})
-
-const javaFolding = codeFolding({
-  preparePlaceholder: (state, range) => (
-    state.doc.sliceString(range.from, range.from + 6) === 'import' ? 'import \u2026' : '\u2026'
-  ),
-  placeholderDOM: (_view, onclick, prepared) => {
-    const element = document.createElement('span')
-    element.className = 'cm-foldPlaceholder'
-    element.textContent = typeof prepared === 'string' ? prepared : '\u2026'
-    element.title = 'Expand'
-    element.setAttribute('aria-label', 'Expand folded lines')
-    element.addEventListener('click', onclick)
-    return element
-  },
-})
 
 export interface JavaDocAltShortcutEvent {
   code: string
@@ -533,124 +387,6 @@ export function isProjectSearchAltShortcut(event: JavaDocAltShortcutEvent): bool
     && event.shiftKey
     && !event.metaKey
     && !event.ctrlKey
-}
-
-/**
- * CodeMirror wraps a non-empty selection when `(` is typed. Completion can
- * leave the just-typed Java identifier selected, where that behavior turns a
- * method call into `(methodName)`. Collapse only an exact identifier to its
- * end before the normal close-brackets input handler runs.
- */
-export function prepareSelectedJavaIdentifierCall(view: EditorView): boolean {
-  const selection = view.state.selection.main
-  if (view.state.selection.ranges.length !== 1 || selection.empty) {
-    return false
-  }
-  const selected = view.state.sliceDoc(selection.from, selection.to)
-  if (!isJavaIdentifier(selected)) {
-    return false
-  }
-  const identifier = javaIdentifierAt(view.state.doc.toString(), selection.from)
-  if (!identifier || identifier.from !== selection.from || identifier.to !== selection.to) {
-    return false
-  }
-  view.dispatch({ selection: { anchor: selection.to } })
-  return true
-}
-
-/**
- * Handle the input event itself when a browser doesn't expose `(` on the
- * keydown event (keyboard layouts and IMEs can do that). This runs before
- * closeBrackets, so the selected identifier is never handed to its wrapping
- * behavior as the range to replace.
- */
-export function handleJavaIdentifierCallInput(
-  view: EditorView,
-  from: number,
-  to: number,
-  text: string,
-): boolean {
-  if (text !== '(') {
-    return false
-  }
-  const selection = view.state.selection.main
-  if (view.state.selection.ranges.length !== 1) {
-    return false
-  }
-  const source = view.state.doc.toString()
-
-  // A completion can update CodeMirror's selection before WebView updates its
-  // native selection. If that stale range still points at the completed
-  // identifier, insert the call at the current cursor instead of letting the
-  // browser's input change use the old position.
-  if (selection.empty) {
-    if (view.compositionStarted) {
-      return false
-    }
-    const identifier = javaIdentifierAt(source, selection.head)
-    const staleRange = identifier
-      && identifier.to === selection.head
-      && ((from === identifier.from && to === identifier.from)
-        || (from === identifier.from && to === identifier.to))
-    if (!staleRange) {
-      return false
-    }
-    const next = view.state.sliceDoc(selection.head, selection.head + 1)
-    if (next && !/[\s)\]}:;>]/.test(next)) {
-      return false
-    }
-    view.dispatch({
-      changes: { from: selection.head, insert: '()' },
-      selection: { anchor: selection.head + 1 },
-      scrollIntoView: true,
-      userEvent: 'input.type',
-    })
-    return true
-  }
-
-  if (selection.from !== from || selection.to !== to) {
-    return false
-  }
-  const selected = view.state.sliceDoc(selection.from, selection.to)
-  if (!isJavaIdentifier(selected)) {
-    return false
-  }
-  const identifier = javaIdentifierAt(source, selection.from)
-  if (!identifier || identifier.from !== selection.from || identifier.to !== selection.to) {
-    return false
-  }
-
-  // Match closeBrackets' default `before` rule. If another non-whitespace
-  // character follows, leave the insertion to closeBrackets' normal wrapper
-  // behavior rather than changing unrelated selection editing.
-  const next = view.state.sliceDoc(selection.to, selection.to + 1)
-  if (next && !/[\s)\]}:;>]/.test(next)) {
-    return false
-  }
-
-  view.dispatch({
-    changes: { from: selection.to, insert: '()' },
-    selection: { anchor: selection.to + 1 },
-    scrollIntoView: true,
-    userEvent: 'input.type',
-  })
-  return true
-}
-
-/**
- * Handle a printable `(` key before the browser creates an input event.
- *
- * A keymap command can prevent the browser from replaying the same key after
- * dispatching the transaction, which keeps the original selection from being
- * handed to closeBrackets a second time. Returning false deliberately leaves
- * all other selections to the normal close-brackets behavior.
- */
-export function handleJavaIdentifierCallKey(view: EditorView): boolean {
-  const selection = view.state.selection.main
-  if (view.state.selection.ranges.length !== 1 || selection.empty) {
-    return false
-  }
-  return handleJavaIdentifierCallInput(view, selection.from, selection.to, '(')
 }
 
 /** Key names for both an unshifted layout and browsers reporting Shift+9 as `9`. */
