@@ -13,6 +13,8 @@ use crate::security::{
     resolve_new_source_file, PACKAGE_SEGMENTS, SOURCE_ROOT,
 };
 
+mod duplicate;
+
 const REQUIRED_FILES: [&str; 3] = ["build.gradle", "settings.gradle", "gradlew"];
 
 pub(crate) fn validate_project(project_root: &str) -> ProjectValidation {
@@ -238,10 +240,8 @@ pub(crate) fn delete_problem_file(args: ProblemFileArgs) -> Result<(), String> {
 }
 
 /// Duplicate a source file next to the original using the first available
-/// numeric suffix (`Name2.java`, `Name3.java`, ...).  The source's top-level
-/// type name is updated in the copy so a public Java class remains compilable.
-/// Kotlin files are handled in the same way because the repository browser
-/// deliberately includes them when checking name collisions.
+/// numeric suffix (`Name2.java`, `Name3.java`, ...). Java implementations are
+/// cleared while test and helper signatures remain; Kotlin files are copied.
 pub(crate) fn duplicate_problem_file(args: ProblemFileArgs) -> Result<ProblemFileContent, String> {
     let root = canonical_project_root(&args.project_root)?;
     let (source_path, canonical_source) = resolve_existing_source_file(&root, &args.relative_path)?;
@@ -264,6 +264,11 @@ pub(crate) fn duplicate_problem_file(args: ProblemFileArgs) -> Result<ProblemFil
     let permissions = fs::metadata(&canonical_source)
         .map_err(|error| format!("Unable to inspect '{}': {error}", args.relative_path))?
         .permissions();
+    let source_template = if extension.eq_ignore_ascii_case(".java") {
+        duplicate::reset_java_implementation(&source_content)
+    } else {
+        source_content.clone()
+    };
 
     let mut suffix = 2u64;
     loop {
@@ -285,7 +290,7 @@ pub(crate) fn duplicate_problem_file(args: ProblemFileArgs) -> Result<ProblemFil
         // noclobber makes the operation safe if another editor creates the
         // same candidate after that listing.
         let duplicate_content =
-            replace_source_identifiers(&source_content, &source_stem, &candidate_stem);
+            replace_source_identifiers(&source_template, &source_stem, &candidate_stem);
         match write_source_noclobber(
             &candidate_path,
             source_parent,
@@ -1020,12 +1025,15 @@ mod tests {
         assert!(duplicate
             .content
             .contains(&format!("public class {expected_stem}")));
-        assert!(duplicate.content.contains(&format!("{expected_stem}()")));
         assert!(duplicate
             .content
-            .contains(&format!("new {expected_stem}()")));
+            .contains(&format!("{expected_stem}() {{\n    }}")));
+        assert!(duplicate
+            .content
+            .contains("copy() {\n        return null;\n    }"));
         assert!(duplicate.content.contains(&format!("// {stem}")));
-        assert!(duplicate.content.contains(&format!("= \"{stem}\"")));
+        assert!(!duplicate.content.contains("private final String label"));
+        assert_eq!(fs::read_to_string(&source_path).unwrap(), source);
 
         // Duplicating an already suffixed copy continues the same family,
         // rather than producing a surprising `...4...4.java` name.
@@ -1039,6 +1047,78 @@ mod tests {
             format!("{SOURCE_ROOT}/easy/{stem}6.java")
         );
         assert!(second.content.contains(&format!("public class {stem}6")));
+    }
+
+    #[test]
+    fn duplicate_java_keeps_tests_and_creates_a_reset_template() {
+        let directory = fixture();
+        let root = directory.path().to_string_lossy().to_string();
+        let package = directory.path().join(SOURCE_ROOT).join("medium");
+        let base = "Q1162AsFarFromLandAsPossible";
+        fs::write(
+            package.join(format!("{base}.java")),
+            format!("class {base} {{}}\n"),
+        )
+        .unwrap();
+        let source_path = package.join(format!("{base}2.java"));
+        let source = r#"package shane.leetcode.problems.medium;
+
+import io.github.shanepark.Ps;
+import org.junit.jupiter.api.Test;
+
+import java.util.LinkedList;
+import java.util.Queue;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Runtime 15 ms Beats 72.46%
+ * Memory 43.1 MB Beats 85.67%
+ */
+public class Q1162AsFarFromLandAsPossible2 {
+
+    @Test
+    public void test() {
+        assertThat(maxDistance(Ps.intArray("[[1,0,1],[0,0,0],[1,0,1]]"))).isEqualTo(2);
+        assertThat(maxDistance(Ps.intArray("[[1,0,0],[0,0,0],[0,0,0]]"))).isEqualTo(4);
+    }
+
+    int[][] DIRS = new int[][]{{0, -1}, {0, 1}, {1, 0}, {-1, 0}};
+
+    public int maxDistance(int[][] grid) {
+        int width = grid[0].length;
+        int height = grid.length;
+        return Math.max(width, height);
+    }
+
+}
+"#;
+        fs::write(&source_path, source).unwrap();
+
+        let duplicate = duplicate_problem_file(ProblemFileArgs {
+            project_root: root,
+            relative_path: format!("{SOURCE_ROOT}/medium/{base}2.java"),
+        })
+        .unwrap();
+
+        assert_eq!(
+            duplicate.relative_path,
+            format!("{SOURCE_ROOT}/medium/{base}3.java")
+        );
+        assert_eq!(fs::read_to_string(source_path).unwrap(), source);
+        assert!(duplicate.content.contains(&format!("public class {base}3")));
+        assert!(duplicate
+            .content
+            .contains("    @Test\n    public void test() {"));
+        assert!(duplicate.content.contains(
+            "assertThat(maxDistance(Ps.intArray(\"[[1,0,1],[0,0,0],[1,0,1]]\"))).isEqualTo(2);"
+        ));
+        assert!(!duplicate.content.contains("Runtime"));
+        assert!(!duplicate.content.contains("Memory"));
+        assert!(!duplicate.content.contains("DIRS"));
+        assert!(duplicate
+            .content
+            .contains("public int maxDistance(int[][] grid) {\n        return -1;\n    }"));
     }
 
     #[test]

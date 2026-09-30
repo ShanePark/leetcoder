@@ -30,6 +30,10 @@ The frontend and native halves meet at command names, argument shapes, event
 names, and serialized result shapes. Keep that boundary explicit when a
 feature crosses the halves.
 
+`src-tauri/src/repository/duplicate.rs` transforms Java duplicates into fresh
+practice templates while preserving test harnesses and declaration signatures.
+`repository.rs` owns suffix selection, type renaming, and the atomic file write.
+
 `src/app/ps-library-controller.ts` loads Ps method metadata in the background
 for the selected repository and refreshes it after dependency changes.
 `src/app/java-type-members-controller.ts` lazily batches and caches public
