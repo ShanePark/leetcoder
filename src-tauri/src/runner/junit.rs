@@ -449,7 +449,8 @@ pub(crate) fn extract_source_location(text: &str, class_name: &str) -> Option<(S
 }
 
 pub(crate) fn extract_expected_actual(text: &str) -> (Option<String>, Option<String>) {
-    let explicit_expected = extract_label_value(text, "expected:")
+    let explicit_expected = extract_label_value(text, "to contain exactly (and in same order):")
+        .or_else(|| extract_label_value(text, "expected:"))
         .or_else(|| extract_label_value(text, "to be equal to:"));
     let explicit_actual = extract_label_value(text, "actual:");
     let was = extract_label_value(text, "but was:");

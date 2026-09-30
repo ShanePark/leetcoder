@@ -79,6 +79,37 @@ fn parses_assertj_boolean_comparisons_without_matching_arbitrary_prose() {
 }
 
 #[test]
+fn parses_assertj_contains_exactly_expected_and_actual_values() {
+    let xml = r#"
+<testsuites><testsuite name="Q1"><testcase classname="sample.Q1" name="containsExactly">
+  <failure><![CDATA[
+java.lang.AssertionError:
+Expecting actual:
+ [0, 1, 0, 1, 0, 1]
+to contain exactly (and in same order):
+ [0, 1, 1, 1, 1, 0]
+but some elements were not found:
+ [1]
+and others were not expected:
+ [0]
+at sample.Q1.containsExactly(Q1.java:12)
+]]></failure>
+</testcase></testsuite></testsuites>
+"#;
+
+    let parsed = parse_junit_xml(xml).expect("fixture parses");
+    assert_eq!(parsed.tests.len(), 1);
+    assert_eq!(
+        parsed.tests[0].expected.as_deref(),
+        Some("[0, 1, 1, 1, 1, 0]")
+    );
+    assert_eq!(
+        parsed.tests[0].actual.as_deref(),
+        Some("[0, 1, 0, 1, 0, 1]")
+    );
+}
+
+#[test]
 fn parses_per_testcase_output_without_attributing_suite_output() {
     let xml = r#"
 <testsuites>
