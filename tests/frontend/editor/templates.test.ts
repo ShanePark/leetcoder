@@ -26,13 +26,86 @@ import {
   finishJavaIterTemplate,
   finishJavaTemplate,
   javaCompletions,
+  createJavaMemberCompletionSource,
   javaIterTemplateExtension,
   isJavaIterVariableNameField,
 } from '../../../src/completions'
-import { javaIterCompletion } from '../../../src/completions/templates'
+import { javaIterCompletion, isJavaTestNameField } from '../../../src/completions/templates'
 import { runEditorCommand, mutableEditorView, javaState, applyUndo } from './helpers'
 
 describe('Java template Tab command', () => {
+  function testNameHarness() {
+    const source = 'class S {\n    test\n}'
+    const harness = mutableEditorView(EditorState.create({
+      doc: source,
+      extensions: [java(), indentUnit.of('    '), autocompletion({ override: [javaCompletions] })],
+      selection: { anchor: source.indexOf('test') + 'test'.length },
+    }))
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    const name = harness.state().selection.main
+    for (const letter of 'test') {
+      harness.view.dispatch({
+        changes: { from: harness.state().selection.main.head, insert: letter },
+        selection: { anchor: harness.state().selection.main.head + 1 },
+        userEvent: 'input.type',
+      })
+    }
+    expect(harness.state().selection.main.head).toBe(name.from + 'test'.length)
+    return harness
+  }
+
+  it('keeps a typed test method name literal when Enter finishes the template', async () => {
+    const harness = testNameHarness()
+    const state = harness.state()
+    const context = new CompletionContext(state, state.selection.main.head, false)
+    const inspect = vi.fn()
+    expect(isJavaTestNameField(state)).toBe(true)
+    expect(javaCompletions(context)).toBeNull()
+    expect(await createJavaMemberCompletionSource(inspect)(context)).toBeNull()
+    expect(inspect).not.toHaveBeenCalled()
+    const beforeExpansion = EditorState.create({ doc: 'class S { test' })
+    const cached = javaCompletions(new CompletionContext(beforeExpansion, beforeExpansion.doc.length, false))
+    if (typeof cached?.validFor !== 'function') throw new Error('Java completion must validate cached options')
+    expect(cached.validFor('test', context.pos - 'test'.length, context.pos, state)).toBe(false)
+
+    // A stale popup must not replace the declaration name with another template.
+    acceptCompletionMock.mockClear()
+    const before = state.doc.toString()
+    expect(finishJavaTemplate(harness.view)).toBe(true)
+    expect(acceptCompletionMock).not.toHaveBeenCalled()
+    expect(harness.state().doc.toString()).toBe(before)
+    expect(before).toContain('public void test() {')
+    expect(harness.state().selection.main.head).toBe(before.indexOf('assertThat()') + 'assertThat('.length)
+    expect(hasNextSnippetField(harness.state()) || hasPrevSnippetField(harness.state())).toBe(false)
+    expect(isJavaTestNameField(harness.state())).toBe(false)
+  })
+
+  it('allows expression completion after Tab leaves the test method name', () => {
+    const harness = testNameHarness()
+    expect(expandJavaTemplateOnTab(harness.view)).toBe(true)
+    const assertion = harness.state().selection.main.head
+    harness.view.dispatch({
+      changes: { from: assertion, insert: 'test' },
+      selection: { anchor: assertion + 'test'.length },
+      userEvent: 'input.type',
+    })
+    const state = harness.state()
+    expect(isJavaTestNameField(state)).toBe(false)
+    expect(javaCompletions(new CompletionContext(state, state.selection.main.head, false))).not.toBeNull()
+  })
+
+  it('restores completion when the test name snippet is cancelled', () => {
+    const harness = testNameHarness()
+    expect(clearSnippet(harness.view)).toBe(true)
+    const state = harness.state()
+    const result = javaCompletions(new CompletionContext(state, state.selection.main.head, false))
+    expect(isJavaTestNameField(state)).toBe(false)
+    expect(result).not.toBeNull()
+    acceptCompletionMock.mockClear()
+    expect(finishJavaTemplate(harness.view)).toBe(false)
+    expect(acceptCompletionMock).toHaveBeenCalledOnce()
+  })
+
   it('expands test at a class declaration', () => {
     const source = `class S {
     test

@@ -31,6 +31,7 @@ import type { JavaTypeMembersMetadata } from './backend'
 import {
   javaIterCompletions,
   isJavaIterVariableNameField,
+  isJavaTestNameField,
 } from './completions/templates'
 import {
   psLibraryAvailable,
@@ -377,13 +378,13 @@ function javaCompletionValidFor(
   _to: number,
   state: CompletionContext['state'],
 ): boolean {
-  return /^[\w$]*$/.test(text) && !isJavaIterVariableNameField(state)
+  return /^[\w$]*$/.test(text) && !isJavaIterVariableNameField(state) && !isJavaTestNameField(state)
 }
 
 export function javaCompletions(context: CompletionContext): CompletionResult | null {
   const source = context.state.doc.toString()
   const position = context.pos
-  if (isJavaIterVariableNameField(context.state, position)) return null
+  if (isJavaIterVariableNameField(context.state, position) || isJavaTestNameField(context.state, position)) return null
   const dot = findDotContext(source, position)
   const analysis = analyzeJavaSource(source, position)
   const { symbols, methods } = analysis
@@ -426,7 +427,7 @@ export function createJavaMemberCompletionSource(
   return async (context) => {
     const source = context.state.doc.toString()
     const position = context.pos
-    if (isJavaIterVariableNameField(context.state, position)) return null
+    if (isJavaIterVariableNameField(context.state, position) || isJavaTestNameField(context.state, position)) return null
     const dot = findDotContext(source, position)
     if (!dot) return javaCompletions(context)
 

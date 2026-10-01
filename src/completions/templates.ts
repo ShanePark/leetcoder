@@ -210,6 +210,41 @@ function applyJavaTestTemplate(
     }
   }
   snippet(JAVA_TEST_TEMPLATE_BODY)(view, completion, from, to)
+  const name = view.state.selection.main
+  const effects: StateEffect<unknown>[] = [setJavaTestNameField.of({ from: name.from, to: name.to })]
+  if (view.state.field(javaTestNameField, false) === undefined) {
+    effects.unshift(StateEffect.appendConfig.of(javaTestNameField))
+  }
+  view.dispatch({ effects })
+}
+
+const setJavaTestNameField = StateEffect.define<{ from: number, to: number }>()
+
+const javaTestNameField = StateField.define<{ from: number, to: number } | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setJavaTestNameField)) return effect.value
+    }
+    if (!value) return null
+    const mapped = tr.docChanged ? mapIterTemplateRange(value.from, value.to, tr.changes) : value
+    if (!mapped || (tr.selection && !tr.newSelection.ranges.every(
+      (range) => range.from >= mapped.from && range.to <= mapped.to,
+    ))) return null
+    return mapped
+  },
+})
+
+/** Whether the active test template is editing its method declaration name. */
+export function isJavaTestNameField(state: EditorState, position = state.selection.main.head): boolean {
+  const name = state.field(javaTestNameField, false)
+  return !!name
+    && hasNextSnippetField(state)
+    && state.selection.ranges.length === 1
+    && state.selection.main.from >= name.from
+    && state.selection.main.to <= name.to
+    && position >= name.from
+    && position <= name.to
 }
 
 /** Completion entry for the JUnit test live template. */
@@ -457,6 +492,10 @@ function isJavaIterCompletion(completion: Completion | null): boolean {
 }
 
 export function finishJavaTemplate(view: EditorView): boolean {
+  if (isJavaTestNameField(view.state)) {
+    closeCompletion(view)
+    return finishActiveJavaTemplate(view)
+  }
   const iterSessionBeforeAccept = view.state.field(javaIterTemplateState, false)
   const hadActiveSnippetBeforeAccept = hasNextSnippetField(view.state) || hasPrevSnippetField(view.state)
   if (iterSessionBeforeAccept
