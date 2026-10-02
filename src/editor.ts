@@ -43,6 +43,7 @@ import {
   highlightSpecialChars,
   keymap,
   lineNumbers,
+  tooltips,
 } from '@codemirror/view'
 import {
   createJavaMemberCompletionSource,
@@ -717,6 +718,8 @@ export class JavaEditor {
           activateOnTyping: true,
           maxRenderedOptions: 24,
         }),
+        // Keep tooltips outside the panes that clip the editor's contents.
+        tooltips({ parent: parent.ownerDocument.body }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             callbacks.onChange?.(update.state.doc.toString())

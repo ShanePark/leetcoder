@@ -136,6 +136,7 @@ export const leetcoderTheme = EditorView.theme({
     boxShadow: 'inset 0 0 0 1px var(--text)',
   },
   '.cm-tooltip': {
+    zIndex: '40',
     backgroundColor: editorPalette.surface,
     color: editorPalette.text,
     border: '1px solid var(--border-strong)',

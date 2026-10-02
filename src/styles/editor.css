@@ -267,7 +267,7 @@
   text-underline-offset: 2px;
 }
 
-.editor .cm-tooltip.cm-diagnostic-tooltip {
+.cm-tooltip.cm-diagnostic-tooltip {
   box-sizing: border-box;
   width: max-content;
   max-width: min(420px, calc(100vw - 24px));
@@ -280,7 +280,7 @@
   white-space: pre-wrap;
 }
 
-.editor .cm-diagnostic-tooltip-message {
+.cm-diagnostic-tooltip-message {
   display: block;
   color: var(--text);
   font-size: 12px;
