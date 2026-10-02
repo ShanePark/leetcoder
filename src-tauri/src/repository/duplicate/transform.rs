@@ -1,6 +1,8 @@
 use super::edits::{apply_edits, line_indent, newline_before, remove_performance_comments, Edit};
 use super::lexer::{token_is, token_text, tokenize, Token};
-use super::references::collect_harness_identifiers;
+use super::references::{
+    collect_harness_identifiers, collect_retained_member_methods, HarnessReferences,
+};
 use super::syntax::{
     enum_separator, find_member_end, is_type_keyword, method_stub, type_body, MemberKind,
 };
@@ -26,7 +28,7 @@ pub(super) fn reset_java_implementation(source: &str) -> String {
         index = close + 1;
     }
 
-    let mut harness_identifiers = std::collections::HashSet::new();
+    let mut harness_references = HarnessReferences::default();
     for (open, close, name, is_enum) in &roots {
         collect_harness_identifiers(
             &source,
@@ -35,7 +37,19 @@ pub(super) fn reset_java_implementation(source: &str) -> String {
             *close,
             token_text(&source, *name),
             *is_enum,
-            &mut harness_identifiers,
+            &mut harness_references,
+        );
+    }
+
+    for (open, close, name, is_enum) in &roots {
+        collect_retained_member_methods(
+            &source,
+            &tokens,
+            *open,
+            *close,
+            token_text(&source, *name),
+            *is_enum,
+            &mut harness_references,
         );
     }
 
@@ -48,7 +62,7 @@ pub(super) fn reset_java_implementation(source: &str) -> String {
             close,
             token_text(&source, name),
             is_enum,
-            &harness_identifiers,
+            &harness_references,
             &mut edits,
         );
     }
@@ -63,7 +77,7 @@ fn process_type_body(
     close: usize,
     type_name: &str,
     is_enum: bool,
-    harness_identifiers: &std::collections::HashSet<String>,
+    harness_references: &HarnessReferences,
     edits: &mut Vec<Edit>,
 ) {
     let mut index = open + 1;
@@ -85,7 +99,25 @@ fn process_type_body(
         };
         let member_end = tokens[member.end - 1].end;
 
+        // Without a harness, or with annotation-selected providers, body references
+        // cannot reliably identify every required private method.
         match member.kind {
+            MemberKind::Method { header, .. }
+                if harness_references.has_harness
+                    && !harness_references.has_method_source
+                    && header.is_private
+                    && !header.is_constructor
+                    && !header.keep_body
+                    && !harness_references
+                        .methods
+                        .contains(token_text(source, header.name)) =>
+            {
+                edits.push(Edit {
+                    start: cursor,
+                    end: member_end,
+                    replacement: String::new(),
+                });
+            }
             MemberKind::Method {
                 header,
                 body: Some((_, _)),
@@ -121,14 +153,14 @@ fn process_type_body(
                 nested_close,
                 token_text(source, nested_name),
                 nested_enum,
-                harness_identifiers,
+                harness_references,
                 edits,
             ),
             MemberKind::Method { body: None, .. } => {}
             MemberKind::Remove { field_names } => {
                 if field_names
                     .iter()
-                    .all(|field| !harness_identifiers.contains(field))
+                    .all(|field| !harness_references.identifiers.contains(field))
                 {
                     edits.push(Edit {
                         start: cursor,

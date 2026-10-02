@@ -4,8 +4,11 @@ use super::lexer::{
 
 #[derive(Clone, Copy)]
 pub(super) struct MethodHeader {
+    pub(super) name: Token,
+    pub(super) is_private: bool,
     pub(super) is_constructor: bool,
     pub(super) keep_body: bool,
+    pub(super) has_method_source: bool,
     return_type: ReturnType,
 }
 
@@ -321,8 +324,11 @@ fn method_header(
         keep_body = true;
     }
     Some(MethodHeader {
+        name: tokens[name],
+        is_private: has_modifier(source, tokens, start, name, "private"),
         is_constructor,
         keep_body,
+        has_method_source: annotations.contains(&"MethodSource"),
         return_type,
     })
 }

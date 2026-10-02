@@ -176,3 +176,67 @@ public class Q1162AsFarFromLandAsPossible2 {
         .content
         .contains("public int maxDistance(int[][] grid) {\n        return -1;\n    }"));
 }
+
+#[test]
+fn duplicate_generate_parentheses_removes_private_implementation_helper() {
+    let directory = fixture();
+    let root = directory.path().to_string_lossy().to_string();
+    let package = directory.path().join(SOURCE_ROOT).join("medium");
+    let source_path = package.join("Q22GenerateParentheses.java");
+    let source = r#"package shane.leetcode.problems.medium;
+
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+public class Q22GenerateParentheses {
+    @Test
+    void test() {
+        Assertions.assertThat(generateParenthesis(3)).contains("((()))", "(()())", "(())()", "()(())", "()()()");
+        Assertions.assertThat(generateParenthesis(1)).contains("()");
+    }
+    public List<String> generateParenthesis(int n) {
+        Set<String> set = new HashSet<>();
+        set.add("()");
+        for (int i = 1; i < n; i++) {
+            set = make(set);
+        }
+        return set.stream().collect(Collectors.toList());
+    }
+    private Set<String> make(Set<String> set) {
+        Set<String> temp = new HashSet<>();
+        for (String s : set) {
+            for (int i = 0; i < s.length(); i++) {
+                temp.add(s.substring(0, i) + "()" + s.substring(i, s.length()));
+            }
+        }
+        return temp;
+    }
+}
+"#;
+    fs::write(&source_path, source).unwrap();
+    let duplicate = duplicate_problem_file(ProblemFileArgs {
+        project_root: root,
+        relative_path: format!("{SOURCE_ROOT}/medium/Q22GenerateParentheses.java"),
+    })
+    .unwrap();
+    assert!(duplicate
+        .content
+        .contains("public class Q22GenerateParentheses2"));
+    assert!(duplicate
+        .content
+        .contains("public List<String> generateParenthesis(int n) {\n        return null;\n    }"));
+    assert!(duplicate
+        .content
+        .contains("Assertions.assertThat(generateParenthesis(1)).contains(\"()\");"));
+    assert!(!duplicate.content.contains("private Set<String> make"));
+    assert_eq!(fs::read_to_string(source_path).unwrap(), source);
+    assert_eq!(
+        duplicate.content,
+        fs::read_to_string(directory.path().join(&duplicate.relative_path)).unwrap()
+    );
+}

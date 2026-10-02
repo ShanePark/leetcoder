@@ -37,7 +37,7 @@ class Q1 {
     assert!(result.contains("import org.junit.jupiter.api.Test;"));
     assert!(result.contains("void test() {"));
     assert!(result.contains("public int solve(String input) {\n        return -1;\n    }"));
-    assert!(result.contains("private void helper() {\n    }"));
+    assert!(!result.contains("private void helper()"));
     assert!(result.contains("Nested(int value) {\n        }"));
     assert!(result.contains("public boolean check() {\n            return false;\n        }"));
     assert!(result.contains("public String text() {\n            return null;\n        }"));
@@ -66,8 +66,8 @@ class Q2 { public static void main(String[] args) { System.out.println("ok"); }
     assert!(
         result.contains("public static void main(String[] args) { System.out.println(\"ok\"); }")
     );
-    assert!(result.contains("private char marker() {\n        return '\\0';\n    }"));
-    assert!(result.contains("private long total() {\n        return -1;\n    }"));
+    assert!(!result.contains("private char marker()"));
+    assert!(!result.contains("private long total()"));
 }
 
 #[test]
@@ -210,4 +210,100 @@ class Q6 {
     assert!(result
         .contains("public static void main(String[] args) { System.out.println(\"try again\"); }"));
     assert!(result.contains("int solve() {\n        return -1;\n    }"));
+}
+
+#[test]
+fn removes_private_implementation_helpers_but_keeps_harness_references() {
+    let source = r#"class Q22 {
+    private Q22() { initialize(); }
+    @org.junit.jupiter.api.BeforeEach
+    private void setup() { fixture(); }
+    @org.junit.jupiter.params.ParameterizedTest
+    void test() {
+        assertThat(generateParenthesis(3)).contains("((()))");
+        this.direct();
+        java.util.function.Supplier<String> supplier = this::referenced;
+    }
+    public java.util.List<String> generateParenthesis(int n) { return make(n); }
+    private java.util.List<String> make(int n) { return null; }
+    private void initialize() {}
+    private void fixture() {}
+    private void direct() {}
+    private String referenced() { return "value"; }
+    int packageApi() { return 1; }
+    protected boolean protectedApi() { return true; }
+}
+"#;
+    let result = reset_java_implementation(source);
+    assert!(result.contains("private Q22() {\n    }"));
+    assert!(result.contains("private void setup() { fixture(); }"));
+    assert!(result.contains(
+        "public java.util.List<String> generateParenthesis(int n) {\n        return null;\n    }"
+    ));
+    assert!(!result.contains("private java.util.List<String> make"));
+    assert!(!result.contains("private void initialize"));
+    assert!(result.contains("private void fixture() {\n    }"));
+    assert!(result.contains("private void direct() {\n    }"));
+    assert!(result.contains("private String referenced() {\n        return null;\n    }"));
+    assert!(result.contains("int packageApi() {\n        return -1;\n    }"));
+    assert!(result.contains("protected boolean protectedApi() {\n        return false;\n    }"));
+    assert!(result.contains("this.direct();"));
+    assert!(result.contains("this::referenced;"));
+}
+
+#[test]
+fn preserves_private_signatures_when_no_harness_identifies_the_entry_point() {
+    let source = "class Q { private int solve() { return helper(); } private int helper() { return 1; } private char marker() { return 'x'; } private long total() { return 3; } }";
+    let result = reset_java_implementation(source);
+    assert!(result.contains("private int solve() {\n    return -1;\n}"));
+    assert!(result.contains("private int helper() {\n    return -1;\n}"));
+    assert!(result.contains("private char marker() {\n    return '\\0';\n}"));
+    assert!(result.contains("private long total() {\n    return -1;\n}"));
+}
+
+#[test]
+fn keeps_private_methods_referenced_by_retained_fields_enum_constants_and_generic_references() {
+    let source = r#"class Q {
+    private int expected = makeExpected();
+    private int unused = implementationOnly();
+    @Test void test() {
+        assertEquals(expected, solve());
+        java.util.function.Supplier<String> supplier = this::<String>generic;
+    }
+    public int solve() { return implementationOnly(); }
+    private int makeExpected() { return 1; }
+    private int implementationOnly() { return 2; }
+    private <T> T generic() { return null; }
+    enum State {
+        READY(code());
+        State(int code) {}
+        private static int code() { return 1; }
+    }
+}
+"#;
+    let result = reset_java_implementation(source);
+    assert!(result.contains("private int expected = makeExpected();"));
+    assert!(result.contains("private int makeExpected() {\n        return -1;\n    }"));
+    assert!(result.contains("private <T> T generic() {\n        return null;\n    }"));
+    assert!(result.contains("this::<String>generic;"));
+    assert!(result.contains("READY(code());"));
+    assert!(result.contains("private static int code() {\n            return -1;\n        }"));
+    assert!(!result.contains("private int unused"));
+    assert!(!result.contains("private int implementationOnly"));
+}
+
+#[test]
+fn preserves_private_signatures_for_annotation_selected_method_sources() {
+    let source = r#"class Q {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("arguments")
+    void test(int value) { assertEquals(value, solve()); }
+    private static java.util.stream.Stream<Integer> arguments() { return null; }
+    private int solve() { return 1; }
+}
+"#;
+    let result = reset_java_implementation(source);
+    assert!(result.contains("private static java.util.stream.Stream<Integer> arguments() {\n        return null;\n    }"));
+    assert!(result.contains("private int solve() {\n        return -1;\n    }"));
+    assert!(result.contains("void test(int value) { assertEquals(value, solve()); }"));
 }
