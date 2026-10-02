@@ -12,7 +12,8 @@ mod security;
 mod update;
 mod watcher;
 
-use tauri_plugin_window_state::{Builder as WindowStateBuilder, StateFlags};
+use tauri::{Manager, WindowEvent};
+use tauri_plugin_window_state::{AppHandleExt, Builder as WindowStateBuilder, StateFlags};
 
 /// Starts the desktop application.
 ///
@@ -29,6 +30,23 @@ pub fn run() {
                 .build(),
         )
         .manage(watcher::RepositoryWatcher::default())
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                // The updater can terminate the process without a normal exit event.
+                // Register after the plugin has restored the initial window geometry.
+                window.on_window_event(move |event| {
+                    if matches!(event, WindowEvent::Resized(_) | WindowEvent::Moved(_)) {
+                        if let Err(error) =
+                            handle.save_window_state(StateFlags::SIZE | StateFlags::POSITION)
+                        {
+                            eprintln!("Could not save window geometry: {error}");
+                        }
+                    }
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::choose_repository,
             commands::validate_project,
