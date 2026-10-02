@@ -181,9 +181,12 @@ public class LeetcoderJavaTypeMembers {
         List<FieldMetadata> fields = new ArrayList<>();
         try {
             Class<?> type = loadType(requested, loader);
-            for (Method method : type.getMethods()) {
+            Method[] publicMethods = type.getMethods();
+            for (Method method : publicMethods) {
                 int modifiers = method.getModifiers();
-                if (!Modifier.isPublic(modifiers) || method.isBridge() || method.isSynthetic()) {
+                if (!Modifier.isPublic(modifiers)
+                        || ((method.isBridge() || method.isSynthetic())
+                            && !isVisibilityBridge(method, publicMethods))) {
                     continue;
                 }
                 Type[] genericTypes = method.getGenericParameterTypes();
@@ -215,6 +218,35 @@ public class LeetcoderJavaTypeMembers {
         methods.sort(Comparator.comparing(MethodMetadata::sortKey));
         fields.sort(Comparator.comparing(FieldMetadata::sortKey));
         return new TypeMetadata(requested, true, methods, fields);
+    }
+
+    private static boolean isVisibilityBridge(Method method, Method[] publicMethods) {
+        if (!method.isBridge()) return false;
+        for (Method candidate : publicMethods) {
+            if (!candidate.isBridge() && !candidate.isSynthetic()
+                    && candidate.getName().equals(method.getName())
+                    && Arrays.equals(candidate.getParameterTypes(), method.getParameterTypes())) {
+                return false;
+            }
+        }
+        // A public subclass can expose inherited methods from a package-private
+        // superclass through synthetic bridges, including StringBuilder.length().
+        for (Class<?> parent = method.getDeclaringClass().getSuperclass();
+                parent != null; parent = parent.getSuperclass()) {
+            if (Modifier.isPublic(parent.getModifiers())) continue;
+            try {
+                Method inherited = parent.getDeclaredMethod(
+                        method.getName(), method.getParameterTypes());
+                if (Modifier.isPublic(inherited.getModifiers())
+                        && !inherited.isBridge() && !inherited.isSynthetic()
+                        && inherited.getReturnType() == method.getReturnType()) {
+                    return true;
+                }
+            } catch (NoSuchMethodException absent) {
+                // The declaration may belong to an earlier superclass.
+            }
+        }
+        return false;
     }
 
     private static Class<?> loadType(String name, ClassLoader loader)

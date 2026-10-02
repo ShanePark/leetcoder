@@ -136,6 +136,57 @@ fn reflects_jdk_stack_methods_without_gradle_and_reuses_cached_metadata() {
 }
 
 #[test]
+fn reflects_string_builder_visibility_bridges_without_generic_bridge_duplicates() {
+    let java = crate::runner::discover_metadata_java().expect("metadata JDK");
+    let members = inspect_type_members_on_classpath(
+        &java.home,
+        &[],
+        &["java.lang.StringBuilder".to_string()],
+    )
+    .expect("StringBuilder metadata");
+    let builder = members.first().expect("StringBuilder result");
+    assert!(builder.available);
+    for (name, return_type, parameter_count) in [
+        ("length", "int", 0),
+        ("capacity", "int", 0),
+        ("charAt", "char", 1),
+        ("setLength", "void", 1),
+        ("substring", "java.lang.String", 1),
+    ] {
+        assert!(
+            builder.methods.iter().any(|method| {
+                method.name == name
+                    && method.return_type == return_type
+                    && method.parameters.len() == parameter_count
+                    && !method.is_static
+            }),
+            "missing inherited StringBuilder method {name}"
+        );
+    }
+    let append_string = builder
+        .methods
+        .iter()
+        .filter(|method| {
+            method.name == "append"
+                && method.parameters.len() == 1
+                && method.parameters[0].type_name == "java.lang.String"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(append_string.len(), 1);
+    assert_eq!(append_string[0].return_type, "java.lang.StringBuilder");
+    let compare_to = builder
+        .methods
+        .iter()
+        .filter(|method| method.name == "compareTo")
+        .collect::<Vec<_>>();
+    assert_eq!(compare_to.len(), 1);
+    assert_eq!(
+        compare_to[0].parameters[0].type_name,
+        "java.lang.StringBuilder"
+    );
+}
+
+#[test]
 fn reflects_public_inherited_generic_members_without_initializing_classes() {
     let java = crate::runner::discover_metadata_java().expect("metadata JDK");
     let workspace = tempfile::tempdir().expect("fixture workspace");
