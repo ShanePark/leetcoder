@@ -1,4 +1,5 @@
 import { javaLanguage } from '@codemirror/lang-java'
+import { addMethodParameterIntention } from './add-parameter'
 import {
   classNameForBody,
   collectDeclarations,
@@ -75,9 +76,17 @@ export function planJavaMethodCreation(source: string, position: number): JavaMe
   return planForInvocation(source, invocation, methods, declarations)
 }
 
-/** Return the currently applicable actions, with create-method first. */
+/** Return the currently applicable local method action. */
 export function javaIntentionsAt(source: string, position: number): JavaIntention[] {
-  const plan = planJavaMethodCreation(source, position)
+  if (!source || position < 0 || position > source.length) return []
+  const root = javaLanguage.parser.parse(source).topNode
+  const methods = collectMethods(source, root)
+  const invocation = invocationAt(source, root, methods, position)
+  if (!invocation) return []
+  const declarations = collectDeclarations(source, root, methods)
+  const parameterIntention = addMethodParameterIntention(source, invocation, methods, declarations)
+  if (parameterIntention) return [parameterIntention]
+  const plan = planForInvocation(source, invocation, methods, declarations)
   if (!plan) return []
   return [{
     id: 'create-method',

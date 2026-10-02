@@ -29,7 +29,7 @@ export interface JavaMethodCreationPlan {
 }
 
 export interface JavaIntention {
-  id: 'create-method'
+  id: 'create-method' | 'add-method-parameter'
   label: string
   detail: string
   plan: JavaMethodCreationPlan
