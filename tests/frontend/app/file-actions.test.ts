@@ -187,4 +187,28 @@ describe('daily problem file matching', () => {
     })).toBe(files[1])
     expect(findTodayProblemFile(files, { frontendId: '2', title: 'Add Two Numbers' })).toBeNull()
   })
+
+  it('opens the highest numeric suffix regardless of list order, before the base file', () => {
+    const base = files[0]
+    const variants = [10, 2, 9].map((suffix) => ({
+      ...base,
+      path: base.path.replace('.java', `${suffix}.java`),
+      name: base.name.replace('.java', `${suffix}.java`),
+    }))
+    const problem = { frontendId: '1', title: 'Two Sum' }
+    expect(findTodayProblemFile([base, variants[1], variants[2], variants[0]], problem)).toBe(variants[0])
+    expect(findTodayProblemFile([variants[0], base, variants[2], variants[1]], problem)).toBe(variants[0])
+    expect(findTodayProblemFile(variants, problem)).toBe(variants[0])
+    expect(findTodayProblemFile([base], problem)).toBe(base)
+  })
+
+  it('ignores nonnumeric variants and non-Java files with larger suffixes', () => {
+    const base = files[0]
+    const excluded = [
+      { ...base, path: base.path.replace('.java', 'Copy.java'), name: base.name.replace('.java', 'Copy.java') },
+      { ...base, path: base.path.replace('.java', '100.md'), name: base.name.replace('.java', '100.java') },
+      { ...base, path: base.path.replace('.java', '100.java'), name: base.name.replace('.java', '100.md') },
+    ]
+    expect(findTodayProblemFile([...excluded, base], { frontendId: '1', title: 'Two Sum' })).toBe(base)
+  })
 })

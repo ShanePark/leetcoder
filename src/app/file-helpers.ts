@@ -26,7 +26,8 @@ export function filterProblemFilesByGroup(
 /**
  * Find the sidebar entry that already solves today's problem: the class name
  * must be the problem's base class name or the base name plus a numeric
- * collision suffix (the repository convention for repeat solves).
+ * collision suffix (the repository convention for repeat solves). Prefer the
+ * highest suffix so the latest repeat solve opens before the original.
  */
 export function findTodayProblemFile(
   files: ProblemFileEntry[],
@@ -39,9 +40,24 @@ export function findTodayProblemFile(
     return null
   }
   const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const pattern = new RegExp(`^${escaped}\\d*$`)
-  return files.find((file) => /\.java$/i.test(file.path)
-    && pattern.test(file.name.replace(/\.java$/i, ''))) ?? null
+  const pattern = new RegExp(`^${escaped}(\\d*)$`)
+  let selected: ProblemFileEntry | null = null
+  let highestSuffix = -1
+  for (const file of files) {
+    if (!/\.java$/i.test(file.path)) {
+      continue
+    }
+    const match = pattern.exec(file.name.replace(/\.java$/i, ''))
+    if (!match) {
+      continue
+    }
+    const suffix = Number(match[1])
+    if (suffix > highestSuffix) {
+      selected = file
+      highestSuffix = suffix
+    }
+  }
+  return selected
 }
 
 /** Return a safe Java basename, adding `.java` when the user omits it. */
