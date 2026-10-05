@@ -2,6 +2,9 @@ import { java } from '@codemirror/lang-java'
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
 import { EditorSelection, EditorState, type SelectionRange } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
+import { planJavaVariableRename } from './variable-rename'
+
+export { planJavaVariableRename } from './variable-rename'
 
 export interface JavaMethodRenameRange {
   from: number
@@ -471,6 +474,35 @@ export function renameJavaMethod(
     selection: EditorSelection.create(ranges, mainIndex),
     scrollIntoView: true,
     userEvent: 'select.renameMethod',
+  })
+  return true
+}
+
+/** Select a method or lexical variable declaration and its references. */
+export function renameJavaSymbol(view: EditorView, onError?: (message: string) => void): boolean {
+  const { state } = view
+  if (state.selection.ranges.length !== 1) {
+    onError?.('Place the cursor on a method or variable declaration or reference.')
+    return true
+  }
+  const position = state.selection.main.head
+  const method = planJavaMethodRename(state, position)
+  if (!('reason' in method) || method.reason !== CURSOR_ERROR) {
+    return renameJavaMethod(view, onError)
+  }
+  const result = planJavaVariableRename(state, position)
+  if ('reason' in result) {
+    onError?.(result.reason)
+    return true
+  }
+  view.dispatch({
+    selection: EditorSelection.create(result.ranges.map((range) => (
+      EditorSelection.range(range.from, range.to)
+    )), Math.max(0, result.ranges.findIndex((range) => (
+      range.from <= position && position <= range.to
+    )))),
+    scrollIntoView: true,
+    userEvent: 'select.renameVariable',
   })
   return true
 }

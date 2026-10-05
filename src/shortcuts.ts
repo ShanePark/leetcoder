@@ -63,7 +63,7 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
       { id: 'reformat', bindings: ['Mod-Alt-l'], description: 'Reformat code' },
       { id: 'introduce-variable', bindings: ['Mod-Alt-v'], description: 'Introduce variable' },
       { id: 'extract-method', bindings: ['Mod-Alt-m'], description: 'Extract method' },
-      { id: 'rename-method', bindings: ['Shift-F6'], description: 'Rename method' },
+      { id: 'rename-method', bindings: ['Shift-F6'], description: 'Rename symbol' },
       { id: 'expand-template', bindings: ['Tab'], description: 'Expand live template / next template field' },
       { id: 'finish-template', bindings: ['Enter'], description: 'Finish live template' },
     ],

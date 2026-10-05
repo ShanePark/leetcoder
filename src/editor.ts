@@ -107,7 +107,7 @@ import {
   pasteJavaClipboard,
 } from './editor/paste'
 import {
-  renameJavaMethod,
+  renameJavaSymbol,
 } from './editor/rename'
 import {
   definitionHover,
@@ -463,7 +463,7 @@ export class JavaEditor {
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const cut = (view: EditorView): boolean => cutSelectionOrLine(view, clipboard)
     const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
-    const renameMethod = (view: EditorView): boolean => renameJavaMethod(view, callbacks.onRefactorError)
+    const renameSymbol = (view: EditorView): boolean => renameJavaSymbol(view, callbacks.onRefactorError)
     const showIntentions = (view: EditorView): boolean => showJavaIntentions(view)
     const showShortcuts = (): boolean => {
       callbacks.onShowShortcuts?.()
@@ -687,7 +687,7 @@ export class JavaEditor {
           ...commandBindings(moveLineDownShortcuts, moveLineDown),
           ...commandBindings(introduceVariableShortcuts, introduceJavaVariable),
           ...commandBindings(extractMethodShortcuts, extractMethod),
-          ...commandBindings(renameMethodShortcuts, renameMethod),
+          ...commandBindings(renameMethodShortcuts, renameSymbol),
           // Familiar line-editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while
           // preserving the document's configured line separator.
