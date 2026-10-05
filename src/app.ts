@@ -396,6 +396,7 @@ export class LeetcoderApp {
     })
     this.javaTypeMembersController = new JavaTypeMembersController({ backend: this.backend })
     this.editor = new JavaEditor(this.element('#editor'), {
+      storage: this.storage,
       // JavaEditor may emit a bootstrap change while it is being constructed;
       // the document controller is wired immediately afterwards.
       onChange: (source) => this.documentController?.onEditorChange(source),

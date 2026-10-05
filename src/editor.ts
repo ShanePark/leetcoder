@@ -53,6 +53,7 @@ import {
   maskJavaCommentsAndLiterals,
 } from './completions'
 import type { JavaTypeMembersMetadata } from './backend'
+import { createEditorFontSizeControls } from './editor/font-size'
 import {
   psLibraryExtension,
   readPsLibraryMetadata,
@@ -184,6 +185,7 @@ export type { EditorIssue } from './editor/gutters'
 export { buildTestRunMarkers } from './editor/gutters'
 
 export interface EditorCallbacks {
+  storage?: Storage
   onChange?: (source: string) => void
   onSave?: () => boolean | void
   onRun?: () => boolean | void
@@ -228,6 +230,21 @@ export function isJavaDocAltShortcut(event: JavaDocAltShortcutEvent): boolean {
     && event.altKey
     && !event.metaKey
     && !event.ctrlKey
+}
+
+/** Match shifted punctuation by physical key, including composed Option glyphs. */
+export function isFontSizeShortcut(event: JavaDocAltShortcutEvent, code: 'Equal' | 'Minus', macPlatform: boolean): boolean {
+  return event.code === code && event.shiftKey
+    && Number(event.metaKey) + Number(event.ctrlKey) + Number(event.altKey) === 1
+    && (event.altKey || (macPlatform ? event.metaKey : event.ctrlKey))
+}
+
+export function isIncreaseFontSizeAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.altKey && isFontSizeShortcut(event, 'Equal', false)
+}
+
+export function isDecreaseFontSizeAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.altKey && isFontSizeShortcut(event, 'Minus', false)
 }
 
 /** Match the Option+D form, including macOS layouts that report a typed glyph. */
@@ -422,6 +439,7 @@ export class JavaEditor {
 
   constructor(parent: HTMLElement, callbacks: EditorCallbacks = {}) {
     const macPlatform = isMacPlatform()
+    const fontSize = createEditorFontSizeControls(macPlatform, callbacks.storage)
     const save = () => callbacks.onSave?.() !== false
     const run = () => callbacks.onRun?.() !== false
     const runTestAtCursor = (view: EditorView): boolean => {
@@ -547,6 +565,10 @@ export class JavaEditor {
       (event: JavaDocAltShortcutEvent) => boolean,
       (view: EditorView) => boolean,
     ]> = [
+      [isIncreaseFontSizeAltShortcut, fontSize.increase],
+      [isDecreaseFontSizeAltShortcut, fontSize.decrease],
+      [(event) => !event.altKey && isFontSizeShortcut(event, 'Equal', macPlatform), fontSize.increase],
+      [(event) => !event.altKey && isFontSizeShortcut(event, 'Minus', macPlatform), fontSize.decrease],
       ...(!macPlatform ? [
         [isJavaDocAltShortcut, insertJavaDoc],
         [isLineDuplicateAltShortcut, copyLineDown],
@@ -584,6 +606,7 @@ export class JavaEditor {
       doc: '',
       extensions: [
         leetcoderTheme,
+        fontSize.extension,
         syntaxHighlighting(leetcoderHighlight),
         java(),
         javaIterTemplateExtension,
@@ -675,6 +698,8 @@ export class JavaEditor {
           indentWithTab,
         ]),
         Prec.high(keymap.of([
+          ...commandBindings(shortcutBindings('increase-editor-font-size'), fontSize.increase),
+          ...commandBindings(shortcutBindings('decrease-editor-font-size'), fontSize.decrease),
           ...commandBindings(bindings('expand-template'), expandJavaTemplateOnTab, false),
           // Run chords intentionally use Ctrl on both macOS and Linux.
           ...commandBindings(saveShortcuts, save),

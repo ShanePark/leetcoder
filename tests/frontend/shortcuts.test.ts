@@ -17,6 +17,14 @@ import {
 } from '../../src/shortcuts'
 
 describe('shortcut formatting', () => {
+  it('declares and displays shifted font-size punctuation including a minus key', () => {
+    expect(shortcutBindings('increase-editor-font-size')).toEqual(['Shift-Mod-=', 'Shift-Alt-='])
+    expect(shortcutBindings('decrease-editor-font-size')).toEqual(['Shift-Mod--', 'Shift-Alt--'])
+    expect(shortcutLabel('increase-editor-font-size', true)).toBe('⇧⌘=')
+    expect(shortcutLabel('decrease-editor-font-size', true)).toBe('⇧⌘-')
+    expect(shortcutLabel('increase-editor-font-size', false)).toBe('Alt+Shift+=')
+    expect(shortcutLabel('decrease-editor-font-size', false)).toBe('Alt+Shift+-')
+  })
   it('uses stacked glyphs on macOS and named modifiers elsewhere', () => {
     expect(formatShortcut('Shift-Mod-r', true)).toBe('⇧⌘R')
     expect(formatShortcut('Shift-Mod-r', false)).toBe('Ctrl+Shift+R')

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  isFontSizeShortcut,
+  isIncreaseFontSizeAltShortcut,
+  isDecreaseFontSizeAltShortcut,
   isCopyAltShortcut,
   isExtractMethodShortcut,
   isFileSearchAltShortcut,
@@ -21,6 +24,20 @@ import {
 
 describe('Option shortcut matchers', () => {
   const base = { shiftKey: false, altKey: true, metaKey: false, ctrlKey: false }
+
+  it('matches font controls on shifted physical punctuation without accepting extra modifiers', () => {
+    expect(isIncreaseFontSizeAltShortcut({ ...base, code: 'Equal', shiftKey: true })).toBe(true)
+    expect(isDecreaseFontSizeAltShortcut({ ...base, code: 'Minus', shiftKey: true })).toBe(true)
+    for (const modifier of ['metaKey', 'ctrlKey', 'altKey'] as const) {
+      const event = { code: 'Equal', shiftKey: true, altKey: false, metaKey: false, ctrlKey: false, [modifier]: true }
+      const mac = modifier === 'metaKey'
+      expect(isFontSizeShortcut(event, 'Equal', mac)).toBe(true)
+      expect(isFontSizeShortcut({ ...event, shiftKey: false }, 'Equal', mac)).toBe(false)
+      expect(isFontSizeShortcut({ ...event, code: 'Minus' }, 'Equal', mac)).toBe(false)
+      if (modifier !== 'altKey') expect(isFontSizeShortcut(event, 'Equal', !mac)).toBe(false)
+    }
+    expect(isIncreaseFontSizeAltShortcut({ ...base, code: 'Equal', shiftKey: true, metaKey: true })).toBe(false)
+  })
 
   it('matches the clipboard, comment, save, settings, and shortcut-list forms on their physical keys', () => {
     expect(isLineCutAltShortcut({ ...base, code: 'KeyX' })).toBe(true)

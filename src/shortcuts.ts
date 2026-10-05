@@ -45,6 +45,8 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
   {
     title: 'Editing',
     entries: [
+      { id: 'increase-editor-font-size', bindings: ['Shift-Mod-=', 'Shift-Alt-='], description: 'Increase editor font size' },
+      { id: 'decrease-editor-font-size', bindings: ['Shift-Mod--', 'Shift-Alt--'], description: 'Decrease editor font size' },
       { id: 'duplicate-line', bindings: ['Mod-d', 'Alt-d'], description: 'Duplicate line', hint: true },
       { id: 'delete-line', bindings: ['Mod-Backspace', 'Alt-Backspace'], description: 'Delete line' },
       { id: 'cut-line', bindings: ['Mod-x', 'Alt-x'], description: 'Cut line or selection' },
@@ -124,7 +126,7 @@ const OTHER_ORDER: readonly string[] = ['Ctrl', 'Alt', 'Shift']
  * glyphs; every other platform uses `+`-joined names.
  */
 export function formatShortcut(binding: string, macPlatform: boolean): string {
-  const parts = binding.split('-')
+  const parts = binding.split(/-(?!$)/)
   const key = parts[parts.length - 1]
   const modifiers = parts.slice(0, -1)
   const label = key.length === 1 ? key.toUpperCase() : key
