@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { EditorState } from '@codemirror/state'
-import type { CompletionContext } from '@codemirror/autocomplete'
+import { EditorSelection, EditorState } from '@codemirror/state'
+import { CompletionContext } from '@codemirror/autocomplete'
+import type { EditorView } from '@codemirror/view'
 import { collectJavaSymbols, javaCompletions, psLibraryExtension, setPsLibraryMetadata } from '../../../src/completions'
 import type { PsLibraryMetadata } from '../../../src/completions'
 import { complete, labels, applyCompletion } from './helpers'
@@ -58,6 +59,80 @@ function applyPsCompletion(source: string, label: string, metadata: PsLibraryMet
 }
 
 describe('lightweight Java completions', () => {
+  it('offers continue as the only built-in keyword matching con', () => {
+    const result = complete('class Solution { void solve() { for (;;) { con| } } }')
+    expect(result?.options
+      .filter((option) => option.type === 'keyword' && option.label.startsWith('con'))
+      .map((option) => option.label)).toEqual(['continue'])
+    expect(result?.options.map((option) => option.label)).not.toContain('const')
+  })
+
+  it('preserves ordinary keyword completion insertion', () => {
+    expect(applyCompletion('class Solution { void solve() { while (true) { bre| } } }', 'break'))
+      .toBe('class Solution { void solve() { while (true) { break } } }')
+  })
+
+  it.each([
+    'for (;;) { con| }',
+    'for (int value : values) { con| }',
+    'while (true) { if (skip) con| }',
+    'do { con| } while (true);',
+    'for (;;) { con|; }',
+    'for (;;) { continue|; }',
+  ])('completes the continue statement and places its cursor after the semicolon in %s', (loop) => {
+    const source = `class Solution { void solve() { ${loop} } }`
+    const cursor = source.indexOf('|')
+    let state = EditorState.create({
+      doc: source.replace('|', ''),
+      selection: { anchor: cursor },
+    })
+    const result = complete(source)
+    const completion = result?.options.find((option) => option.label === 'continue')
+    if (!result || !completion || typeof completion.apply !== 'function') {
+      throw new Error('continue completion must insert a complete statement')
+    }
+    const view = {
+      get state() { return state },
+      dispatch(spec: Parameters<EditorState['update']>[0]) {
+        state = state.update(spec).state
+      },
+    } as unknown as EditorView
+    completion.apply(view, completion, result.from, cursor)
+
+    expect(state.doc.toString()).toBe(source.replace(/(?:continue|con)\|;?/, 'continue;'))
+    expect(state.selection.main.empty).toBe(true)
+    expect(state.selection.main.head).toBe(result.from + 'continue;'.length)
+  })
+
+  it.each(['con', 'con;'])('preserves matching multiple cursors when completing %s', (word) => {
+    const source = `class Solution { void solve() { while (true) { ${word}\n${word} } } }`
+    const positions = [source.indexOf(word) + 3, source.lastIndexOf(word) + 3]
+    let state = EditorState.create({
+      doc: source,
+      extensions: EditorState.allowMultipleSelections.of(true),
+      selection: EditorSelection.create(positions.map((position) => EditorSelection.cursor(position))),
+    })
+    const result = javaCompletions(new CompletionContext(state, positions[0], false))
+    const completion = result?.options.find((option) => option.label === 'continue')
+    if (!result || !completion || typeof completion.apply !== 'function') {
+      throw new Error('continue completion must insert a complete statement')
+    }
+    const view = {
+      get state() { return state },
+      dispatch(spec: Parameters<EditorState['update']>[0]) {
+        state = state.update(spec).state
+      },
+    } as unknown as EditorView
+    completion.apply(view, completion, result.from, positions[0])
+
+    expect(state.doc.toString()).toBe(source.replaceAll(word, 'continue;'))
+    expect(state.selection.ranges).toHaveLength(2)
+    for (const range of state.selection.ranges) {
+      expect(range.empty).toBe(true)
+      expect(state.sliceDoc(range.head - 'continue;'.length, range.head)).toBe('continue;')
+    }
+  })
+
 it('adds a specific import after the package when a Java type completion is picked', () => {
     const source = 'package example;\n\nclass Solution { Li| value; }'
     expect(applyCompletion(source, 'List')).toBe(
