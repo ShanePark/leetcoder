@@ -9,6 +9,7 @@ export {
   collectJavaSymbols,
   isIterableType,
   iterableElementTypeForExpression,
+  iterableVariableNameForExpression,
   javaIterableCandidates,
   javaIterableCandidatesFromAnalysis,
   simpleTypeName,
