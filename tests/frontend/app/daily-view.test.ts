@@ -245,7 +245,6 @@ function callbacks() {
     onLookupSubmit: vi.fn(),
     onRetry: vi.fn(),
     onBackToToday: vi.fn(),
-    onRefresh: vi.fn(),
     onToggleDescription: vi.fn(),
     onOpenFile: vi.fn(),
     onCreateFile: vi.fn(),

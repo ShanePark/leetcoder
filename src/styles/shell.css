@@ -3,35 +3,11 @@
 /* ---------------------------------------------------------------- */
 
 .app-shell {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   background: var(--bg);
-}
-
-.app-header {
-  position: relative;
-  display: flex;
-  flex: none;
-  align-items: center;
-  justify-content: space-between;
-  height: 44px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-
-.wordmark {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.2px;
-}
-
-.app-header-leading {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
 }
 
 .app-menu-button {
@@ -120,14 +96,8 @@
   background: var(--border);
 }
 
-.app-header-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
 .update-button {
+  flex: none;
   color: var(--accent);
 }
 
@@ -135,8 +105,18 @@
   display: none;
 }
 
-.update-button.is-spinning .app-icon {
+.update-button.is-spinning {
+  animation: none;
+}
+
+.update-button.is-spinning .button-icon {
   animation: spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-button.is-spinning .button-icon {
+    animation-duration: 2.5s;
+  }
 }
 
 .repo-chip {

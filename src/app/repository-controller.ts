@@ -38,6 +38,7 @@ export class RepositoryController {
   private readonly repositoryPicker = new RepositoryPickerCoordinator()
   private repositoryGeneration = 0
   private refreshRequestId = 0
+  private visibilityRefreshPending = false
   private stopWatchingFiles: (() => void) | null = null
 
   constructor(private readonly options: RepositoryControllerOptions) {
@@ -249,6 +250,17 @@ export class RepositoryController {
         this.options.render()
       }
     }
+  }
+
+  handleVisibilityReturn(): void {
+    if (!this.options.isActive() || this.state.busy || this.visibilityRefreshPending) {
+      return
+    }
+    // Reconcile structural changes missed while hidden or without a watcher.
+    this.visibilityRefreshPending = true
+    void this.refreshFiles().finally(() => {
+      this.visibilityRefreshPending = false
+    })
   }
 
   private isCurrentRefresh(repoPath: string, repositoryGeneration: number, requestId: number): boolean {

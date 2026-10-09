@@ -59,7 +59,6 @@ export class ShellControlsView {
     }
     this.controlsBusy = busy
     this.element<HTMLButtonElement>('#choose-repository').disabled = busy || this.options.pickerOpen()
-    this.element<HTMLButtonElement>('#refresh-files').disabled = busy || !this.state.projectValid
     this.root.querySelectorAll<HTMLButtonElement>('.file-item').forEach((button) => {
       button.disabled = busy
     })
