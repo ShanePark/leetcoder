@@ -40,6 +40,7 @@ import { DocumentController } from './app/document-controller'
 import { FileOperationsController } from './app/file-operations-controller'
 import { FileDialogController } from './app/file-dialog-controller'
 import { RepositoryController } from './app/repository-controller'
+import { RepositoryAccessController } from './app/repository-access-controller'
 import { ProjectContentSearchController } from './app/project-search-controller'
 import { PsLibraryController } from './app/ps-library-controller'
 import { JavaTypeMembersController } from './app/java-type-members-controller'
@@ -93,6 +94,7 @@ export class LeetcoderApp {
   private readonly requestClose: (() => Promise<void>) | undefined
   private readonly updateProgressView = createUpdateProgressView()
   private readonly toastController: ToastController
+  private readonly repositoryAccess: RepositoryAccessController
   private readonly overlay: OverlayController
   private updateController: UpdateController
   private updateProgressListenerStop: (() => void) | null = null
@@ -516,6 +518,14 @@ export class LeetcoderApp {
       render: () => this.renderAll(),
       setMessage: (message, tone) => this.setMessage(message, tone),
     })
+    this.repositoryAccess = new RepositoryAccessController({
+      isMacPlatform: currentIsMacPlatform,
+      getPath: () => this.repository.recoveryPath,
+      chooseRepository: () => this.repository.chooseRepository(),
+      retryRepository: (path) => this.repository.selectRepository(path, true),
+      openSettings: options.openPermissionSettings ?? (() => tauriInvoke<void>('open_repository_permission_settings')),
+      showError: (message, actions, detail) => this.toastController.show(message, 'error', actions, detail),
+    })
     this.controlsView = new ShellControlsView({
       root: this.root,
       state: this.state,
@@ -538,7 +548,7 @@ export class LeetcoderApp {
     // while keeping start()'s completion contract intact.
     const dailyProblemLoad = this.problemSelectionController.loadDailyProblem()
     const rememberedPath = this.repository.rememberedPath
-    let repositoryLoad: Promise<void> = Promise.resolve()
+    let repositoryLoad: Promise<boolean> = Promise.resolve(false)
     if (rememberedPath) {
       repositoryLoad = this.repository.selectRepository(rememberedPath, false)
     } else {
@@ -599,6 +609,7 @@ export class LeetcoderApp {
     this.updateProgressListenerStop?.()
     this.updateProgressListenerStop = null
     this.updateProgressView.fail()
+    this.repositoryAccess.dispose()
     this.toastController.dispose()
     this.overlay.dispose()
     this.repository.dispose()
@@ -811,6 +822,7 @@ export class LeetcoderApp {
       this.installUpdatePolling()
     }
     this.problemSelectionController.refreshDailyProblemIfStale()
+    if (this.repositoryAccess.handleVisibilityReturn()) return
     this.psLibraryController.revalidateIfStale()
     this.javaTypeMembersController.revalidateIfStale()
     // Filesystem events can be missed while the window is hidden, so returning
@@ -970,6 +982,7 @@ export class LeetcoderApp {
   }
 
   private setMessage(message: string, tone: 'info' | 'success' | 'error'): void {
+    if (tone === 'error' && this.repositoryAccess?.showFailure(message)) return
     this.toastController.show(message, tone)
   }
 

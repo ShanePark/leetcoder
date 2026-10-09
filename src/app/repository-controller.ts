@@ -9,6 +9,7 @@ import { isPsBuildConfigurationPath, type PsLibraryController } from './ps-libra
 import { indexProblemFiles, findIndexedProblemFile } from './file-index'
 import { isCurrentRepositoryRefresh, RepositoryPickerCoordinator } from './navigation'
 import { sameFilePath } from './path-helpers'
+import { isRepositoryAccessError } from './repository-access-controller'
 
 const LAST_REPOSITORY_KEY = 'leetcoder.repository-path'
 
@@ -39,6 +40,7 @@ export class RepositoryController {
   private repositoryGeneration = 0
   private refreshRequestId = 0
   private visibilityRefreshPending = false
+  private requestedPath: string | null = null
   private stopWatchingFiles: (() => void) | null = null
 
   constructor(private readonly options: RepositoryControllerOptions) {
@@ -54,6 +56,10 @@ export class RepositoryController {
 
   get pickerOpen(): boolean {
     return this.repositoryPicker.isOpen
+  }
+
+  get recoveryPath(): string | null {
+    return this.state.repoPath ?? this.requestedPath ?? this.rememberedPath
   }
 
   get rememberedPath(): string | null {
@@ -76,19 +82,19 @@ export class RepositoryController {
     void this.backend.stopWatchingRepository().catch(() => {})
   }
 
-  async chooseRepository(): Promise<void> {
+  async chooseRepository(): Promise<boolean> {
     if (!this.options.isActive() || this.state.busy) {
-      return
+      return false
     }
     const selection = this.repositoryPicker.open(this.directoryPicker)
     if (!selection) {
-      return
+      return false
     }
     this.options.render()
     try {
       const selectedPath = await selection
       if (selectedPath) {
-        await this.selectRepository(selectedPath, true)
+        return await this.selectRepository(selectedPath, true)
       }
     } catch (error) {
       this.options.setMessage(errorMessage(error), 'error')
@@ -97,12 +103,14 @@ export class RepositoryController {
         this.options.render()
       }
     }
+    return false
   }
 
-  async selectRepository(path: string, remember: boolean): Promise<void> {
+  async selectRepository(path: string, remember: boolean): Promise<boolean> {
     if (!this.options.isActive() || this.state.busy) {
-      return
+      return false
     }
+    this.requestedPath = path
     this.options.dialogs.closeFileContextMenu()
     const switchingRepository = path !== this.state.repoPath
     if (switchingRepository) {
@@ -116,12 +124,12 @@ export class RepositoryController {
     if (path !== this.state.repoPath) {
       const saved = await this.options.document.flushPendingSave()
       if (!this.isCurrentRepositorySelection(selectionGeneration)) {
-        return
+        return false
       }
       if (!saved) {
         this.state.busy = false
         this.options.render()
-        return
+        return false
       }
     }
     if (switchingRepository) {
@@ -145,10 +153,12 @@ export class RepositoryController {
     try {
       const validation = await this.backend.validateProject(path)
       if (!this.isCurrentRepositorySelection(selectionGeneration)) {
-        return
+        return false
       }
       if (!validation.valid) {
-        this.storage?.removeItem(LAST_REPOSITORY_KEY)
+        if (!isRepositoryAccessError(validation.message ?? '')) {
+          this.storage?.removeItem(LAST_REPOSITORY_KEY)
+        }
         throw new Error(validation.message ?? 'This folder does not look like the ps repository.')
       }
 
@@ -157,9 +167,10 @@ export class RepositoryController {
       if (remember) {
         this.storage?.setItem(LAST_REPOSITORY_KEY, path)
       }
-      await this.refreshFiles()
+      const loaded = await this.refreshFiles()
+      if (!loaded) return false
       if (!this.isCurrentRepositorySelection(selectionGeneration)) {
-        return
+        return false
       }
       try {
         await this.backend.watchRepository(path)
@@ -177,6 +188,11 @@ export class RepositoryController {
         && this.state.repoPath === path) {
         this.options.psLibrary.setRepository(path)
         this.options.javaTypes.setRepository(path)
+        if (!switchingRepository) {
+          this.options.psLibrary.invalidate()
+          this.options.javaTypes.invalidate()
+        }
+        return true
       }
     } catch (error) {
       if (this.isCurrentRepositorySelection(selectionGeneration)) {
@@ -191,6 +207,7 @@ export class RepositoryController {
         this.options.render()
       }
     }
+    return false
   }
 
   async refreshFiles(): Promise<boolean> {

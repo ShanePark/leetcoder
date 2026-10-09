@@ -67,6 +67,33 @@
   word-break: break-word;
 }
 
+.toast-content {
+  min-width: 0;
+  flex: 1;
+}
+
+.toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.toast-action {
+  padding: 4px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+}
+
+.toast-action:hover {
+  background: var(--surface-2);
+}
+
+.toast-action:disabled {
+  opacity: 0.5;
+}
+
 .toast-close {
   display: inline-flex;
   flex: none;

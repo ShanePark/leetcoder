@@ -13,6 +13,26 @@ use crate::watcher;
 use std::sync::Arc;
 use tauri_plugin_dialog::DialogExt;
 
+#[tauri::command]
+pub fn open_repository_permission_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")
+            .status()
+            .map_err(|error| format!("Could not open folder-access settings: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("Could not open folder-access settings: {status}"))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Folder-access settings are only available on macOS.".to_string())
+    }
+}
+
 /// Opens one folder picker attached to the leetcoder window.
 ///
 /// The dialog plugin's JavaScript command only assigns a parent on Windows
