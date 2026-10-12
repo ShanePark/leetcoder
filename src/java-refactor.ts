@@ -40,3 +40,6 @@ export function planJavaMethodExtraction(
     ? expressionPlan(source, selection, declarations, methods, name)
     : statementPlan(source, selection, declarations, methods, name)
 }
+
+export { planJavaFieldInlining } from './java-refactor/inline-field'
+export type { JavaFieldInliningPlan, JavaFieldInliningResult } from './java-refactor/inline-field'

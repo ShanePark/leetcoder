@@ -94,6 +94,7 @@ import {
   copySelectedText,
   expandJavaTemplateOnTab,
   extractJavaMethod,
+  inlineJavaField,
   formatJavaDocClipboard,
   introduceJavaVariable,
   planJavaDocInsertion,
@@ -136,6 +137,7 @@ export {
 export {
   expandJavaTemplateOnTab,
   extractJavaMethod,
+  inlineJavaField,
   formatJavaDocClipboard,
   introduceJavaVariable,
   planJavaDocInsertion,
@@ -433,6 +435,14 @@ export function isExtractMethodShortcut(event: JavaDocAltShortcutEvent): boolean
     && (event.metaKey !== event.ctrlKey)
 }
 
+/** Match the cross-platform Ctrl/Command+Option+N chord by physical key. */
+export function isInlineFieldShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyN'
+    && event.altKey
+    && !event.shiftKey
+    && (event.metaKey !== event.ctrlKey)
+}
+
 /** A deliberately small CodeMirror wrapper used by the single editor pane. */
 export class JavaEditor {
   readonly view: EditorView
@@ -474,6 +484,7 @@ export class JavaEditor {
     const projectSearchShortcuts = shortcutBindings('search-project')
     const introduceVariableShortcuts = bindings('introduce-variable')
     const extractMethodShortcuts = bindings('extract-method')
+    const inlineFieldShortcuts = bindings('inline-field')
     const renameMethodShortcuts = bindings('rename-method')
     const finishTemplateShortcuts = bindings('finish-template')
     const showIntentionsShortcuts = shortcutBindings('show-intentions')
@@ -481,6 +492,7 @@ export class JavaEditor {
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const cut = (view: EditorView): boolean => cutSelectionOrLine(view, clipboard)
     const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
+    const inlineField = (view: EditorView): boolean => inlineJavaField(view, callbacks.onRefactorError)
     const renameSymbol = (view: EditorView): boolean => renameJavaSymbol(view, callbacks.onRefactorError)
     const showIntentions = (view: EditorView): boolean => showJavaIntentions(view)
     const showShortcuts = (): boolean => {
@@ -594,6 +606,7 @@ export class JavaEditor {
       [isReformatShortcut, reformatJavaDocument],
       [isIntroduceVariableShortcut, introduceJavaVariable],
       [isExtractMethodShortcut, extractMethod],
+      [isInlineFieldShortcut, inlineField],
     ]
 
     const commandBindings = (
@@ -712,6 +725,7 @@ export class JavaEditor {
           ...commandBindings(moveLineDownShortcuts, moveLineDown),
           ...commandBindings(introduceVariableShortcuts, introduceJavaVariable),
           ...commandBindings(extractMethodShortcuts, extractMethod),
+          ...commandBindings(inlineFieldShortcuts, inlineField),
           ...commandBindings(renameMethodShortcuts, renameSymbol),
           // Familiar line-editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while

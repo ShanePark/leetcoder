@@ -5,6 +5,7 @@ import {
   isDecreaseFontSizeAltShortcut,
   isCopyAltShortcut,
   isExtractMethodShortcut,
+  isInlineFieldShortcut,
   isFileSearchAltShortcut,
   isProjectSearchAltShortcut,
   isLineCutAltShortcut,
@@ -106,5 +107,22 @@ describe('Option shortcut matchers', () => {
     expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true, ctrlKey: true })).toBe(false)
     expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true, shiftKey: true })).toBe(false)
     expect(isExtractMethodShortcut({ ...base, code: 'KeyV', metaKey: true })).toBe(false)
+  })
+})
+
+describe('Inline Field shortcut', () => {
+  const event = { code: 'KeyN', key: '˜', altKey: true, shiftKey: false, metaKey: true, ctrlKey: false }
+
+  it('matches the physical N key even when Option produces a composed glyph', () => {
+    expect(isInlineFieldShortcut(event)).toBe(true)
+    expect(isInlineFieldShortcut({ ...event, metaKey: false, ctrlKey: true })).toBe(true)
+  })
+
+  it('requires Alt and exactly one primary modifier without Shift', () => {
+    expect(isInlineFieldShortcut({ ...event, metaKey: false })).toBe(false)
+    expect(isInlineFieldShortcut({ ...event, altKey: false })).toBe(false)
+    expect(isInlineFieldShortcut({ ...event, ctrlKey: true })).toBe(false)
+    expect(isInlineFieldShortcut({ ...event, shiftKey: true })).toBe(false)
+    expect(isInlineFieldShortcut({ ...event, code: 'KeyM' })).toBe(false)
   })
 })

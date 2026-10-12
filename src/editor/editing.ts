@@ -1,6 +1,6 @@
 export { minimalDocumentChange, reformatJavaDocument, expandJavaTemplateOnTab } from './editing/commands'
 export { selectedLineBlocks, copySelectedText, cutSelectionOrLine } from './editing/clipboard'
 export type { JavaVariableInsertion } from './editing/refactoring'
-export { planJavaVariableInsertion, introduceJavaVariable, extractJavaMethod } from './editing/refactoring'
+export { planJavaVariableInsertion, introduceJavaVariable, extractJavaMethod, inlineJavaField } from './editing/refactoring'
 export type { JavaDocInsertion } from './editing/javadoc'
 export { planJavaDocInsertion, formatJavaDocClipboard } from './editing/javadoc'

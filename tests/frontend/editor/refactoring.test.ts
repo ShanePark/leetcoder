@@ -1,11 +1,15 @@
+import { history } from '@codemirror/commands'
+import { java } from '@codemirror/lang-java'
+import { EditorSelection, EditorState } from '@codemirror/state'
 import { describe, expect, it } from 'vitest'
 import {
   extractJavaMethod,
+  inlineJavaField,
   introduceJavaVariable,
   isIntroduceVariableShortcut,
   planJavaVariableInsertion,
 } from '../../../src/editor'
-import { runEditorCommand, mutableEditorView, javaState } from './helpers'
+import { runEditorCommand, mutableEditorView, javaState, applyUndo } from './helpers'
 
 describe('Introduce Variable', () => {
   it('inserts a var declaration before the containing line and selects its name', () => {
@@ -344,5 +348,310 @@ describe('Extract Method command', () => {
     expect(extractJavaMethod(harness.view, (message) => errors.push(message))).toBe(true)
     expect(errors).toEqual(['Select an expression or complete statements to extract a method.'])
     expect(harness.state().doc.toString()).toBe(source)
+  })
+})
+
+describe('Inline Field command', () => {
+  const source = `class S {
+    private static final int MOD = 7;
+    int f(int value) { return value % MOD + MOD; }
+}`
+
+  it('inlines every usage and removes the field in one undoable transaction', () => {
+    const position = source.lastIndexOf('MOD')
+    const initial = EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), history()],
+    })
+    const harness = mutableEditorView(initial)
+    const errors: string[] = []
+
+    expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual([])
+    const updated = harness.state()
+    expect(updated.doc.toString()).not.toContain('MOD')
+    expect(updated.doc.toString()).not.toContain('private static final')
+    expect(updated.doc.toString()).toContain('return value % (7) + (7);')
+    expect(updated.selection.main.head).toBe(updated.doc.toString().lastIndexOf('(7)'))
+    const undone = applyUndo(updated)
+    expect(undone.handled).toBe(true)
+    expect(undone.state.doc.toString()).toBe(source)
+    expect(undone.state.selection.main.head).toBe(position)
+    expect(applyUndo(undone.state).handled).toBe(false)
+  })
+
+  it('accepts an exact field-name selection at its declaration', () => {
+    const position = source.indexOf('MOD')
+    const harness = mutableEditorView(javaState(source).update({
+      selection: { anchor: position, head: position + 3 },
+    }).state)
+    const errors: string[] = []
+    expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual([])
+    expect(harness.state().doc.toString()).not.toContain('MOD')
+    expect(harness.state().selection.main.empty).toBe(true)
+  })
+
+  it('reports a planner failure without changing the document', () => {
+    const harness = mutableEditorView(javaState(source).update({
+      selection: { anchor: source.indexOf('value') },
+    }).state)
+    const errors: string[] = []
+    expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toBeTruthy()
+    expect(harness.state().doc.toString()).toBe(source)
+  })
+
+  it('rejects multiple selections and preserves read-only documents', () => {
+    const position = source.indexOf('MOD')
+    const multiple = mutableEditorView(javaState(source, true).update({
+      selection: EditorSelection.create([EditorSelection.cursor(position), EditorSelection.cursor(source.lastIndexOf('MOD'))]),
+    }).state)
+    const errors: string[] = []
+    expect(inlineJavaField(multiple.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual(['Select one field or local variable to inline.'])
+    expect(multiple.state().doc.toString()).toBe(source)
+
+    const readOnly = mutableEditorView(EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), EditorState.readOnly.of(true)],
+    }))
+    expect(inlineJavaField(readOnly.view, (message) => errors.push(message))).toBe(true)
+    expect(readOnly.state().doc.toString()).toBe(source)
+    expect(errors).toHaveLength(1)
+  })
+})
+
+describe('Inline local variable command', () => {
+  it.each(['1_000_000_007', '(int) 1e9 + 7'])('inlines local MOD = %s and all usages with one undo', (initializer) => {
+    const source = `class S {
+    long maxSum(int[] nums) {
+        final int MOD = ${initializer};
+        long res = 0;
+        for (int value : nums) {
+            res = (res + value) % MOD;
+        }
+        return res % MOD;
+    }
+}`
+    for (const position of [source.indexOf('MOD'), source.lastIndexOf('MOD')]) {
+      const initial = EditorState.create({
+        doc: source,
+        selection: { anchor: position },
+        extensions: [java(), history()],
+      })
+      const harness = mutableEditorView(initial)
+      const errors: string[] = []
+
+      expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+      expect(errors).toEqual([])
+      const updated = harness.state()
+      expect(updated.doc.toString()).not.toContain('MOD')
+      expect(updated.doc.toString()).not.toContain('final int')
+      expect(updated.doc.toString()).toContain(`res = (res + value) % (${initializer});`)
+      expect(updated.doc.toString()).toContain(`return res % (${initializer});`)
+      const undone = applyUndo(updated)
+      expect(undone.handled).toBe(true)
+      expect(undone.state.doc.toString()).toBe(source)
+      expect(undone.state.selection.main.head).toBe(position)
+      expect(applyUndo(undone.state).handled).toBe(false)
+    }
+  })
+})
+
+describe('Inline local variable with a stable field dependency', () => {
+  it('inlines every a read while retaining MOD and supports one undo', () => {
+    const source = `class S {
+    final int MOD=(int)1e9+7;
+    int maxSum() {
+        int a = MOD + 1;
+        int b=a+MOD-1;
+        return a;
+    }
+}`
+    for (const position of [source.indexOf('a ='), source.lastIndexOf('a;')]) {
+      const harness = mutableEditorView(EditorState.create({
+        doc: source,
+        selection: { anchor: position },
+        extensions: [java(), history()],
+      }))
+      const errors: string[] = []
+
+      expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+      expect(errors).toEqual([])
+      const updated = harness.state()
+      expect(updated.doc.toString()).not.toMatch(/\ba\b/)
+      expect(updated.doc.toString()).toContain('final int MOD=(int)1e9+7;')
+      expect(updated.doc.toString()).toContain('int b=(MOD + 1)+MOD-1;')
+      expect(updated.doc.toString()).toContain('return (MOD + 1);')
+      expect(updated.doc.toString()).not.toContain('((int) (MOD + 1))')
+      const undone = applyUndo(updated)
+      expect(undone.handled).toBe(true)
+      expect(undone.state.doc.toString()).toBe(source)
+      expect(undone.state.selection.main.head).toBe(position)
+      expect(applyUndo(undone.state).handled).toBe(false)
+    }
+  })
+})
+
+describe('Inline command with incomplete Java source', () => {
+  it('inlines a valid local despite an unrelated incomplete method and preserves undo', () => {
+    const malformed = '    void unfinished() { int broken = ; }'
+    const source = `class S {
+    int f() {
+        int a = 7;
+        int b = a + 1;
+        return a;
+    }
+${malformed}
+}`
+    const position = source.indexOf('a =')
+    const harness = mutableEditorView(EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), history()],
+    }))
+    const errors: string[] = []
+
+    expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual([])
+    const updated = harness.state()
+    expect(updated.doc.toString()).not.toMatch(/\ba\b/)
+    expect(updated.doc.toString()).toContain('int b = (7) + 1;')
+    expect(updated.doc.toString()).toContain('return (7);')
+    expect(updated.doc.toString().slice(updated.doc.toString().indexOf(malformed))).toBe(`${malformed}\n}`)
+    const undone = applyUndo(updated)
+    expect(undone.handled).toBe(true)
+    expect(undone.state.doc.toString()).toBe(source)
+    expect(undone.state.selection.main.head).toBe(position)
+    expect(applyUndo(undone.state).handled).toBe(false)
+  })
+
+  it('inlines a recognized usage while its surrounding expression is incomplete', () => {
+    const source = 'class S { int f() { int a = 7; int b = a + 1; return a + ; } }'
+    const harness = mutableEditorView(EditorState.create({
+      doc: source,
+      selection: { anchor: source.lastIndexOf('a +') },
+      extensions: [java(), history()],
+    }))
+    const errors: string[] = []
+
+    expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual([])
+    expect(harness.state().doc.toString()).not.toMatch(/\ba\b/)
+    expect(harness.state().doc.toString()).toContain('int b = (7) + 1; return (7) + ;')
+    expect(applyUndo(harness.state()).state.doc.toString()).toBe(source)
+  })
+
+  it.each([
+    'class S { int f() { int a = 7 + ; return a; } }',
+    'class S { int f() { int a 7; return a; } }',
+  ])('refuses a malformed declaration or initializer without partially editing: %s', (source) => {
+    const position = source.indexOf('int a') + 4
+    const initial = EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), history()],
+    })
+    const harness = mutableEditorView(initial)
+    const errors: string[] = []
+
+    expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toBeTruthy()
+    expect(harness.state()).toBe(initial)
+    expect(harness.state().doc.toString()).toBe(source)
+    expect(applyUndo(harness.state()).handled).toBe(false)
+  })
+})
+
+describe('Inline command with never-written primitive local dependencies', () => {
+  it.each([
+    { name: 'a', returned: '-1' },
+    { name: 'b', returned: 'b' },
+  ])('inlines $name with return $returned while keeping unrelated incomplete code', ({ name, returned }) => {
+    const malformed = '    void test(){assertThat()}'
+    const source = `class S {
+    long maxSum() {
+        long MOD=1;
+        long a=MOD<<40;
+        long b=a<<40;
+        return ${returned};
+    }
+${malformed}
+}`
+    const positions = [source.indexOf(`long ${name}=`) + 5]
+    if (name === 'a') positions.push(source.indexOf('a<<40'))
+    if (returned === 'b') positions.push(source.indexOf('return b') + 7)
+    for (const position of positions) {
+      const harness = mutableEditorView(EditorState.create({
+        doc: source,
+        selection: { anchor: position },
+        extensions: [java(), history()],
+      }))
+      const errors: string[] = []
+
+      expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+      expect(errors).toEqual([])
+      const updated = harness.state()
+      expect(updated.doc.toString()).not.toMatch(new RegExp(`\\b${name}\\b`))
+      expect(updated.doc.toString()).toContain('long MOD=1;')
+      if (name === 'a') {
+        expect(updated.doc.toString()).toContain('long b=(MOD<<40)<<40;')
+      } else {
+        expect(updated.doc.toString()).toContain('long a=MOD<<40;')
+        expect(updated.doc.toString()).toContain('return (a<<40);')
+      }
+      expect(updated.doc.toString()).not.toContain('((long)')
+      expect(updated.doc.toString().slice(updated.doc.toString().indexOf(malformed))).toBe(`${malformed}\n}`)
+      const undone = applyUndo(updated)
+      expect(undone.handled).toBe(true)
+      expect(undone.state.doc.toString()).toBe(source)
+      expect(undone.state.selection.main.head).toBe(position)
+      expect(applyUndo(undone.state).handled).toBe(false)
+    }
+  })
+})
+
+describe('Inline command with unused targets', () => {
+  it.each([
+    {
+      source: `class S {
+    long maxSum() {
+        long MOD=1;
+        long a=MOD<<40;
+        long b=a<<40;
+        return -1;
+    }
+    void test(){assertThat()}
+}`,
+      name: 'b',
+      reason: 'Variable b is never used.',
+    },
+    {
+      source: 'class S { final int UNUSED = 7; int f() { return 1; } }',
+      name: 'UNUSED',
+      reason: 'Field UNUSED is never used.',
+    },
+  ])('keeps unused $name and reports its lack of usages without an undo entry', ({ source, name, reason }) => {
+    const position = source.indexOf(name)
+    const initial = EditorState.create({
+      doc: source,
+      selection: { anchor: position, head: position + name.length },
+      extensions: [java(), history()],
+    })
+    const harness = mutableEditorView(initial)
+    const errors: string[] = []
+
+    expect(inlineJavaField(harness.view, (message) => errors.push(message))).toBe(true)
+    expect(errors).toEqual([reason])
+    expect(harness.state()).toBe(initial)
+    expect(harness.state().doc.toString()).toBe(source)
+    expect(harness.state().selection.main.from).toBe(position)
+    expect(harness.state().selection.main.to).toBe(position + name.length)
+    expect(applyUndo(harness.state()).handled).toBe(false)
   })
 })
