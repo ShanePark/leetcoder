@@ -49,6 +49,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::choose_repository,
+            commands::open_repository_permission_settings,
             commands::validate_project,
             commands::fetch_daily_problem,
             commands::fetch_problem_by_number,

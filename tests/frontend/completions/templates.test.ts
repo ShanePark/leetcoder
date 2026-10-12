@@ -191,7 +191,7 @@ it('selects the iterated expression first and derives char from String.toCharArr
     expect(result.state.sliceDoc(result.state.selection.main.from, result.state.selection.main.to)).toBe('list')
 
     const updated = result.state.update(result.state.replaceSelection('s.toCharArray()')).state
-    expect(updated.doc.toString()).toContain('for (char integer : s.toCharArray())')
+    expect(updated.doc.toString()).toContain('for (char c : s.toCharArray())')
     expect(updated.selection.main.head).toBe(
       updated.doc.toString().indexOf('s.toCharArray()') + 's.toCharArray()'.length,
     )
@@ -213,10 +213,94 @@ it('keeps the target active while typing a String.toCharArray() expression', () 
       }).state
     }
 
-    expect(state.doc.toString()).toContain('for (char integer : s.toCharArray())')
+    expect(state.doc.toString()).toContain('for (char c : s.toCharArray())')
     expect(state.selection.main.head).toBe(
       state.doc.toString().indexOf('s.toCharArray()') + 's.toCharArray()'.length,
     )
+  })
+
+it('uses c for an unnamed char array while keeping descriptive plural names', () => {
+    const source = `class Solution {
+  void test(char[] input, char[] letters) {
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'letters', elementType: 'char', variableName: 'letter' },
+      { name: 'input', elementType: 'char', variableName: 'c' },
+    ])
+  })
+
+it('falls back to the element type when a plural target becomes a keyword', () => {
+    const source = `class Solution {
+  void test(char[] chars, char c, char c2, int[] nums) {
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'nums', elementType: 'int', variableName: 'num' },
+      { name: 'chars', elementType: 'char', variableName: 'c3' },
+    ])
+    expect(applyCompletion(source, 'iter (chars)')).toContain('for (char c3 : chars)')
+  })
+
+it('derives c from the fallback template and avoids enclosing loop names', () => {
+    const result = expandPrintTemplateState(`class Solution {
+  void test(String s) {
+    for (char c : s.toCharArray()) {
+      char c2 = c;
+      iter|
+    }
+  }
+}`)
+    expect(result.state.doc.toString()).toContain('for (var item : items)')
+    const updated = result.state.update(result.state.replaceSelection('s.toCharArray()')).state
+    expect(updated.doc.toString()).toContain('for (char c3 : s.toCharArray())')
+    expect(updated.selection.main.head).toBe(
+      updated.doc.toString().lastIndexOf('s.toCharArray()') + 's.toCharArray()'.length,
+    )
+  })
+
+it('renames the default when a target changes without changing its element type', () => {
+    const result = expandPrintTemplateState(`class Solution {
+  void test(List<String> names, List<String> users) {
+    iter|
+  }
+}`)
+    expect(result.state.doc.toString()).toContain('for (String user : users)')
+    let state = result.state.update(result.state.replaceSelection('names')).state
+    expect(state.doc.toString()).toContain('for (String name : names)')
+    const targetFrom = state.doc.toString().indexOf('names', state.doc.toString().indexOf('for ('))
+    state = state.update({ changes: { from: targetFrom, to: targetFrom + 5, insert: 'users' } }).state
+    expect(state.doc.toString()).toContain('for (String user : users)')
+  })
+
+it('preserves a custom variable while continuing to infer its type', () => {
+    const result = expandPrintTemplateState(`class Solution {
+  void test(String s, List<Integer> list) {
+    iter|
+  }
+}`)
+    let state = result.state
+    const variableFrom = state.doc.toString().indexOf('integer :')
+    state = state.update({ changes: { from: variableFrom, to: variableFrom + 7, insert: 'custom' } }).state
+    const targetFrom = state.doc.toString().indexOf('list)', state.doc.toString().indexOf('for ('))
+    state = state.update({ changes: { from: targetFrom, to: targetFrom + 4, insert: 's.toCharArray()' } }).state
+    expect(state.doc.toString()).toContain('for (char custom : s.toCharArray())')
+  })
+
+it('preserves a custom type while continuing to infer the variable name', () => {
+    const result = expandPrintTemplateState(`class Solution {
+  void test(String s, List<Integer> list) {
+    iter|
+  }
+}`)
+    let state = result.state
+    const typeFrom = state.doc.toString().indexOf('Integer integer :')
+    state = state.update({ changes: { from: typeFrom, to: typeFrom + 7, insert: 'var' } }).state
+    const targetFrom = state.doc.toString().indexOf('list)', state.doc.toString().indexOf('for ('))
+    state = state.update({ changes: { from: targetFrom, to: targetFrom + 4, insert: 's.toCharArray()' } }).state
+    expect(state.doc.toString()).toContain('for (var c : s.toCharArray())')
   })
 
 it('offers separate iter choices and recomputes type and variable defaults', () => {

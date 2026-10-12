@@ -10,6 +10,26 @@
   background: var(--surface);
 }
 
+.sidebar-repository {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-repository .repo-chip {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.sidebar-repository .button-icon {
+  flex: none;
+}
+
 .sidebar-splitter {
   position: relative;
   z-index: 2;

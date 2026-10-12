@@ -16,6 +16,7 @@ class FakeElement {
   className = ''
   title = ''
   type = ''
+  disabled = false
   private rawTextContent = ''
 
   constructor(readonly tagName: string) {}
@@ -149,6 +150,33 @@ afterEach(() => {
 })
 
 describe('ToastController', () => {
+  it('runs recovery actions once at a time and removes their listeners on dismissal', async () => {
+    installFakeDocument()
+    const stack = new FakeElement('section')
+    const controller = new ToastController(stack as unknown as HTMLElement)
+    let finish: () => void = () => {}
+    const run = vi.fn(() => new Promise<void>((resolve) => { finish = resolve }))
+    const handle = controller.show('Folder access blocked', 'error', [
+      { label: 'Choose folder again', run },
+      { label: 'Open settings', run: vi.fn() },
+    ], 'Operation not permitted')
+    const buttons = stack.querySelectorAll('.toast-action')
+    expect(buttons.map((button) => button.textContent)).toEqual(['Choose folder again', 'Open settings'])
+    expect(stack.querySelector('.toast')?.title).toBe('Operation not permitted')
+    buttons[0].dispatch('click')
+    buttons[0].dispatch('click')
+    await Promise.resolve()
+    expect(run).toHaveBeenCalledOnce()
+    expect(buttons.every((button) => button.disabled)).toBe(true)
+    expect(handle.isVisible()).toBe(true)
+    handle.dismiss()
+    expect(handle.isVisible()).toBe(false)
+    expect(buttons.every((button) => button.listenerCount('click') === 0)).toBe(true)
+    finish()
+    await Promise.resolve()
+    controller.dispose()
+  })
+
   it('renders full info text and an accessible first-line error', () => {
     installFakeDocument()
     const stack = new FakeElement('section')

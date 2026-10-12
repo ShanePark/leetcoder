@@ -25,6 +25,8 @@ export interface AppOptions {
   storage?: Storage
   /** Request a native window close through the close-safety handler. */
   requestClose?: () => Promise<void>
+  /** Open the native folder-access preferences for permission recovery. */
+  openPermissionSettings?: () => Promise<void>
 }
 
 export interface AutosaveSnapshot {

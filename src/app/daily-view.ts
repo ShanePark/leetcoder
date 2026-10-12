@@ -24,7 +24,6 @@ export interface DailyProblemViewCallbacks {
   onLookupSubmit: (value: string) => void
   onRetry: () => void
   onBackToToday: () => void
-  onRefresh: () => void
   onToggleDescription: () => void
   onOpenFile: (file: ProblemFileEntry) => void
   onCreateFile: () => void
@@ -159,20 +158,6 @@ export function createDailyProblemView(
 
     const actions = document.createElement('div')
     actions.className = 'daily-actions'
-
-    const refresh = document.createElement('button')
-    refresh.type = 'button'
-    refresh.className = 'icon-button'
-    const refreshLabel = model.problemSelection === 'manual'
-      ? 'Refresh selected problem'
-      : 'Refresh today’s problem'
-    refresh.setAttribute('aria-label', refreshLabel)
-    refresh.title = refreshLabel
-    refresh.append(iconFor('refresh', 'button-icon'))
-    refresh.disabled = model.busy || model.dailyLoading
-    refresh.classList.toggle('is-spinning', model.dailyLoading)
-    refresh.addEventListener('click', () => currentCallbacks.onRefresh())
-    actions.append(refresh)
 
     const link = document.createElement('a')
     link.className = 'icon-button'

@@ -58,6 +58,7 @@ function singularIdentifier(name: string): string {
 
 function typeVariableName(elementType: string | undefined): string {
   if (!elementType) return 'item'
+  if (elementType === 'char') return 'c'
   if (elementType.endsWith('[]')) return 'row'
   const base = simpleTypeName(elementType.replace(/<.*>/, ''))
   if (!base) return 'item'
@@ -77,7 +78,9 @@ function uniqueVariableName(base: string, symbols: JavaSymbol[], position: numbe
 function iterVariableName(target: string, elementType: string | undefined, symbols: JavaSymbol[], position: number): string {
   const targetName = target.split('.').at(-1) ?? target
   const singular = singularIdentifier(targetName)
-  const base = singular !== targetName ? singular : typeVariableName(elementType)
+  const base = singular !== targetName && !JAVA_KEYWORDS.includes(singular)
+    ? singular
+    : typeVariableName(elementType)
   return uniqueVariableName(base || 'item', symbols, position)
 }
 
@@ -476,4 +479,14 @@ export function iterableElementTypeForExpression(source: string, target: string,
     return !declaredType.includes('[]') && simpleTypeName(baseType(declaredType)) === 'String' ? 'char' : null
   }
   return declaredType === 'var' && symbol.bases.includes('String') ? 'char' : null
+}
+
+/** Suggest a loop name using the target expression and visible surrounding names. */
+export function iterableVariableNameForExpression(source: string, target: string, position: number): string | null {
+  const elementType = iterableElementTypeForExpression(source, target, position)
+  if (elementType === null) return null
+  const expression = target.trim()
+  const symbols = collectJavaSymbols(source, position)
+  const nameTarget = /^[A-Za-z_$][\w$]*$/.test(expression) ? expression : ''
+  return iterVariableName(nameTarget, elementType, symbols, position)
 }

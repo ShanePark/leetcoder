@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { testMocks } from './lifecycle-mocks'
 import {
   LeetcoderApp, createBackend, deferred, installDom, rememberedStorage, startApp,
-  file, dailyProblem, FakeElement, type DomHarness,
+  file, dailyProblem, FakeElement, setNavigatorPlatform, type DomHarness,
 } from './lifecycle-harness'
 import type { ProjectValidation } from '../../../src/backend'
+import { ToastController, type ToastAction } from '../../../src/app/toast-controller'
 
 describe('LeetcoderApp lifecycle', () => {
   let dom: DomHarness
@@ -15,6 +16,44 @@ describe('LeetcoderApp lifecycle', () => {
 
   afterEach(() => {
     dom.restore()
+  })
+
+  it('offers folder recovery for a blocked remembered project and retries once after settings', async () => {
+    const restorePlatform = setNavigatorPlatform('MacIntel')
+    let actions: readonly ToastAction[] = []
+    const dismiss = vi.fn()
+    const show = vi.spyOn(ToastController.prototype, 'show').mockImplementation((_message, _tone, nextActions) => {
+      if (nextActions) actions = nextActions
+      return { dismiss, isVisible: () => true }
+    })
+    const { backend } = createBackend()
+    vi.mocked(backend.validateProject).mockResolvedValueOnce({
+      valid: false,
+      message: "Unable to resolve projectRoot '/repo': Operation not permitted",
+    } as ProjectValidation)
+    const openSettings = vi.fn().mockResolvedValue(undefined)
+    const app = new LeetcoderApp(dom.root as unknown as HTMLElement, {
+      backend, storage: rememberedStorage() as unknown as Storage,
+      openPermissionSettings: openSettings,
+    })
+    try {
+      await app.start()
+      expect(actions.map((action) => action.label)).toEqual(['Choose folder again', 'Open permission settings'])
+      expect(show.mock.calls.at(-1)?.[0]).toContain('macOS may have blocked access')
+      expect(backend.listProblemFiles).not.toHaveBeenCalled()
+      await actions[1].run()
+      dom.window.dispatch('focus')
+      dom.document.dispatch('visibilitychange')
+      await vi.waitFor(() => { expect(dismiss).toHaveBeenCalledOnce() })
+      expect(openSettings).toHaveBeenCalledOnce()
+      expect(backend.validateProject).toHaveBeenCalledTimes(2)
+      expect(backend.listProblemFiles).toHaveBeenCalledOnce()
+      expect(backend.inspectPsLibrary).toHaveBeenCalledWith('/repo')
+    } finally {
+      await app.destroy()
+      show.mockRestore()
+      restorePlatform()
+    }
   })
 
   it('flushes an edited document through prepareToClose and rejects save failures', async () => {

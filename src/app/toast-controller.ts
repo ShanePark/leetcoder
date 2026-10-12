@@ -5,6 +5,16 @@ export const MAX_VISIBLE_TOASTS = 3
 
 export type ToastTone = 'info' | 'success' | 'error'
 
+export interface ToastAction {
+  label: string
+  run: () => Promise<void> | void
+}
+
+export interface ToastHandle {
+  dismiss: () => void
+  isVisible: () => boolean
+}
+
 type ToastTimer = ReturnType<typeof setTimeout>
 
 interface CloseHandler {
@@ -15,16 +25,16 @@ interface CloseHandler {
 /** Owns toast DOM, dismissal timers, and accessible error replacement. */
 export class ToastController {
   private readonly timers = new Map<HTMLElement, ToastTimer>()
-  private readonly closeHandlers = new Map<HTMLElement, CloseHandler>()
+  private readonly closeHandlers = new Map<HTMLElement, CloseHandler[]>()
   private readonly toasts = new Set<HTMLElement>()
   private errorToastElement: HTMLElement | null = null
   private disposed = false
 
   constructor(private readonly stack: HTMLElement) {}
 
-  show(message: string, tone: ToastTone): void {
+  show(message: string, tone: ToastTone, actions: readonly ToastAction[] = [], detail?: string): ToastHandle {
     if (this.disposed) {
-      return
+      return { dismiss: () => {}, isVisible: () => false }
     }
     if (tone === 'error' && this.errorToastElement) {
       // A newer error replaces the previous one instead of stacking.
@@ -42,7 +52,35 @@ export class ToastController {
     if (tone === 'error' && firstLine !== message) {
       toast.title = message
     }
-    toast.append(copy)
+    const content = document.createElement('div')
+    content.className = 'toast-content'
+    content.append(copy)
+    toast.append(content)
+    if (detail) toast.title = detail
+    const handlers: CloseHandler[] = []
+    if (actions.length > 0) {
+      const actionRow = document.createElement('div')
+      actionRow.className = 'toast-actions'
+      const buttons: HTMLButtonElement[] = []
+      for (const action of actions) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'toast-action'
+        button.textContent = action.label
+        const listener = (): void => {
+          if (buttons.some((entry) => entry.disabled)) return
+          buttons.forEach((entry) => { entry.disabled = true })
+          void Promise.resolve().then(action.run).finally(() => {
+            buttons.forEach((entry) => { entry.disabled = false })
+          })
+        }
+        button.addEventListener('click', listener)
+        handlers.push({ button, listener })
+        buttons.push(button)
+        actionRow.append(button)
+      }
+      content.append(actionRow)
+    }
 
     if (tone === 'error') {
       toast.setAttribute('role', 'alert')
@@ -55,10 +93,12 @@ export class ToastController {
         this.dismissToast(toast)
       }
       close.addEventListener('click', listener)
-      this.closeHandlers.set(toast, { button: close, listener })
+      handlers.push({ button: close, listener })
       this.errorToastElement = toast
       toast.append(close)
     }
+
+    this.closeHandlers.set(toast, handlers)
 
     this.toasts.add(toast)
     this.stack.append(toast)
@@ -76,6 +116,7 @@ export class ToastController {
       }, TOAST_DISMISS_MS)
       this.timers.set(toast, timer)
     }
+    return { dismiss: () => this.dismissToast(toast), isVisible: () => this.toasts.has(toast) }
   }
 
   dispose(): void {
@@ -99,9 +140,11 @@ export class ToastController {
       this.timers.delete(toast)
     }
 
-    const closeHandler = this.closeHandlers.get(toast)
-    if (closeHandler) {
-      closeHandler.button.removeEventListener('click', closeHandler.listener)
+    const closeHandlers = this.closeHandlers.get(toast)
+    if (closeHandlers) {
+      for (const handler of closeHandlers) {
+        handler.button.removeEventListener('click', handler.listener)
+      }
       this.closeHandlers.delete(toast)
     }
 

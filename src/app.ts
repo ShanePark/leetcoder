@@ -40,6 +40,7 @@ import { DocumentController } from './app/document-controller'
 import { FileOperationsController } from './app/file-operations-controller'
 import { FileDialogController } from './app/file-dialog-controller'
 import { RepositoryController } from './app/repository-controller'
+import { RepositoryAccessController } from './app/repository-access-controller'
 import { ProjectContentSearchController } from './app/project-search-controller'
 import { PsLibraryController } from './app/ps-library-controller'
 import { JavaTypeMembersController } from './app/java-type-members-controller'
@@ -93,6 +94,7 @@ export class LeetcoderApp {
   private readonly requestClose: (() => Promise<void>) | undefined
   private readonly updateProgressView = createUpdateProgressView()
   private readonly toastController: ToastController
+  private readonly repositoryAccess: RepositoryAccessController
   private readonly overlay: OverlayController
   private updateController: UpdateController
   private updateProgressListenerStop: (() => void) | null = null
@@ -320,7 +322,6 @@ export class LeetcoderApp {
         onBackToToday: () => {
           this.problemSelectionController.selectToday()
         },
-        onRefresh: () => this.problemSelectionController.refreshSelectedProblem(),
         onToggleDescription: () => {
           this.dailyDescriptionOpen = !this.dailyDescriptionOpen
           this.storage?.setItem(DAILY_DESCRIPTION_KEY, this.dailyDescriptionOpen ? 'open' : 'closed')
@@ -351,6 +352,7 @@ export class LeetcoderApp {
           const button = this.root.querySelector<HTMLButtonElement>('#update-button')
           if (button) {
             button.disabled = busy
+            button.replaceChildren(iconFor(busy ? 'loader' : 'download', 'button-icon'))
             button.classList.toggle('is-spinning', busy)
             button.setAttribute('aria-busy', String(busy))
             button.setAttribute('aria-label', busy ? 'Updating leetcoder' : 'Update leetcoder')
@@ -516,6 +518,14 @@ export class LeetcoderApp {
       render: () => this.renderAll(),
       setMessage: (message, tone) => this.setMessage(message, tone),
     })
+    this.repositoryAccess = new RepositoryAccessController({
+      isMacPlatform: currentIsMacPlatform,
+      getPath: () => this.repository.recoveryPath,
+      chooseRepository: () => this.repository.chooseRepository(),
+      retryRepository: (path) => this.repository.selectRepository(path, true),
+      openSettings: options.openPermissionSettings ?? (() => tauriInvoke<void>('open_repository_permission_settings')),
+      showError: (message, actions, detail) => this.toastController.show(message, 'error', actions, detail),
+    })
     this.controlsView = new ShellControlsView({
       root: this.root,
       state: this.state,
@@ -538,7 +548,7 @@ export class LeetcoderApp {
     // while keeping start()'s completion contract intact.
     const dailyProblemLoad = this.problemSelectionController.loadDailyProblem()
     const rememberedPath = this.repository.rememberedPath
-    let repositoryLoad: Promise<void> = Promise.resolve()
+    let repositoryLoad: Promise<boolean> = Promise.resolve(false)
     if (rememberedPath) {
       repositoryLoad = this.repository.selectRepository(rememberedPath, false)
     } else {
@@ -599,6 +609,7 @@ export class LeetcoderApp {
     this.updateProgressListenerStop?.()
     this.updateProgressListenerStop = null
     this.updateProgressView.fail()
+    this.repositoryAccess.dispose()
     this.toastController.dispose()
     this.overlay.dispose()
     this.repository.dispose()
@@ -623,13 +634,12 @@ export class LeetcoderApp {
 
   private installStaticIcons(): void {
     this.element<HTMLButtonElement>('#app-menu-button').append(iconFor('menu', 'button-icon'))
-    this.element<HTMLElement>('#update-menu-icon').append(iconFor('refresh', 'app-menu-action-icon'))
+    this.element<HTMLElement>('#update-menu-icon').append(iconFor('download', 'app-menu-action-icon'))
     this.element<HTMLElement>('#settings-menu-icon').append(iconFor('settings', 'app-menu-action-icon'))
     this.element<HTMLElement>('#about-menu-icon').append(iconFor('info', 'app-menu-action-icon'))
     this.element<HTMLElement>('#exit-menu-icon').append(iconFor('power', 'app-menu-action-icon'))
     this.element<HTMLButtonElement>('#choose-repository').prepend(iconFor('folderOpen', 'button-icon'))
-    this.element<HTMLButtonElement>('#update-button').append(iconFor('refresh', 'button-icon'))
-    this.element<HTMLButtonElement>('#refresh-files').append(iconFor('refresh', 'button-icon'))
+    this.element<HTMLButtonElement>('#update-button').append(iconFor('download', 'button-icon'))
     this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
     this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
     this.element<HTMLElement>('#git-branch-icon').append(iconFor('gitBranch', 'button-icon'))
@@ -662,11 +672,6 @@ export class LeetcoderApp {
     })
     this.listen(this.element<HTMLButtonElement>('#choose-repository'), 'click', () => {
       void this.repository.chooseRepository()
-    })
-    this.listen(this.element<HTMLButtonElement>('#refresh-files'), 'click', () => {
-      if (!this.state.busy) {
-        void this.repository.refreshFiles()
-      }
     })
     this.listen(this.element<HTMLElement>('#editor-host'), 'focusin', this.handleEditorFocus)
     this.listen(this.element<HTMLInputElement>('#file-search'), 'input', (event) => {
@@ -817,10 +822,12 @@ export class LeetcoderApp {
       this.installUpdatePolling()
     }
     this.problemSelectionController.refreshDailyProblemIfStale()
+    if (this.repositoryAccess.handleVisibilityReturn()) return
     this.psLibraryController.revalidateIfStale()
     this.javaTypeMembersController.revalidateIfStale()
     // Filesystem events can be missed while the window is hidden, so returning
-    // to it re-checks the open file the way an IDE syncs on frame activation.
+    // to it re-checks the file list and open file.
+    this.repository.handleVisibilityReturn()
     if (this.state.selectedPath && this.state.projectValid) {
       void this.reloadOpenFileFromDisk(this.state.selectedPath)
     }
@@ -975,6 +982,7 @@ export class LeetcoderApp {
   }
 
   private setMessage(message: string, tone: 'info' | 'success' | 'error'): void {
+    if (tone === 'error' && this.repositoryAccess?.showFailure(message)) return
     this.toastController.show(message, tone)
   }
 

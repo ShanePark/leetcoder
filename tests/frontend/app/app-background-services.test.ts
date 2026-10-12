@@ -124,5 +124,89 @@ describe('LeetcoderApp background services', () => {
     }
   })
 
+  it('reconciles missed file changes on focus when repository watching is unavailable', async () => {
+    const { backend } = createBackend()
+    backend.watchRepository = vi.fn().mockRejectedValue(new Error('watch unavailable'))
+    const app = await startApp(dom, backend)
+    const added = { ...file, name: 'Q2AddTwoNumbers.java', path: 'src/main/java/easy/Q2AddTwoNumbers.java' }
+    vi.mocked(backend.listProblemFiles).mockResolvedValue([added])
+
+    dom.window.dispatch('focus')
+
+    await vi.waitFor(() => {
+      expect(testMocks.filenameMatchedPaths).toEqual([added.path])
+    })
+    expect(backend.listProblemFiles).toHaveBeenCalledTimes(2)
+    await app.destroy()
+  })
+
+  it('keeps unsaved editor changes while reconciling the file list on visibility return', async () => {
+    const { backend } = createBackend()
+    const app = await startApp(dom, backend)
+    testMocks.fileViewCallbacks.at(-1)?.onFileSelect(file)
+    await vi.waitFor(() => {
+      expect(backend.readProblemFile).toHaveBeenCalledWith('/repo', file.path)
+    })
+    const source = 'class Q1TwoSum { int unsaved = 1; }'
+    testMocks.editorInstances.at(-1)?.emitChange(source)
+    const added = { ...file, name: 'Q2AddTwoNumbers.java', path: 'src/main/java/easy/Q2AddTwoNumbers.java' }
+    vi.mocked(backend.listProblemFiles).mockResolvedValue([file, added])
+
+    dom.document.dispatch('visibilitychange')
+
+    await vi.waitFor(() => {
+      expect(testMocks.filenameMatchedPaths).toEqual([file.path, added.path])
+    })
+    await app.prepareToClose()
+    expect(backend.saveProblemFile).toHaveBeenCalledWith('/repo', file.path, source)
+    await app.destroy()
+  })
+
+  it('does not apply a focus file listing after the repository changes', async () => {
+    const { backend } = createBackend()
+    const app = new LeetcoderApp(dom.root as unknown as HTMLElement, {
+      backend,
+      storage: rememberedStorage() as unknown as Storage,
+      directoryPicker: async () => '/other',
+    })
+    await app.start()
+    const pending = deferred<typeof file[]>()
+    const other = { ...file, name: 'Q2AddTwoNumbers.java', path: 'src/main/java/easy/Q2AddTwoNumbers.java' }
+    vi.mocked(backend.listProblemFiles)
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValue([other])
+
+    dom.window.dispatch('focus')
+    dom.root.querySelector('#choose-repository').dispatch('click')
+    await vi.waitFor(() => {
+      expect(testMocks.filenameMatchedPaths).toEqual([other.path])
+    })
+    pending.resolve([file])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(testMocks.filenameMatchedPaths).toEqual([other.path])
+    expect(backend.listProblemFiles).toHaveBeenLastCalledWith('/other')
+    await app.destroy()
+  })
+
+  it('coalesces focus and visibility return while a file listing is pending', async () => {
+    const { backend } = createBackend()
+    const app = await startApp(dom, backend)
+    const pending = deferred<typeof file[]>()
+    vi.mocked(backend.listProblemFiles).mockImplementationOnce(() => pending.promise)
+
+    dom.window.dispatch('focus')
+    dom.document.dispatch('visibilitychange')
+    dom.window.dispatch('focus')
+    expect(backend.listProblemFiles).toHaveBeenCalledTimes(2)
+
+    pending.resolve([file])
+    await Promise.resolve()
+    await Promise.resolve()
+    dom.window.dispatch('focus')
+    expect(backend.listProblemFiles).toHaveBeenCalledTimes(3)
+    await app.destroy()
+  })
 
 })

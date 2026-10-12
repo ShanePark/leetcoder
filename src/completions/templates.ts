@@ -26,6 +26,7 @@ import type { EditorView } from '@codemirror/view'
 import {
   collectJavaSymbols,
   iterableElementTypeForExpression,
+  iterableVariableNameForExpression,
   javaIterableCandidates,
   javaIterableCandidatesFromAnalysis,
   maskJavaCommentsAndLiterals,
@@ -87,8 +88,8 @@ function javaIterTemplateBody(candidate: JavaIterableCandidate | null): string {
   const variableName = candidate?.variableName ?? 'item'
   const target = candidate?.name ?? 'items'
   // The expression being iterated is the first stop, matching the configured
-  // live-template flow. The type is updated by the extension when the target
-  // resolves to a different iterable element type.
+  // live-template flow. The extension updates the default type and name
+  // when the target resolves to a different iterable.
   return `for (\${2:${elementType}} \${3:${variableName}} : \${1:${target}}) {\n    \${0}\n}`
 }
 
@@ -270,9 +271,12 @@ interface JavaIterTemplateSession {
   bodyTo: number
   lastAutomaticType: string
   automaticType: boolean
+  lastAutomaticVariable: string
+  automaticVariable: boolean
 }
 
 const javaIterAutomaticType = Annotation.define<boolean>()
+const javaIterAutomaticVariable = Annotation.define<boolean>()
 const setJavaIterTemplateSession = StateEffect.define<JavaIterTemplateSession | null>()
 
 function mapIterTemplateRange(
@@ -345,28 +349,30 @@ function javaIterTemplateTransactionFilter(tr: Transaction): TransactionSpec | r
     return tr
   }
 
-  // A simultaneous edit of the type field is a deliberate user choice. The
-  // state field records that choice below and stops future automatic changes.
-  if (tr.changes.touchesRange(session.typeFrom, session.typeTo) || !session.automaticType) {
-    return tr
-  }
-
   const mapped = mapJavaIterTemplateSession(session, tr.changes)
   if (!mapped) return tr
+  const source = tr.newDoc.toString()
   const target = tr.newDoc.sliceString(mapped.targetFrom, mapped.targetTo)
-  const desiredType = iterableElementTypeForExpression(tr.newDoc.toString(), target, mapped.targetFrom)
-  if (!desiredType) return tr
+  const changes: Array<{ from: number, to: number, insert: string }> = []
+  const annotations = []
 
+  // Type and name choices are independent: changing either field manually
+  // must leave the other field linked to the target.
+  const desiredType = iterableElementTypeForExpression(source, target, mapped.loopFrom)
   const currentType = tr.newDoc.sliceString(mapped.typeFrom, mapped.typeTo)
-  if (currentType !== session.lastAutomaticType || currentType === desiredType) return tr
-  return [
-    tr,
-    {
-      changes: { from: mapped.typeFrom, to: mapped.typeTo, insert: desiredType },
-      sequential: true,
-      annotations: javaIterAutomaticType.of(true),
-    },
-  ]
+  if (session.automaticType && !tr.changes.touchesRange(session.typeFrom, session.typeTo)
+    && desiredType && currentType === session.lastAutomaticType && currentType !== desiredType) {
+    changes.push({ from: mapped.typeFrom, to: mapped.typeTo, insert: desiredType })
+    annotations.push(javaIterAutomaticType.of(true))
+  }
+  const desiredVariable = iterableVariableNameForExpression(source, target, mapped.loopFrom)
+  const currentVariable = tr.newDoc.sliceString(mapped.variableFrom, mapped.variableTo)
+  if (session.automaticVariable && !tr.changes.touchesRange(session.variableFrom, session.variableTo)
+    && desiredVariable && currentVariable === session.lastAutomaticVariable && currentVariable !== desiredVariable) {
+    changes.push({ from: mapped.variableFrom, to: mapped.variableTo, insert: desiredVariable })
+    annotations.push(javaIterAutomaticVariable.of(true))
+  }
+  return changes.length ? [tr, { changes, sequential: true, annotations }] : tr
 }
 
 const javaIterTemplateState = StateField.define<JavaIterTemplateSession | null>({
@@ -381,31 +387,36 @@ const javaIterTemplateState = StateField.define<JavaIterTemplateSession | null>(
       || tr.newSelection.ranges.every((range) => range.from >= mapped.bodyFrom && range.to <= mapped.bodyTo)))) return null
 
     if (tr.isUserEvent('undo') || tr.isUserEvent('redo')) {
+      const source = tr.newDoc.toString()
       const target = tr.newDoc.sliceString(mapped.targetFrom, mapped.targetTo)
-      const inferred = iterableElementTypeForExpression(tr.newDoc.toString(), target, mapped.targetFrom)
+      const inferred = iterableElementTypeForExpression(source, target, mapped.loopFrom)
+      const inferredVariable = iterableVariableNameForExpression(source, target, mapped.loopFrom)
       const currentType = tr.newDoc.sliceString(mapped.typeFrom, mapped.typeTo)
+      const currentVariable = tr.newDoc.sliceString(mapped.variableFrom, mapped.variableTo)
       return {
         ...mapped,
         automaticType: inferred === null || inferred === currentType,
         lastAutomaticType: currentType,
+        automaticVariable: inferredVariable === null || inferredVariable === currentVariable,
+        lastAutomaticVariable: currentVariable,
       }
     }
 
-    if (tr.docChanged && tr.changes.touchesRange(value.typeFrom, value.typeTo)
-      && tr.annotation(javaIterAutomaticType) !== true) {
-      return { ...mapped, automaticType: false }
+    if (tr.docChanged && tr.changes.touchesRange(value.typeFrom, value.typeTo)) {
+      if (tr.annotation(javaIterAutomaticType) === true) {
+        mapped.lastAutomaticType = tr.newDoc.sliceString(mapped.typeFrom, mapped.typeTo)
+      } else mapped.automaticType = false
     }
-    if (tr.annotation(javaIterAutomaticType) === true) {
-      return {
-        ...mapped,
-        lastAutomaticType: tr.newDoc.sliceString(mapped.typeFrom, mapped.typeTo),
-      }
+    if (tr.docChanged && tr.changes.touchesRange(value.variableFrom, value.variableTo)) {
+      if (tr.annotation(javaIterAutomaticVariable) === true) {
+        mapped.lastAutomaticVariable = tr.newDoc.sliceString(mapped.variableFrom, mapped.variableTo)
+      } else mapped.automaticVariable = false
     }
     return mapped
   },
 })
 
-/** State needed to keep an expanded iter target and element type linked. */
+/** State needed to keep an expanded iter target, type, and name linked. */
 export const javaIterTemplateExtension: Extension = [
   javaIterTemplateState,
   EditorState.transactionFilter.of(javaIterTemplateTransactionFilter),
@@ -575,6 +586,8 @@ function registerJavaIterTemplateSession(view: EditorView, from: number): void {
     bodyTo: bodyLineStart + bodyIndent,
     lastAutomaticType: source.slice(parsedTypeFrom, parsedTypeTo),
     automaticType: true,
+    lastAutomaticVariable: source.slice(variableFrom, variableTo),
+    automaticVariable: true,
   })]
   if (state.field(javaIterTemplateState, false) === undefined) {
     effects.unshift(StateEffect.appendConfig.of(javaIterTemplateExtension))

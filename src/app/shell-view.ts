@@ -16,25 +16,18 @@ export interface ShellViewOptions {
 export function renderShellView(root: HTMLElement, options: ShellViewOptions): void {
   root.innerHTML = `
     <div class="app-shell">
-      <header class="app-header">
-        <div class="app-header-leading">
-          <button id="app-menu-button" class="icon-button app-menu-button" type="button" aria-label="Open application menu" aria-haspopup="menu" aria-expanded="false" title="Application menu"></button>
-          <span class="wordmark">leetcoder</span>
-        </div>
-        <div class="app-header-actions">
-          <button id="update-button" class="icon-button update-button" type="button" aria-label="Update leetcoder" title="Update available — build and restart" hidden></button>
-          <button id="choose-repository" class="repo-chip" type="button">
-            <span id="repo-path" class="repo-chip-label">Choose repository</span>
-          </button>
-        </div>
-      </header>
-
       <main class="workspace">
         <aside class="sidebar" aria-label="Problem files">
+          <div class="sidebar-repository">
+            <button id="app-menu-button" class="icon-button app-menu-button" type="button" aria-label="Open application menu" aria-haspopup="menu" aria-expanded="false" title="Application menu"></button>
+            <button id="choose-repository" class="repo-chip" type="button">
+              <span id="repo-path" class="repo-chip-label">Choose repository</span>
+            </button>
+            <button id="update-button" class="icon-button update-button" type="button" aria-label="Update leetcoder" title="Update available — build and restart" hidden></button>
+          </div>
           <div class="sidebar-heading">
             <span class="micro-label">Problems</span>
             <span id="file-count" class="sidebar-count"></span>
-            <button id="refresh-files" class="icon-button" type="button" aria-label="Refresh problem files" title="Refresh"></button>
           </div>
           <div class="file-search">
             <label class="sr-only" for="file-search">Search filenames and project contents</label>

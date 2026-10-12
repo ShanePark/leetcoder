@@ -7,7 +7,7 @@ import {
   startCompletion,
   CompletionContext,
 } from '@codemirror/autocomplete'
-import { defaultKeymap, history } from '@codemirror/commands'
+import { defaultKeymap, history, redo } from '@codemirror/commands'
 import { java } from '@codemirror/lang-java'
 import { indentUnit } from '@codemirror/language'
 import { EditorState, Prec, type TransactionSpec } from '@codemirror/state'
@@ -419,7 +419,7 @@ class S {
     expect(harness.state().doc.toString()).toContain('for (int digit : digits)')
   })
 
-  it('moves to an editable item after changing an inferred iter target and accepting completion', () => {
+  it('moves to the inferred name after changing an iter target and accepting completion', () => {
     const source = `class S {
     void f(boolean[] appear, int[] digits) {
         iter
@@ -442,7 +442,7 @@ class S {
       selection: { anchor: target.from + 'digits'.length },
       userEvent: 'input.type',
     })
-    expect(harness.state().doc.toString()).toContain('for (int item : digits)')
+    expect(harness.state().doc.toString()).toContain('for (int digit : digits)')
 
     acceptCompletionMock.mockImplementationOnce((view: EditorView) => {
       const targetFrom = view.state.doc.toString().indexOf('digits', view.state.doc.toString().indexOf('for ('))
@@ -456,7 +456,7 @@ class S {
 
     expect(finishJavaTemplate(harness.view)).toBe(true)
     const moved = harness.state()
-    expect(moved.sliceDoc(moved.selection.main.from, moved.selection.main.to)).toBe('item')
+    expect(moved.sliceDoc(moved.selection.main.from, moved.selection.main.to)).toBe('digit')
 
     const item = moved.selection.main
     harness.view.dispatch({
@@ -581,12 +581,12 @@ class S {
       selection: { anchor: target.from + 's.toCharArray()'.length },
       userEvent: 'input.paste',
     }).state
-    expect(state.doc.toString()).toContain('for (char integer : s.toCharArray())')
+    expect(state.doc.toString()).toContain('for (char c : s.toCharArray())')
 
     expect(expandJavaTemplateOnTab(view)).toBe(true)
     expect(state.sliceDoc(state.selection.main.from, state.selection.main.to)).toBe('char')
     expect(expandJavaTemplateOnTab(view)).toBe(true)
-    expect(state.sliceDoc(state.selection.main.from, state.selection.main.to)).toBe('integer')
+    expect(state.sliceDoc(state.selection.main.from, state.selection.main.to)).toBe('c')
     state = state.update(state.replaceSelection('ch')).state
 
     expect(finishJavaIterTemplate(view)).toBe(true)
@@ -647,7 +647,7 @@ class S {
     expect(state.doc.toString()).not.toBe(beforeEnter)
   })
 
-  it('restores iter type linkage after undoing a target replacement', () => {
+  it('restores iter type and name linkage after undoing and redoing a target replacement', () => {
     const source = `class S {
     void f(String s, List<Integer> list) {
         iter
@@ -668,18 +668,21 @@ class S {
       selection: { anchor: target.from + 's.toCharArray()'.length },
       userEvent: 'input.paste',
     }).state
-    expect(replaced.doc.toString()).toContain('for (char integer : s.toCharArray())')
+    expect(replaced.doc.toString()).toContain('for (char c : s.toCharArray())')
 
     const undone = applyUndo(replaced)
     expect(undone.handled).toBe(true)
     expect(undone.state.doc.toString()).toContain('for (Integer integer : list)')
+    const redone = runEditorCommand(undone.state, redo)
+    expect(redone.doc.toString()).toContain('for (char c : s.toCharArray())')
+    expect(applyUndo(redone).state.doc.toString()).toBe(undone.state.doc.toString())
     const targetAfterUndo = undone.state.selection.main
     const reapplied = undone.state.update({
       changes: { from: targetAfterUndo.from, to: targetAfterUndo.to, insert: 's.toCharArray()' },
       selection: { anchor: targetAfterUndo.from + 's.toCharArray()'.length },
       userEvent: 'input.paste',
     }).state
-    expect(reapplied.doc.toString()).toContain('for (char integer : s.toCharArray())')
+    expect(reapplied.doc.toString()).toContain('for (char c : s.toCharArray())')
   })
 
   it('moves to the next snippet field before trying another expansion', () => {
