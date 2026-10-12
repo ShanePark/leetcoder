@@ -1,5 +1,5 @@
 import { acceptCompletion, nextSnippetField } from '@codemirror/autocomplete'
-import { indentRange } from '@codemirror/language'
+import { getIndentation, indentRange, indentString, syntaxTree } from '@codemirror/language'
 import type { EditorView } from '@codemirror/view'
 import { expandJavaPrintTemplate, expandJavaTestTemplate } from '../../completions'
 import { formatJavaSource } from '../../java-format'
@@ -28,6 +28,36 @@ export function reformatJavaDocument(view: EditorView): boolean {
   const indentation = indentRange(view.state, 0, view.state.doc.length)
   if (!indentation.empty) {
     view.dispatch({ changes: indentation, userEvent: 'format' })
+  }
+  const state = view.state
+  const tree = syntaxTree(state)
+  const closingBraces = []
+  for (let number = 1; number <= state.doc.lines; number += 1) {
+    const line = state.doc.line(number)
+    const match = /^([\t ]*)}/.exec(line.text)
+    if (!match) continue
+    const end = line.from + match[0].length
+    // An unfinished statement can own the whitespace before `}` in the
+    // recovered tree. Query inside the closing token to use its block instead.
+    const closing = tree.resolveInner(end, -1)
+    if (closing.name !== '}' || closing.parent?.name !== 'Block') continue
+    const previous = closing.prevSibling?.cursor()
+    if (!previous) continue
+    let unfinished = false
+    previous.iterate((node) => {
+      if (node.type.isError) unfinished = true
+      return !unfinished
+    })
+    if (!unfinished) continue
+    const indent = getIndentation(state, end)
+    if (indent === null) continue
+    const insert = indentString(state, indent)
+    if (insert !== match[1]) {
+      closingBraces.push({ from: line.from, to: end - 1, insert })
+    }
+  }
+  if (closingBraces.length > 0) {
+    view.dispatch({ changes: closingBraces, userEvent: 'format' })
   }
   return true
 }

@@ -16,6 +16,115 @@ import {
   moveToJavaLineEnd,
 } from '../../../src/editor'
 import { runEditorCommand, javaState } from './helpers'
+import { reformatJavaDocument } from '../../../src/editor/editing/commands'
+
+describe('reformat incomplete Java blocks', () => {
+  const formatState = (source: string): EditorState => EditorState.create({
+    doc: source,
+    extensions: [java(), indentUnit.of('    '), EditorState.tabSize.of(4)],
+  })
+
+  it('aligns the test method closing brace without completing its unfinished assertion', () => {
+    const source = [
+      'class Solution {',
+      '    @Test',
+      '    public void test() {',
+      '        assertThat()',
+      '    }',
+      '',
+      '    public int maxSum(List<Integer> nums, int k) {',
+      '        long MOD = 1;',
+      '        long a = MOD << 40; // 1099511627776',
+      '        long b = a << 40; // 256',
+      '        return -1;',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    const state = runEditorCommand(formatState(source), reformatJavaDocument)
+    expect(state.sliceDoc()).toBe(source)
+    expect(runEditorCommand(state, reformatJavaDocument).sliceDoc()).toBe(source)
+  })
+
+  it.each(['call()', 'call(', 'int value ='])('aligns nested block braces after %s', (statement) => {
+    const source = [
+      'class Solution {',
+      '    void test() {',
+      '        if (ready) {',
+      `            ${statement}`,
+      '        }',
+      '    }',
+      '    int next() {',
+      '        return 1;',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    const state = runEditorCommand(formatState(source), reformatJavaDocument)
+    expect(state.doc.toString()).toBe(source)
+    expect(runEditorCommand(state, reformatJavaDocument).doc.toString()).toBe(source)
+  })
+
+  it('ignores braces in comments, strings, and text blocks', () => {
+    const source = [
+      'class Solution {',
+      '    void test() {',
+      '        String text = "}";',
+      '        String block = """',
+      '            }',
+      '            """;',
+      '        /*',
+      '           }',
+      '        */',
+      '        // {',
+      '        call()',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    const state = runEditorCommand(formatState(source), reformatJavaDocument)
+    expect(state.doc.toString()).toBe(source)
+  })
+
+  it('preserves CRLF and comments after a recovered block closer', () => {
+    const source = 'class S {\r\n    void test() {\r\n        call()\r\n    } // unfinished\r\n}\r\n'
+    const initial = EditorState.create({
+      doc: source,
+      extensions: [java(), indentUnit.of('    '), EditorState.lineSeparator.of('\r\n')],
+    })
+    const state = runEditorCommand(initial, reformatJavaDocument)
+    expect(state.sliceDoc()).toBe(source)
+    expect(runEditorCommand(state, reformatJavaDocument).sliceDoc()).toBe(source)
+  })
+
+  it('preserves valid switch, lambda, array, and multiline method closers', () => {
+    const source = [
+      'class S {',
+      '    int[] values = {',
+      '        1, 2',
+      '    };',
+      '    void test(',
+      '        int value) {',
+      '        switch (value) {',
+      '            case 1:',
+      '                run(() -> {',
+      '                    call();',
+      '                });',
+      '                break;',
+      '        }',
+      '        if (ready) {',
+      '            call();',
+      '        } else {',
+      '            next();',
+      '        }',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    const state = runEditorCommand(formatState(source), reformatJavaDocument)
+    expect(state.doc.toString()).toBe(source)
+  })
+})
 
 describe('Java method-call parentheses', () => {
   it('handles the physical opening-parenthesis keymap before closeBrackets', () => {
