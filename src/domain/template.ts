@@ -31,7 +31,7 @@ export function renderJavaProblemSource(
     }
   }
 
-  lines.push('}', '')
+  lines.push('', '}', '')
   return lines.join('\n')
 }
 
