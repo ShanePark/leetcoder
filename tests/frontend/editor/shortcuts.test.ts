@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { EditorState, type TransactionSpec } from '@codemirror/state'
+import { EditorView, keymap, runScopeHandlers } from '@codemirror/view'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  JavaEditor,
   isFontSizeShortcut,
   isIncreaseFontSizeAltShortcut,
   isDecreaseFontSizeAltShortcut,
@@ -17,14 +20,59 @@ import {
   isSaveAltShortcut,
   isSelectAllAltShortcut,
   isShowIntentionsAltShortcut,
+  isParameterInfoAltShortcut,
   isSettingsAltShortcut,
   isShortcutHelpAltShortcut,
   isToggleCommentAltShortcut,
   isUndoAltShortcut,
 } from '../../../src/editor'
 
+const parameterInfoMocks = vi.hoisted(() => ({
+  show: vi.fn(() => true),
+  create: vi.fn(),
+  handlers: [] as Array<{ keydown?: (event: KeyboardEvent, view: EditorView) => boolean }>,
+}))
+
+vi.mock('../../../src/editor/parameter-info', () => ({
+  createJavaParameterInfo: (request: unknown) => {
+    parameterInfoMocks.create(request)
+    return { extension: [], show: parameterInfoMocks.show }
+  },
+}))
+
+// Verify the editor's actual keymap composition without browser layout.
+vi.mock('@codemirror/view', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@codemirror/view')>()
+  class StateOnlyEditorView {
+    state: EditorState
+    constructor(options: { state: EditorState }) { this.state = options.state }
+    dispatch(spec: TransactionSpec) { this.state = this.state.update(spec).state }
+    static domEventHandlers(handlers: Parameters<typeof original.EditorView.domEventHandlers>[0]) {
+      parameterInfoMocks.handlers.push(handlers)
+      return original.EditorView.domEventHandlers(handlers)
+    }
+  }
+  Object.setPrototypeOf(StateOnlyEditorView, original.EditorView)
+  return { ...original, EditorView: StateOnlyEditorView }
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.clearAllMocks()
+  parameterInfoMocks.handlers.length = 0
+})
+
 describe('Option shortcut matchers', () => {
   const base = { shiftKey: false, altKey: true, metaKey: false, ctrlKey: false }
+
+  it('matches parameter info by physical P and rejects additional modifiers', () => {
+    expect(isParameterInfoAltShortcut({ ...base, code: 'KeyP' })).toBe(true)
+    expect(isParameterInfoAltShortcut({ ...base, code: 'KeyO' })).toBe(false)
+    expect(isParameterInfoAltShortcut({ ...base, code: 'KeyP', altKey: false })).toBe(false)
+    expect(isParameterInfoAltShortcut({ ...base, code: 'KeyP', shiftKey: true })).toBe(false)
+    expect(isParameterInfoAltShortcut({ ...base, code: 'KeyP', ctrlKey: true })).toBe(false)
+    expect(isParameterInfoAltShortcut({ ...base, code: 'KeyP', metaKey: true })).toBe(false)
+  })
 
   it('matches font controls on shifted physical punctuation without accepting extra modifiers', () => {
     expect(isIncreaseFontSizeAltShortcut({ ...base, code: 'Equal', shiftKey: true })).toBe(true)
@@ -107,6 +155,36 @@ describe('Option shortcut matchers', () => {
     expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true, ctrlKey: true })).toBe(false)
     expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true, shiftKey: true })).toBe(false)
     expect(isExtractMethodShortcut({ ...base, code: 'KeyV', metaKey: true })).toBe(false)
+  })
+})
+
+describe('parameter info shortcut integration', () => {
+  it.each([false, true])('registers both bindings and physical Alt+P on macOS=%s', (mac) => {
+    vi.stubGlobal('navigator', { platform: mac ? 'MacIntel' : 'Linux', userAgent: '' })
+    const requestJavaTypeMembers = vi.fn()
+    const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement, { requestJavaTypeMembers })
+    expect(parameterInfoMocks.create).toHaveBeenCalledWith(requestJavaTypeMembers)
+    const keys = editor.view.state.facet(keymap).flat().map((binding) => binding.key)
+    expect(keys).toContain('Mod-p')
+    expect(keys).toContain('Alt-p')
+    const event = {
+      key: 'π', code: 'KeyP', shiftKey: false, altKey: true, metaKey: false, ctrlKey: false,
+      preventDefault: vi.fn(), stopPropagation: vi.fn(),
+    } as unknown as KeyboardEvent
+    expect(parameterInfoMocks.handlers.some((handlers) => handlers.keydown?.(event, editor.view))).toBe(true)
+    expect(parameterInfoMocks.show).toHaveBeenCalledWith(editor.view)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(event.stopPropagation).toHaveBeenCalledOnce()
+  })
+
+  it.each(['altKey', 'ctrlKey'] as const)('runs parameter info for the Linux %s chord', (modifier) => {
+    const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement)
+    const event = {
+      key: 'p', keyCode: 80, shiftKey: false, altKey: false, metaKey: false, ctrlKey: false,
+      [modifier]: true,
+    } as KeyboardEvent
+    expect(runScopeHandlers(editor.view, event, 'editor')).toBe(true)
+    expect(parameterInfoMocks.show).toHaveBeenCalledWith(editor.view)
   })
 })
 

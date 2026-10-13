@@ -57,6 +57,7 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
       { id: 'complete-statement', bindings: ['Shift-Mod-Enter', 'Shift-Alt-Enter'], description: 'Complete current statement' },
       { id: 'show-intentions', bindings: ['Mod-Enter', 'Alt-Enter'], description: 'Show code actions' },
       { id: 'complete', bindings: ['Ctrl-Space'], description: 'Complete', hint: true },
+      { id: 'show-parameter-info', bindings: ['Mod-p', 'Alt-p'], description: 'Show parameter info' },
       { id: 'toggle-comment', bindings: ['Mod-/', 'Alt-/'], description: 'Toggle line comment' },
       { id: 'undo', bindings: ['Mod-z', 'Alt-z'], description: 'Undo' },
       { id: 'redo', bindings: ['Shift-Mod-z', 'Shift-Alt-z'], description: 'Redo' },

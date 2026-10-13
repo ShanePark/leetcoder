@@ -54,6 +54,7 @@ import {
 } from './completions'
 import type { JavaTypeMembersMetadata } from './backend'
 import { createEditorFontSizeControls } from './editor/font-size'
+import { createJavaParameterInfo } from './editor/parameter-info'
 import {
   psLibraryExtension,
   readPsLibraryMetadata,
@@ -359,6 +360,11 @@ export function isShowIntentionsAltShortcut(event: JavaDocAltShortcutEvent): boo
     && !event.ctrlKey
 }
 
+/** Match parameter info on the physical P key when Option produces a glyph. */
+export function isParameterInfoAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyP')
+}
+
 /** Match the Option+Right Arrow form of Move to Line End. */
 export function isLineEndAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'ArrowRight'
@@ -450,6 +456,7 @@ export class JavaEditor {
   constructor(parent: HTMLElement, callbacks: EditorCallbacks = {}) {
     const macPlatform = isMacPlatform()
     const fontSize = createEditorFontSizeControls(macPlatform, callbacks.storage)
+    const parameterInfo = createJavaParameterInfo(callbacks.requestJavaTypeMembers)
     const save = () => callbacks.onSave?.() !== false
     const run = () => callbacks.onRun?.() !== false
     const runTestAtCursor = (view: EditorView): boolean => {
@@ -488,6 +495,7 @@ export class JavaEditor {
     const renameMethodShortcuts = bindings('rename-method')
     const finishTemplateShortcuts = bindings('finish-template')
     const showIntentionsShortcuts = shortcutBindings('show-intentions')
+    const parameterInfoShortcuts = shortcutBindings('show-parameter-info')
     const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const cut = (view: EditorView): boolean => cutSelectionOrLine(view, clipboard)
@@ -603,6 +611,7 @@ export class JavaEditor {
         [isFileSearchAltShortcut, focusFileSearch],
       ] as Array<[(event: JavaDocAltShortcutEvent) => boolean, (view: EditorView) => boolean]> : []),
       [isProjectSearchAltShortcut, searchProject],
+      [isParameterInfoAltShortcut, parameterInfo.show],
       [isReformatShortcut, reformatJavaDocument],
       [isIntroduceVariableShortcut, introduceJavaVariable],
       [isExtractMethodShortcut, extractMethod],
@@ -695,6 +704,7 @@ export class JavaEditor {
         EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
         javaIntentionsExtension,
+        parameterInfo.extension,
         // Consume the printable opening parenthesis before the browser can
         // emit a second input event with the stale selection range.
         javaIdentifierCallKeymap,
@@ -713,6 +723,7 @@ export class JavaEditor {
         Prec.high(keymap.of([
           ...commandBindings(shortcutBindings('increase-editor-font-size'), fontSize.increase),
           ...commandBindings(shortcutBindings('decrease-editor-font-size'), fontSize.decrease),
+          ...commandBindings(parameterInfoShortcuts, parameterInfo.show),
           ...commandBindings(bindings('expand-template'), expandJavaTemplateOnTab, false),
           // Run chords intentionally use Ctrl on both macOS and Linux.
           ...commandBindings(saveShortcuts, save),
