@@ -222,7 +222,7 @@ describe('Java Inline local variable planner', () => {
   it('bounds each local binding to its block while preserving strings and comments', () => {
     const source = 'class Solution { int f(){ {int MOD=7; System.out.println(MOD);} {int MOD=3; // MOD\n String text="MOD"; return MOD;} } }'
     const output = apply(source, plan(source))
-    expect(output).toContain('System.out.println((7))')
+    expect(output).toContain('System.out.println(7)')
     expect(output).toContain('int MOD=3; // MOD\n String text="MOD"; return MOD;')
   })
 
@@ -263,22 +263,22 @@ describe('Inline initializer type preservation', () => {
     const initializers = ['1 + 2', '(1 + 2)', '+\'a\'', '1 << 2L', '1 & 2']
     for (const initializer of initializers) {
       const source = `class Solution { int f(){final int MOD=${initializer}; return MOD;} }`
-      expect(apply(source, plan(source))).toContain(`return (${initializer});`)
+      expect(apply(source, plan(source))).toContain(`return ${initializer === '(1 + 2)' ? initializer : `(${initializer})`};`)
     }
   })
 
   it.each([
-    ['long', '1', '((long) (1))'],
-    ['byte', '2', '((byte) (2))'],
-    ['short', '3', '((short) (3))'],
-    ['char', '65', '((char) (65))'],
-    ['long', '1L', '(1L)'],
-    ['float', '1.0f', '(1.0f)'],
-    ['double', '1.0', '(1.0)'],
-    ['char', "'a'", "('a')"],
-    ['boolean', 'true && false', '(true && false)'],
-    ['boolean', '1 < 2', '(1 < 2)'],
-    ['int', 'true ? 1 : 2', '((int) (true ? 1 : 2))'],
+    ['long', '1', '(long) 1'],
+    ['byte', '2', '(byte) 2'],
+    ['short', '3', '(short) 3'],
+    ['char', '65', '(char) 65'],
+    ['long', '1L', '1L'],
+    ['float', '1.0f', '1.0f'],
+    ['double', '1.0', '1.0'],
+    ['char', "'a'", "'a'"],
+    ['boolean', 'true && false', 'true && false'],
+    ['boolean', '1 < 2', '1 < 2'],
+    ['int', 'true ? 1 : 2', 'true ? 1 : 2'],
   ])('keeps only type-preserving casts for %s initialized with %s', (type, initializer, replacement) => {
     const source = `class Solution { void f(){final ${type} MOD=${initializer}; System.out.println(MOD);} }`
     expect(apply(source, plan(source))).toContain(`System.out.println(${replacement})`)
@@ -303,7 +303,7 @@ describe('Inline resource shadowing', () => {
     expect(result.usageCount).toBe(3)
     expect(output).toContain('new java.io.BufferedReader(MOD)')
     expect(output).toContain('MOD.read(); next.read();')
-    expect(output).toContain('catch(Exception e){return (7);} finally {System.out.print((7));}')
+    expect(output).toContain('catch(Exception e){return (7);} finally {System.out.print(7);}')
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
@@ -315,7 +315,7 @@ describe('Inline resource shadowing', () => {
     expect(result.usageCount).toBe(3)
     const output = apply(source, result)
     expect(output).toContain('try(java.io.Reader MOD=')
-    expect(output).toContain('catch(Exception e){return (7);} finally {System.out.println((7));}')
+    expect(output).toContain('catch(Exception e){return (7);} finally {System.out.println(7);}')
   })
 })
 
@@ -367,7 +367,7 @@ describe('Inline stable initializer dependencies', () => {
     const source = 'class Solution { final int BASE=1; long f(){long a=BASE; return a<<40;} }'
     const result = planJavaFieldInlining(source, source.indexOf('a=BASE'))
     if ('reason' in result) throw new Error(result.reason)
-    expect(apply(source, result)).toContain('return ((long) (BASE))<<40;')
+    expect(apply(source, result)).toContain('return ((long) BASE)<<40;')
   })
 
   it('allows stable dependency references in captured lambda reads', (context) => {
@@ -604,7 +604,7 @@ describe('Inline never-written primitive local dependencies', () => {
     const source = 'class Solution { static int f(){boolean flag=false; final boolean a=flag; while(a){return 1;} return 2;} public static void main(String[] args){System.out.print(f());} }'
     const result = planJavaFieldInlining(source, source.indexOf('a=flag'))
     if ('reason' in result) throw new Error(result.reason)
-    expect(apply(source, result)).toContain('while((flag))')
+    expect(apply(source, result)).toContain('while(flag)')
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(apply(source, result))).toBe(expected)
@@ -652,5 +652,80 @@ describe('Inline unused target refusal', () => {
     if ('reason' in result) throw new Error(result.reason)
     expect(result.usageCount).toBe(1)
     expect(apply(source, result)).toContain('return (a<<40);')
+  })
+})
+
+describe('Inline an adjacent method argument', () => {
+  it('moves the screenshot Math.min initializer into append once per loop iteration', (context) => {
+    const source = `class Solution {
+      static String f(int sum, int num) {
+        StringBuilder sb = new StringBuilder();
+        for (; num > 0; num--, sum -= 9) {
+          int max = Math.min(9, sum);
+          sb.append(max);
+        }
+        return sb.toString();
+      }
+      public static void main(String[] args) { System.out.print(f(20, 3)); }
+    }`
+    const result = planJavaFieldInlining(source, source.indexOf('max ='))
+    if ('reason' in result) throw new Error(result.reason)
+    expect(result.usageCount).toBe(1)
+    expect(planJavaFieldInlining(source, source.indexOf('append(max') + 7)).toEqual(result)
+    const output = apply(source, result)
+    expect(output).not.toContain('int max =')
+    expect(output).toContain('sb.append(Math.min(9, sum));')
+    expect(output).not.toContain('(int)')
+    const expected = compileAndRun(source)
+    if (expected === null) context.skip()
+    expect(expected).toBe('992')
+    expect(compileAndRun(output)).toBe(expected)
+  })
+
+  it('preserves side effects, evaluation count, parameter receivers, and the declared overload type', (context) => {
+    const source = `class Solution {
+      static int calls;
+      static class Sink {
+        String value="";
+        void append(int value){this.value+="int:"+value;}
+        void append(long value){this.value+="long:"+value;}
+      }
+      static int read(Sink sink){calls++; sink.value+="read:"; return 9;}
+      static String f(Sink sink){long max=read(sink); sink.append((max)); return sink.value+":"+calls;}
+      public static void main(String[] args){System.out.print(f(new Sink()));}
+    }`
+    const result = planJavaFieldInlining(source, source.indexOf('max=read'))
+    if ('reason' in result) throw new Error(result.reason)
+    const output = apply(source, result)
+    expect(output).toContain('sink.append(((long) read(sink)));')
+    const expected = compileAndRun(source)
+    if (expected === null) context.skip()
+    expect(expected).toBe('read:long:9:1')
+    expect(compileAndRun(output)).toBe(expected)
+  })
+
+  it.each([
+    'int max=read(); if(flag) sb.append(max);',
+    'int max=read(); Runnable task=()->sb.append(max);',
+    'int max=read(); while(flag) sb.append(max);',
+    'int max=read(); update(); sb.append(max);',
+    'int max=read(); sb.append(max); sb.append(max);',
+    'int max=read(); builder().append(max);',
+    'int max=read(); this.sb.append(max);',
+    'int max=read(); sb.append(before(), max);',
+    'int max=read(); sb.append(1+max);',
+    'int max=read(), other=read(); sb.append(max);',
+    'int max=(sb=new StringBuilder()).length(); sb.append(max);',
+    'int max=read(); return max;',
+    'int max=read(); sb.append(max++);',
+    'int max=read(); sb.append(max); max=2;',
+  ])('refuses delayed, duplicated, or reordered evaluation: %s', (body) => {
+    const source = `class Solution { StringBuilder sb; int f(boolean flag){StringBuilder sb=new StringBuilder(); ${body} return 0;} }`
+    expect(planJavaFieldInlining(source, source.indexOf('max='))).toHaveProperty('reason')
+  })
+
+  it('keeps method-call field initializers unsupported even with an adjacent argument use', () => {
+    const source = 'class Solution { int max=read(); {StringBuilder sb=new StringBuilder(); sb.append(max);} int read(){return 9;} }'
+    expect(planJavaFieldInlining(source, source.indexOf('max='))).toHaveProperty('reason')
   })
 })

@@ -93,9 +93,19 @@ function fieldBinding(source: string, bindings: Binding[], body: Node, name: str
   return bindings.find((binding) => binding.field && binding.scope.from === body.from && nameOf(source, binding) === name) ?? null
 }
 
-function constantType(source: string, node: Node, referenceType?: (node: Node) => string | null): string | null {
+function constantType(
+  source: string,
+  node: Node,
+  referenceType?: (node: Node) => string | null,
+  methodType?: (node: Node) => string | null,
+): string | null {
   const text = source.slice(node.from, node.to)
   if (node.name === 'Identifier') return referenceType?.(node) ?? null
+  if (node.name === 'FieldAccess') {
+    const member = children(node).at(-1)
+    return member?.name === 'Identifier' ? referenceType?.(member) ?? null : null
+  }
+  if (node.name === 'MethodInvocation') return methodType?.(node) ?? null
   if (node.name === 'IntegerLiteral') return /[lL]$/.test(text) ? 'long' : 'int'
   if (node.name === 'FloatingPointLiteral') return /[fF]$/.test(text) ? 'float' : 'double'
   if (node.name === 'CharacterLiteral') return 'char'
@@ -105,17 +115,22 @@ function constantType(source: string, node: Node, referenceType?: (node: Node) =
     const type = children(node).find((part) => part.name === 'PrimitiveType')
     return type ? source.slice(type.from, type.to) : null
   }
-  const expressions = children(node).filter((part) => EXPRESSION_NODES.has(part.name))
-  if (node.name === 'ParenthesizedExpression') return expressions[0] ? constantType(source, expressions[0], referenceType) : null
+  const expressions = children(node).filter((part) => EXPRESSION_NODES.has(part.name) || part.name === 'FieldAccess')
+  if (node.name === 'ParenthesizedExpression') return expressions[0] ? constantType(source, expressions[0], referenceType, methodType) : null
   if (node.name === 'UnaryExpression') {
-    const type = expressions[0] ? constantType(source, expressions[0], referenceType) : null
+    const type = expressions[0] ? constantType(source, expressions[0], referenceType, methodType) : null
     if (!type) return null
     if (type === 'boolean') return 'boolean'
     return ['byte', 'short', 'char'].includes(type) ? 'int' : type
   }
+  if (node.name === 'TernaryExpression' && expressions.length === 3) {
+    const left = constantType(source, expressions[1], referenceType, methodType)
+    const right = constantType(source, expressions[2], referenceType, methodType)
+    return left && left === right && /^(byte|short|char|int|long|float|double|boolean)$/.test(left) ? left : null
+  }
   if (node.name !== 'BinaryExpression' || expressions.length !== 2) return null
-  const left = constantType(source, expressions[0], referenceType)
-  const right = constantType(source, expressions[1], referenceType)
+  const left = constantType(source, expressions[0], referenceType, methodType)
+  const right = constantType(source, expressions[1], referenceType, methodType)
   if (!left || !right) return null
   const operator = children(node).find((part) => /Op$/.test(part.name))
   const op = operator ? source.slice(operator.from, operator.to) : ''
@@ -262,6 +277,31 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   const initializer = children(variable).find((node) => node.from > target.definition.to && node.name !== 'AssignOp'
     && !['LineComment', 'BlockComment'].includes(node.name))
   if (!initializer || !children(variable).some((node) => node.name === 'AssignOp')) return { reason: 'The variable has no initializer.' }
+  const canMoveToAdjacentArgument = (): boolean => {
+    if (target.field || ['String', 'java.lang.String'].includes(type)
+      || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1
+      || descendants(initializer).some((part) => ['AssignmentExpression', 'UpdateExpression'].includes(part.name))) return false
+    const references = nodes.filter((part) => identifierReference(part) && source.slice(part.from, part.to) === name
+      && resolve(part) === target)
+    if (references.length !== 1) return false
+    let argument = references[0]
+    while (argument.parent?.name === 'ParenthesizedExpression') argument = argument.parent
+    const argumentsNode = argument.parent
+    const invocation = argumentsNode?.parent
+    if (argumentsNode?.name !== 'ArgumentList' || invocation?.name !== 'MethodInvocation'
+      || children(argumentsNode).filter((part) => EXPRESSION_NODES.has(part.name)).length !== 1
+      || children(argumentsNode).some((part) => part.name === ',')) return false
+    const statement = invocation.parent
+    const siblings = children(declaration.parent!).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
+    if (statement?.name !== 'ExpressionStatement' || statement.parent?.from !== declaration.parent?.from
+      || siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]?.from !== statement.from) return false
+    const receiver = children(invocation)[0]
+    if (receiver?.name !== 'Identifier' || children(invocation)[1]?.name !== '.') return false
+    const receiverBinding = resolve(receiver)
+    // Reading a local receiver has no effects, and calls cannot reassign that local.
+    return Boolean(receiverBinding && receiverBinding !== 'ambiguous' && !receiverBinding.field
+      && receiverBinding.definition.from !== target.definition.from)
+  }
   const dependencies = new Map<number, Binding>()
   let dependencySyntaxError = false
   const proofResults = new Map<number, boolean>()
@@ -326,10 +366,11 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     const binding = resolve(reference)
     return Boolean(binding && binding !== 'ambiguous' && constantResults.get(binding.definition.from))
   })
-  if (!stableExpression(initializer, new Set([target.definition.from]))) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
-  const initializerConstant = compileConstant(initializer)
+  const stableInitializer = stableExpression(initializer, new Set([target.definition.from]))
+  if (!stableInitializer && (dependencySyntaxError || !canMoveToAdjacentArgument())) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
+  const initializerConstant = stableInitializer && compileConstant(initializer)
   if (!initializerConstant && ['String', 'java.lang.String'].includes(type)) return { reason: 'A runtime String initializer cannot be duplicated safely.' }
-  for (const reference of descendants(initializer).filter((part) => part.name === 'Identifier')) {
+  for (const reference of descendants(initializer).filter(identifierReference)) {
     const binding = resolve(reference)
     if (binding && binding !== 'ambiguous') dependencies.set(binding.definition.from, binding)
   }
@@ -356,13 +397,149 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     // Non-constant String reads must not gain constant-expression concatenation and interning semantics.
     return { reason: 'String variables must be final to inline safely.' }
   }
-  const inferredType = constantType(source, initializer, (reference) => {
+  const referenceType = (reference: Node): string | null => {
     const binding = resolve(reference)
-    return binding && binding !== 'ambiguous' ? binding.type?.replace(/^java\.lang\.String$/, 'String') ?? null : null
-  })
-  const replacement = type === 'String' || type === 'java.lang.String' || inferredType === type
-    ? `(${source.slice(initializer.from, initializer.to)})`
-    : `((${type}) (${source.slice(initializer.from, initializer.to)}))`
+    if (!binding || binding === 'ambiguous'
+      || source.slice(binding.definition.to, binding.definition.parent?.to).match(/^\s*\[/)) return null
+    if (reference.parent?.name === 'FieldAccess') {
+      let owner: Node | null = reference.parent
+      while (owner && (owner.from !== binding.scope.from || owner.name !== binding.scope.name)) owner = owner.parent
+      if (!owner) return null
+      const receiver = source.slice(reference.parent.from, reference.from).trim().replace(/\.\s*$/, '')
+      if (receiver !== 'this' && !/^[$\w]+\.this$/.test(receiver)
+        && (inheritedNamesPossible(reference) || nodes.some((part) => part.name === 'TypeParameter'
+          && part.getChild('Definition') && source.slice(part.getChild('Definition')!.from, part.getChild('Definition')!.to) === receiver) || imports.some((text) => text.startsWith('importstatic')
+          && (text.endsWith(`.${receiver};`) || text.endsWith('.*;'))))) return null
+    }
+    return binding.type?.trim().replace(/^java\.lang\.String$/, 'String') ?? null
+  }
+  const sourceTypeNames = new Set(definitions.filter((definition) => [
+    'ClassDeclaration', 'InterfaceDeclaration', 'EnumDeclaration', 'RecordDeclaration',
+    'AnnotationTypeDeclaration', 'TypeParameter',
+  ].includes(definition.parent?.name ?? '')).map((definition) => source.slice(definition.from, definition.to)))
+  const imports = nodes.filter((node) => node.name === 'ImportDeclaration')
+    .map((node) => source.slice(node.from, node.to).replace(/\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, ''))
+  const inheritedNamesPossible = (node: Node): boolean => {
+    for (let ancestor: Node | null = node; ancestor; ancestor = ancestor.parent) {
+      if (!CLASS_BODIES.has(ancestor.name) || !ancestor.parent) continue
+      if (!['ClassDeclaration', 'InterfaceDeclaration', 'EnumDeclaration'].includes(ancestor.parent.name)
+        || children(ancestor.parent).some((part) => ['Superclass', 'SuperInterfaces', 'ExtendsInterfaces'].includes(part.name))) return true
+    }
+    return false
+  }
+  const standardMath = (receiver: string, invocation: Node): boolean => {
+    const rootName = receiver === 'java.lang.Math' ? 'java' : 'Math'
+    if (lexicalBinding(source, bindings, rootName, invocation.from) || sourceTypeNames.has(rootName)
+      || inheritedNamesPossible(invocation)) return false
+    return !imports.some((text) => {
+      if (text.startsWith('importstatic')) return text.endsWith(`.${rootName};`) || text.endsWith('.*;')
+      const imported = text.slice('import'.length, -1)
+      if (receiver === 'java.lang.Math') return imported.endsWith('.java')
+      return (imported.endsWith('.Math') && imported !== 'java.lang.Math')
+        || (imported.endsWith('.*') && imported !== 'java.lang.*')
+    })
+  }
+  const methodType = (invocation: Node): string | null => {
+    const parts = children(invocation)
+    const methodName = parts.find((part) => part.name === 'MethodName')
+    if (!methodName) return null
+    const name = source.slice(methodName.from, methodName.to)
+    const receiver = source.slice(invocation.from, methodName.from).trim().replace(/\.\s*$/, '').replace(/\s/g, '')
+    if ((receiver === 'Math' || receiver === 'java.lang.Math') && standardMath(receiver, invocation)
+      && (name === 'min' || name === 'max')) {
+      const argumentsNode = invocation.getChild('ArgumentList')
+      const arguments_ = argumentsNode ? children(argumentsNode)
+        .filter((part) => EXPRESSION_NODES.has(part.name) || part.name === 'FieldAccess') : []
+      if (arguments_.length !== 2) return null
+      const unboxedMathArgument = (argument: Node): string | null => {
+        const argumentType = constantType(source, argument, referenceType, methodType)
+        if (!argumentType) return null
+        const wrappers: Record<string, string> = {
+          Byte: 'byte', Short: 'short', Character: 'char', Integer: 'int',
+          Long: 'long', Float: 'float', Double: 'double',
+        }
+        const wrapper = argumentType.replace(/^java\.lang\./, '')
+        if (!wrappers[wrapper]) return argumentType
+        const rootName = argumentType.startsWith('java.lang.') ? 'java' : wrapper
+        if (sourceTypeNames.has(rootName) || imports.some((text) => {
+          if (text.startsWith('importstatic')) return text.endsWith(`.${rootName};`) || text.endsWith('.*;')
+          const imported = text.slice('import'.length, -1)
+          return rootName === 'java' ? imported.endsWith('.java')
+            : (imported.endsWith(`.${wrapper}`) && imported !== `java.lang.${wrapper}`)
+              || (imported.endsWith('.*') && imported !== 'java.lang.*')
+        })) return null
+        return wrappers[wrapper]
+      }
+      const types = arguments_.map(unboxedMathArgument)
+      if (types.some((argumentType) => !argumentType || !/^(byte|short|char|int|long|float|double)$/.test(argumentType))) return null
+      return ['double', 'float', 'long'].find((numericType) => types.includes(numericType)) ?? 'int'
+    }
+    const importedName = receiver || name
+    if (imports.some((text) => text.startsWith('importstatic')
+      && (text.endsWith(`.${importedName};`) || text.endsWith('.*;')))) return null
+    let owner = nearestAncestor(invocation, CLASS_BODIES)
+    if (receiver && receiver !== 'this') {
+      const receiverNode = parts[0]
+      const binding = receiverNode?.name === 'Identifier' ? resolve(receiverNode) : null
+      if (binding === 'ambiguous' || (binding && (!binding.type || inheritedNamesPossible(binding.definition)))
+        || (!binding && inheritedNamesPossible(invocation))) return null
+      const ownerName = binding?.type?.trim() ?? receiver
+      if (!/^[$\w]+$/.test(ownerName)) return null
+      const typeUse = binding?.definition ?? invocation
+      const candidates = bodies.filter((body) => {
+        if (className(source, body) !== ownerName) return false
+        const declaration = body.parent
+        const scope = declaration?.parent
+        if (!declaration || !scope) return false
+        if (scope.name === 'Program') return true
+        if (scope.name === 'Block') return declaration.from < typeUse.from
+          && scope.from < typeUse.from && typeUse.to < scope.to
+        for (let ancestor = typeUse.parent; ancestor; ancestor = ancestor.parent) {
+          if (ancestor.from === scope.from && ancestor.name === scope.name) return true
+        }
+        return false
+      })
+      if (candidates.length !== 1 || nodes.some((part) => part.name === 'TypeParameter'
+          && part.getChild('Definition') && source.slice(part.getChild('Definition')!.from, part.getChild('Definition')!.to) === ownerName)) return null
+      owner = candidates[0]
+    }
+    if (!owner?.parent || !['ClassDeclaration', 'InterfaceDeclaration'].includes(owner.parent.name)
+      || children(owner.parent).some((part) => ['Superclass', 'SuperInterfaces', 'ExtendsInterfaces'].includes(part.name))) return null
+    // A shared primitive return type makes overload selection irrelevant to the expression's type.
+    const methods = children(owner).filter((part) => part.name === 'MethodDeclaration'
+      && part.getChild('Definition') && source.slice(part.getChild('Definition')!.from, part.getChild('Definition')!.to) === name)
+    if (methods.length === 0 || methods.some((method) => !reliable(method))) return null
+    const returnTypes = methods.map((method) => {
+      const parameters = method.getChild('FormalParameters')
+      const body = method.getChild('Block')
+      if (parameters && source.slice(parameters.to, body?.from ?? method.to).includes('[')) return null
+      const returnType = children(method).find((part) => TYPE_NODES.has(part.name))
+      return returnType ? source.slice(returnType.from, returnType.to).trim() : null
+    })
+    if ((name === 'hashCode' && returnTypes[0] !== 'int')
+      || (name === 'equals' && returnTypes[0] !== 'boolean')) return null
+    return returnTypes[0] && /^(byte|short|char|int|long|float|double|boolean)$/.test(returnTypes[0])
+      && returnTypes.every((returnType) => returnType === returnTypes[0]) ? returnTypes[0] : null
+  }
+  const inferredType = constantType(source, initializer, referenceType, methodType)
+  const initializerText = source.slice(initializer.from, initializer.to)
+  const needsCast = type !== 'String' && type !== 'java.lang.String' && inferredType !== type
+  const castOperand = new Set([
+    'Identifier', 'FieldAccess', 'MethodInvocation', 'ArrayAccess', 'ObjectCreationExpression',
+    'ArrayCreationExpression', 'IntegerLiteral', 'FloatingPointLiteral', 'CharacterLiteral',
+    'BooleanLiteral', 'StringLiteral', 'TextBlock', 'ParenthesizedExpression',
+  ]).has(initializer.name) ? initializerText : `(${initializerText})`
+  const replacementFor = (access: Node): string => {
+    const parent = access.parent
+    const delimited = parent?.getChild(')')?.to === parent?.to
+      && (parent?.name === 'ParenthesizedExpression'
+        || (parent?.name === 'ArgumentList' && parent.parent?.name === 'MethodInvocation'))
+    if (needsCast) {
+      const cast = `(${type}) ${castOperand}`
+      return delimited ? cast : `(${cast})`
+    }
+    return delimited || initializer.name === 'ParenthesizedExpression' ? initializerText : `(${initializerText})`
+  }
   const numeric = (node: Node): boolean => {
     if (['IntegerLiteral', 'FloatingPointLiteral', 'CharacterLiteral'].includes(node.name)) return true
     if (node.name === 'Identifier' || node.name === 'FieldAccess') {
@@ -433,7 +610,7 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
       }
     }
     if (descendants(access).some((part) => ['LineComment', 'BlockComment'].includes(part.name))) return { reason: 'A qualified field reference contains comments.' }
-    changes.push({ from: access.from, to: access.to, insert: replacement })
+    changes.push({ from: access.from, to: access.to, insert: replacementFor(access) })
   }
   const usageCount = changes.length
   if (usageCount === 0) return { reason: `${target.field ? 'Field' : 'Variable'} ${name} is never used.` }
