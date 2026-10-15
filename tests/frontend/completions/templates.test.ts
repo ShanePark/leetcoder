@@ -408,6 +408,19 @@ it('retains array suffixes before the loop variable name', () => {
     ])
   })
 
+it('limits classic loop variables to a braced loop', () => {
+    const source = `class Solution {
+  void test(int[] values) {
+    for (int[] arr = values; arr != null; arr = null) {
+    }
+    iter|
+  }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'values', elementType: 'int', variableName: 'value' },
+    ])
+  })
+
 it('keeps spacing in nested wildcard element types', () => {
     const source = `class Solution {
   void test(List<List<? extends Number>> groups) {

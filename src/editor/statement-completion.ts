@@ -6,6 +6,8 @@ import {
 } from '@codemirror/language'
 import { EditorSelection } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
+import { maskJavaCommentsAndLiterals } from '../completions/source'
+import { collectJavaSymbolsFromMasked } from '../completions/source/symbols'
 
 /** A source line represented with offsets into the original document. */
 export interface SourceLine {
@@ -328,8 +330,49 @@ export interface JavaStatementCompletion {
   semicolon: string
   /** Closing parentheses/brackets needed to make the statement syntactically complete. */
   closing: string
-  /** Cursor position immediately after the completed statement. */
+  /** Cursor position immediately after the completed statement, after all changes apply. */
   cursor: number
+  /** Expands the trailing identifier when it uniquely prefixes one visible symbol. */
+  identifier?: { from: number; to: number; insert: string }
+}
+
+/** Return the one visible symbol name that a trailing, undeclared identifier abbreviates. */
+function expandTrailingIdentifier(
+  source: string,
+  statement: string,
+  statementFrom: number,
+  position: number,
+  parsed: string,
+): JavaStatementCompletion['identifier'] | null {
+  if (position !== statementFrom + statement.length) {
+    return null
+  }
+  const prefix = /[A-Za-z_$][\w$]*$/.exec(statement)?.[0]
+  if (!prefix) {
+    return null
+  }
+  // The parse rejects keywords, declared names, labels, types, and members
+  // after `.` or `::`, leaving only bare expression identifiers.
+  const node = javaLanguage.parser.parse(parsed).resolveInner(statement.length, -1)
+  if (node.name !== 'Identifier' || node.from !== statement.length - prefix.length
+    || node.parent?.name === 'FieldAccess' || node.parent?.name === 'MethodReference') {
+    return null
+  }
+  const masked = maskJavaCommentsAndLiterals(source)
+  const visible = new Set(collectJavaSymbolsFromMasked(source, position, masked)
+    .filter((symbol) => symbol.scopeStart <= position
+      && position <= symbol.scopeEnd
+      && (symbol.kind === 'field' || symbol.declaredAt <= position)
+      // Declarations inside comments or literals are not real symbols.
+      && masked.startsWith(symbol.name, symbol.declaredAt))
+    .map((symbol) => symbol.name))
+  if (visible.has(prefix)) {
+    return null
+  }
+  const matches = [...visible].filter((name) => name.startsWith(prefix))
+  return matches.length === 1
+    ? { from: position - prefix.length, to: position, insert: matches[0] }
+    : null
 }
 
 /** Plan the minimal syntax completion for the current Java statement. */
@@ -359,13 +402,19 @@ export function planJavaStatementCompletion(
   const semicolonPosition = hasSemicolon ? codeEndWithoutSpaces - 1 : codeEndWithoutSpaces
   const semicolonFrom = closing && hasSemicolon ? semicolonPosition : codeEndWithoutSpaces
   const semicolon = hasSemicolon || controlHeader ? '' : ';'
+  const statementFrom = line.from + code.length - code.trimStart().length
+  const identifier = expandTrailingIdentifier(
+    source, statement, statementFrom, position, `${statement}${closing};`,
+  )
+  const growth = identifier ? identifier.insert.length - (identifier.to - identifier.from) : 0
   return {
     semicolonFrom,
     semicolon,
     closing,
-    cursor: hasSemicolon
+    cursor: growth + (hasSemicolon
       ? codeEndWithoutSpaces + closing.length
-      : semicolonFrom + closing.length + semicolon.length,
+      : semicolonFrom + closing.length + semicolon.length),
+    ...(identifier ? { identifier } : {}),
   }
 }
 
@@ -381,8 +430,12 @@ export function completeJavaStatement(view: EditorView): boolean {
     return false
   }
   const insert = `${plan.closing}${plan.semicolon}`
+  const changes = [
+    ...(plan.identifier ? [plan.identifier] : []),
+    ...(insert ? [{ from: plan.semicolonFrom, insert }] : []),
+  ]
   view.dispatch({
-    ...(insert ? { changes: { from: plan.semicolonFrom, insert } } : {}),
+    ...(changes.length > 0 ? { changes } : {}),
     selection: { anchor: plan.cursor },
     userEvent: 'input.completeStatement',
   })
