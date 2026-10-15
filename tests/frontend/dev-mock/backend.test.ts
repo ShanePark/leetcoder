@@ -142,6 +142,7 @@ describe('browser preview Git and native-only capabilities', () => {
       commitHash: 'a1b2c3d4e5f60789', message: 'Update notes', paths,
     })
     expect(await backend.listGitChanges(repo)).toEqual([])
+    expect(await backend.countUnpushedGitCommits(repo)).toBe(1)
     expect(await finishDelayed(backend.getGitStatus(repo))).toEqual({ branch: 'main', files: [] })
     expect(await createDevMockBackend().listGitChanges(repo)).toHaveLength(3)
   })
@@ -153,6 +154,7 @@ describe('browser preview Git and native-only capabilities', () => {
     expect(diff).toContain('+        Map<Integer, Integer> seen = new HashMap<>();')
     expect(diff).toContain('@@ -0,0 +1,4 @@\n+# scratch notes\n+\n+- revisit DP problems\n+\n')
     expect(await finishDelayed(backend.pushGit(repo))).toEqual({ output: 'To github.com:shane/ps.git', branch: 'main' })
+    expect(await backend.countUnpushedGitCommits(repo)).toBe(0)
     expect(await backend.validateProject(repo)).toEqual({ valid: true })
     expect(await backend.inspectPsLibrary(repo)).toEqual({ fingerprint: 'preview', methods: [] })
     expect(await backend.checkForUpdate()).toEqual({ supported: false, available: false, currentCommit: '', latestCommit: '' })

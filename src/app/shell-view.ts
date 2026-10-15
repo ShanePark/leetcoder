@@ -102,7 +102,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         <div class="bottom-panel-tabs">
           <div class="bottom-panel-tab-list" role="tablist" aria-label="Bottom panel">
             <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests</button>
-            <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git</button>
+            <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git<span id="git-tab-indicator" class="bottom-panel-tab-indicator" role="img" aria-label="Uncommitted or unpushed changes" title="Uncommitted or unpushed changes" hidden></span></button>
           </div>
           <div class="bottom-panel-actions" role="group" aria-label="Test actions">
             <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">${shortcutLabel('run-test-at-cursor', options.macPlatform)}</kbd></span>

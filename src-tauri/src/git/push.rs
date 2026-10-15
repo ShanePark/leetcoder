@@ -46,6 +46,23 @@ pub(crate) fn push(project_root: &str) -> Result<GitPushResult, String> {
     })
 }
 
+/// Count commits on the current branch that its upstream does not have yet.
+///
+/// A detached HEAD, an unborn branch, or a branch without a resolvable
+/// upstream has nothing a push would publish, so each reports zero rather
+/// than an error.
+pub(crate) fn unpushed_commit_count(project_root: &str) -> Result<u32, String> {
+    let root = canonical_git_root(project_root)?;
+    let output = run_git(&root, ["rev-list", "--count", "@{upstream}..HEAD"])?;
+    if !output.status.success() {
+        return Ok(0);
+    }
+    utf8_stdout(&output, "Git unpushed commit count")?
+        .trim()
+        .parse()
+        .map_err(|_| "Git returned an invalid unpushed commit count".to_string())
+}
+
 fn configured_branch(root: &Path) -> Result<String, String> {
     let output = run_git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if !output.status.success() {

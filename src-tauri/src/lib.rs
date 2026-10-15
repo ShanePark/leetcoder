@@ -69,6 +69,7 @@ pub fn run() {
             commands::get_git_diff,
             commands::commit_git,
             commands::push_git,
+            commands::count_unpushed_git_commits,
             commands::run_problem_test,
             commands::stop_problem_test,
             commands::check_problem_diagnostics,

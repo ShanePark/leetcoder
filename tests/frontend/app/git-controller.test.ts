@@ -182,4 +182,52 @@ describe('GitController', () => {
       vi.useRealTimers()
     }
   })
+
+  it('refreshes a stale status once while the Git panel is hidden, without a diff or polling', async () => {
+    vi.useFakeTimers()
+    try {
+      const backend: GitBackendClient = {
+        listGitChanges: vi.fn().mockResolvedValue(' M Q1.java'),
+        getGitDiff: vi.fn().mockResolvedValue(''),
+        countUnpushedGitCommits: vi.fn().mockResolvedValue(2),
+      }
+      const { controller, hooks } = harness(backend)
+      hooks.isGitPanelVisible = () => false
+
+      controller.scheduleRefreshIfNeeded()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(backend.listGitChanges).not.toHaveBeenCalled()
+
+      controller.markStale()
+      await vi.advanceTimersByTimeAsync(250)
+
+      expect(backend.listGitChanges).toHaveBeenCalledOnce()
+      expect(backend.countUnpushedGitCommits).toHaveBeenCalledWith('/repo')
+      expect(backend.getGitDiff).not.toHaveBeenCalled()
+      expect(controller.state.files.map((file) => file.path)).toEqual(['Q1.java'])
+      expect(controller.state.unpushedCommitCount).toBe(2)
+      expect(controller.state.stale).toBe(false)
+
+      controller.scheduleRefreshIfNeeded()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(backend.listGitChanges).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the change list when the unpushed commit count fails', async () => {
+    const backend: GitBackendClient = {
+      listGitChanges: vi.fn().mockResolvedValue(' M Q1.java'),
+      getGitDiff: vi.fn().mockResolvedValue(''),
+      countUnpushedGitCommits: vi.fn().mockRejectedValue(new Error('no git')),
+    }
+    const { controller } = harness(backend)
+
+    await controller.refreshStatus()
+
+    expect(controller.state.files.map((file) => file.path)).toEqual(['Q1.java'])
+    expect(controller.state.unpushedCommitCount).toBe(0)
+    expect(controller.state.error).toBeNull()
+  })
 })

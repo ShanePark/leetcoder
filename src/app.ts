@@ -784,7 +784,9 @@ export class LeetcoderApp {
   private selectBottomPanelTab(tab: 'tests' | 'git', focus = false): void {
     this.state.bottomPanelTab = tab
     if (tab !== 'git') {
+      // Stop the visible-panel poll but keep a pending stale refresh.
       this.gitController.clearScheduledRefresh()
+      this.gitController.scheduleRefreshIfNeeded()
     }
     this.controlsView.renderBottomPanelTabs()
     this.renderGitPanel()

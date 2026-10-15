@@ -229,6 +229,8 @@ export interface BackendClient {
   getGitDiff(repoPath: string, paths: string[]): Promise<string>
   commitGit(repoPath: string, paths: string[], message: string): Promise<GitCommitResult>
   pushGit(repoPath: string): Promise<GitPushResult>
+  /** Commits on the current branch that its upstream lacks; 0 without an upstream. */
+  countUnpushedGitCommits(repoPath: string): Promise<number>
   runProblemTest(
     repoPath: string,
     fullyQualifiedClassName: string,

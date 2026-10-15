@@ -1,5 +1,5 @@
 import type { GitCommitResult, GitFileChange, GitPushResult } from '../contracts'
-import { isRecord, stringValue } from './common'
+import { isRecord, numberValue, stringValue } from './common'
 
 export function normalizeGitChanges(value: unknown): GitFileChange[] {
   const rawChanges = Array.isArray(value)
@@ -79,6 +79,14 @@ export function normalizeGitPushResult(value: unknown): GitPushResult {
     output: stringValue(value.output) ?? stringValue(value.stdout) ?? '',
     branch: stringValue(value.branch) ?? null,
   }
+}
+
+export function normalizeGitUnpushedCommitCount(value: unknown): number {
+  const count = numberValue(value)
+  if (count === undefined || !Number.isInteger(count) || count < 0) {
+    throw new Error('The Git unpushed commit count was invalid.')
+  }
+  return count
 }
 
 function compactGitStatus(indexStatus: string, worktreeStatus: string): string {

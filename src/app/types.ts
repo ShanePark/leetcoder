@@ -103,6 +103,7 @@ export interface GitBackendClient {
   commitGitChanges?: (projectRoot: string, paths: string[], message: string) => Promise<unknown>
   commitGit?: (projectRoot: string, paths: string[], message: string) => Promise<unknown>
   pushGit?: (projectRoot: string) => Promise<unknown>
+  countUnpushedGitCommits?: (projectRoot: string) => Promise<number>
 }
 
 export interface TestRunnerBackend {
@@ -133,6 +134,8 @@ export interface FileManagementBackend {
 export interface GitState {
   branch: string | null
   files: GitChangedFile[]
+  /** Commits the upstream lacks, from the same refresh as `files`. */
+  unpushedCommitCount: number
   selectedPaths: string[]
   activePath: string | null
   diffByPath: Record<string, string>

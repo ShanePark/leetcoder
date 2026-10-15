@@ -1,4 +1,7 @@
-use super::super::{process::read_bounded_stream, push::push};
+use super::super::{
+    process::read_bounded_stream,
+    push::{push, unpushed_commit_count},
+};
 use super::common::{fixture, run_fixture_git, run_fixture_git_capture};
 use std::io::Cursor;
 
@@ -49,4 +52,43 @@ fn pushes_to_the_configured_upstream_ref_explicitly() {
         &["rev-parse".to_string(), "refs/heads/main".to_string()],
     );
     assert_eq!(local_head, remote_head);
+}
+
+#[test]
+fn counts_commits_the_upstream_does_not_have() {
+    let directory = fixture();
+    let root = directory.path().to_str().unwrap();
+    assert_eq!(unpushed_commit_count(root).unwrap(), 0);
+
+    let remote = tempfile::tempdir().expect("bare remote");
+    run_fixture_git(remote.path(), &["init", "--bare", "--quiet"]);
+    run_fixture_git(directory.path(), &["branch", "-M", "main"]);
+    run_fixture_git_capture(
+        directory.path(),
+        &[
+            "remote".to_string(),
+            "add".to_string(),
+            "origin".to_string(),
+            remote.path().to_string_lossy().into_owned(),
+        ],
+    );
+    run_fixture_git_capture(
+        directory.path(),
+        &[
+            "push".to_string(),
+            "-u".to_string(),
+            "origin".to_string(),
+            "HEAD:refs/heads/main".to_string(),
+        ],
+    );
+    assert_eq!(unpushed_commit_count(root).unwrap(), 0);
+
+    run_fixture_git(
+        directory.path(),
+        &["commit", "--quiet", "--allow-empty", "-m", "local"],
+    );
+    assert_eq!(unpushed_commit_count(root).unwrap(), 1);
+
+    push(root).unwrap();
+    assert_eq!(unpushed_commit_count(root).unwrap(), 0);
 }
