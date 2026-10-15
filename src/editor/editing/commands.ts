@@ -1,5 +1,6 @@
 import { acceptCompletion, nextSnippetField } from '@codemirror/autocomplete'
 import { getIndentation, indentRange, indentString, syntaxTree } from '@codemirror/language'
+import { countColumn, EditorSelection, type ChangeSpec, type SelectionRange } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
 import { expandJavaPrintTemplate, expandJavaTestTemplate } from '../../completions'
 import { formatJavaSource } from '../../java-format'
@@ -68,4 +69,36 @@ export function expandJavaTemplateOnTab(view: EditorView): boolean {
     || acceptCompletion(view)
     || expandJavaTestTemplate(view)
     || expandJavaPrintTemplate(view)
+}
+
+/**
+ * Backspace on a whitespace-only line: at or before the proper indentation the
+ * blank line is removed and the cursor joins the previous line's end; beyond it
+ * the line is trimmed back to the proper indentation. Returns false (so the
+ * default Backspace runs) unless every cursor qualifies on a distinct line.
+ */
+export function smartBackspaceOnBlankLine(view: EditorView): boolean {
+  const { state } = view
+  const lines = new Set<number>()
+  const edits: Array<{ changes: ChangeSpec; cursor: number }> = []
+  for (const range of state.selection.ranges) {
+    if (!range.empty) return false
+    const line = state.doc.lineAt(range.head)
+    if (line.number === 1 || lines.has(line.number) || line.text.trim() !== '') return false
+    lines.add(line.number)
+    const column = countColumn(line.text.slice(0, range.head - line.from), state.tabSize)
+    const proper = getIndentation(state, line.from) ?? countColumn(line.text, state.tabSize)
+    if (column <= proper) {
+      edits.push({ changes: { from: line.from - 1, to: line.to }, cursor: line.from - 1 })
+    } else {
+      const indent = indentString(state, proper)
+      edits.push({ changes: { from: line.from, to: line.to, insert: indent }, cursor: line.from + indent.length })
+    }
+  }
+  let index = 0
+  view.dispatch(state.changeByRange((_range: SelectionRange) => {
+    const { changes, cursor } = edits[index++]
+    return { changes, range: EditorSelection.cursor(cursor) }
+  }), { scrollIntoView: true, userEvent: 'delete.backward' })
+  return true
 }

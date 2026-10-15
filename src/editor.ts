@@ -100,6 +100,7 @@ import {
   introduceJavaVariable,
   planJavaDocInsertion,
   reformatJavaDocument,
+  smartBackspaceOnBlankLine,
 } from './editor/editing'
 import {
   completeJavaStatement,
@@ -715,6 +716,7 @@ export class JavaEditor {
         Prec.highest(keymap.of(commandBindings(finishTemplateShortcuts, finishJavaTemplate, false))),
         keymap.of([
           ...closeBracketsKeymap,
+          { key: 'Backspace', run: smartBackspaceOnBlankLine },
           ...completionKeymap,
           ...defaultKeymap,
           ...historyKeymap,

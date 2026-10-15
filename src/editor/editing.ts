@@ -1,4 +1,4 @@
-export { minimalDocumentChange, reformatJavaDocument, expandJavaTemplateOnTab } from './editing/commands'
+export { minimalDocumentChange, reformatJavaDocument, expandJavaTemplateOnTab, smartBackspaceOnBlankLine } from './editing/commands'
 export { selectedLineBlocks, copySelectedText, cutSelectionOrLine } from './editing/clipboard'
 export type { JavaVariableInsertion } from './editing/refactoring'
 export { planJavaVariableInsertion, introduceJavaVariable, extractJavaMethod, inlineJavaField } from './editing/refactoring'
