@@ -27,6 +27,9 @@ import {
   isUndoAltShortcut,
 } from '../../../src/editor'
 
+// CodeMirror resolves Mod from the platform at import time, before test stubs.
+const primaryModifier = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? 'metaKey' : 'ctrlKey'
+
 const parameterInfoMocks = vi.hoisted(() => ({
   show: vi.fn(() => true),
   create: vi.fn(),
@@ -177,7 +180,7 @@ describe('parameter info shortcut integration', () => {
     expect(event.stopPropagation).toHaveBeenCalledOnce()
   })
 
-  it.each(['altKey', 'ctrlKey'] as const)('runs parameter info for the Linux %s chord', (modifier) => {
+  it.each(['altKey', primaryModifier] as const)('runs parameter info for the platform %s chord', (modifier) => {
     const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement)
     const event = {
       key: 'p', keyCode: 80, shiftKey: false, altKey: false, metaKey: false, ctrlKey: false,
