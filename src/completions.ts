@@ -12,8 +12,11 @@ import {
 } from './completions/model'
 import {
   analyzeJavaSource,
+  maskJavaCommentsAndLiterals,
 } from './completions/source'
 import { resolveJavaReceiverTypes } from './completions/type-resolution'
+import { expressionBeforeDot, resolveJavaExpressionReceiver } from './completions/expression-resolution'
+import { collectParameterName, isCollectorPrefix, javaCollectorCompletions } from './completions/collectors'
 import {
   JAVA_COMPLETIONS,
   CATALOG,
@@ -144,15 +147,11 @@ function findDotContext(source: string, position: number): DotContext | null {
     const typed = dotWord[2] ?? ''
     return { receiver: dotWord[1], from: position - typed.length, assertJ: false }
   }
-  const assertStart = before.lastIndexOf('assertThat')
-  if (assertStart >= 0) {
-    const chain = before.slice(assertStart)
-    if (/^assertThat\b[\s\S]*\.\s*[A-Za-z_$]*$/.test(chain)) {
-      const typed = /\.\s*([A-Za-z_$]*)$/.exec(chain)?.[1] ?? ''
-      return { receiver: chain, from: position - typed.length, assertJ: true }
-    }
-  }
-  return null
+  const expression = expressionBeforeDot(source, position)
+  if (!expression) return null
+  const receiver = maskJavaCommentsAndLiterals(expression.receiver)
+  const assertJ = /^(?:\(\s*)*(?:[A-Za-z_$][\w$]*\s*\.\s*)*assertThat\s*\(/.test(receiver)
+  return { ...expression, assertJ }
 }
 
 function symbolFor(symbols: JavaSymbol[], name: string, position: number): JavaSymbol | null {
@@ -320,7 +319,7 @@ function javaMemberCompletions(metadata: JavaTypeMembersMetadata, typeNames: str
     const names = method.parameters.map((parameter, index) => parameter.name?.trim()
       && /^[A-Za-z_$][\w$]*$/.test(parameter.name)
       ? parameter.name
-      : psParameterName(parameter.typeName, index))
+      : collectParameterName(method, index) ?? psParameterName(parameter.typeName, index))
     const label = `${method.name}(${names.join(', ')})`
     methodLabels.set(label, (methodLabels.get(label) ?? 0) + 1)
   }
@@ -330,7 +329,7 @@ function javaMemberCompletions(metadata: JavaTypeMembersMetadata, typeNames: str
       const declaredName = parameter.name?.trim()
       const baseName = declaredName && /^[A-Za-z_$][\w$]*$/.test(declaredName)
         ? declaredName
-        : psParameterName(parameter.typeName, index)
+        : collectParameterName(method, index) ?? psParameterName(parameter.typeName, index)
       let name = baseName
       let suffix = 2
       while (usedNames.has(name)) name = `${baseName}${suffix++}`
@@ -432,21 +431,38 @@ export function createJavaMemberCompletionSource(
     if (!dot) return javaCompletions(context)
 
     const analysis = analyzeJavaSource(source, position)
-    const resolution = resolveJavaReceiverTypes(source, dot.receiver, position, analysis.symbols, dot.assertJ)
-    if (resolution.kind === 'legacy') return javaCompletions(context)
+    const simpleResolution = resolveJavaReceiverTypes(source, dot.receiver, position, analysis.symbols, dot.assertJ)
+    if (simpleResolution.kind === 'legacy') return javaCompletions(context)
 
     const result: CompletionResult = {
       from: dot.from,
       options: [],
       validFor: javaCompletionValidFor,
     }
-    if (resolution.kind === 'unresolved') return result
-
     try {
-      const metadata = await inspect(resolution.typeNames)
+      const cache = new Map<string, JavaTypeMembersMetadata['types'][number]>()
+      const inspectCached = async (typeNames: string[]): Promise<JavaTypeMembersMetadata> => {
+        const missing = typeNames.filter((name) => !cache.has(name))
+        if (missing.length) {
+          const metadata = await inspect(missing)
+          for (const name of missing) {
+            cache.set(name, metadata.types.find((type) => type.typeName === name)
+              ?? { typeName: name, available: false, methods: [], fields: [] })
+          }
+        }
+        return { fingerprint: '', types: typeNames.map((name) => cache.get(name)!) }
+      }
+      const resolution = await resolveJavaExpressionReceiver(source, dot.receiver, position, analysis.symbols, inspectCached)
+      if (resolution.kind !== 'metadata') return result
+      const metadata = await inspectCached(resolution.typeNames)
+      const collectors = await javaCollectorCompletions(source, dot.receiver, dot.from, position,
+        metadata, resolution.typeNames, resolution.isStatic, inspectCached)
       return {
         ...result,
-        options: javaMemberCompletions(metadata, resolution.typeNames, resolution.isStatic),
+        options: [...collectors, ...javaMemberCompletions(metadata, resolution.typeNames, resolution.isStatic)],
+        validFor: (text, from, to, state) => javaCompletionValidFor(text, from, to, state)
+          && (!resolution.typeNames.includes('java.util.stream.Stream')
+            || isCollectorPrefix(text) === isCollectorPrefix(source.slice(dot.from, position))),
       }
     } catch {
       return result

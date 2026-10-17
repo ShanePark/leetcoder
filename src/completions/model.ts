@@ -79,6 +79,7 @@ export const JAVA_TYPE_IMPORTS: Readonly<Record<string, string>> = {
   BigDecimal: 'java.math.BigDecimal',
   BigInteger: 'java.math.BigInteger',
   Collections: 'java.util.Collections',
+  Collectors: 'java.util.stream.Collectors',
   Comparator: 'java.util.Comparator',
   Deque: 'java.util.Deque',
   HashMap: 'java.util.HashMap',

@@ -34,7 +34,7 @@ function symbolFor(symbols: JavaSymbol[], name: string, position: number): JavaS
   return candidates[0] ?? null
 }
 
-function canonicalTypes(source: string, typeName: string): string[] {
+export function canonicalTypes(source: string, typeName: string): string[] {
   const simpleName = typeName.slice(typeName.lastIndexOf('.') + 1)
   if (typeName.includes('.')) {
     const segments = typeName.split('.')
