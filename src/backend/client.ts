@@ -21,6 +21,7 @@ import {
   normalizeGitCommitResult,
   normalizeGitDiff,
   normalizeGitPushResult,
+  normalizeGitUnpushedCommitCount,
 } from './normalizers/git'
 import {
   normalizeProblemDiagnostics,
@@ -159,6 +160,11 @@ export function createBackendClient(
     async pushGit(repoPath) {
       const response = await invoke<unknown>('push_git', { repoPath })
       return normalizeGitPushResult(response)
+    },
+
+    async countUnpushedGitCommits(repoPath) {
+      const response = await invoke<unknown>('count_unpushed_git_commits', { repoPath })
+      return normalizeGitUnpushedCommitCount(response)
     },
 
     async runProblemTest(repoPath, fullyQualifiedClassName, testRunId, onProgress, testMethod) {

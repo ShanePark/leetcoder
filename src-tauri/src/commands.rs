@@ -253,6 +253,13 @@ pub async fn push_git(repo_path: String) -> Result<GitPushResult, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn count_unpushed_git_commits(repo_path: String) -> Result<u32, String> {
+    tauri::async_runtime::spawn_blocking(move || git::unpushed_commit_count(&repo_path))
+        .await
+        .map_err(|error| format!("Git upstream worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn run_problem_test(
     repo_path: String,
     fully_qualified_class_name: String,

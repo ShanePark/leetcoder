@@ -36,6 +36,7 @@ describe('backend client', () => {
         return { commitHash: 'abc123', message: 'Create Q1.java', paths: ['Q1.java'] }
       }
       if (command === 'push_git') return { output: 'done', branch: 'main' }
+      if (command === 'count_unpushed_git_commits') return 2
       throw new Error(`unexpected command ${command}`)
     }
     const backend = createBackendClient(invoke)
@@ -47,12 +48,14 @@ describe('backend client', () => {
       commitHash: 'abc123',
     })
     await expect(backend.pushGit('/repo')).resolves.toMatchObject({ branch: 'main' })
+    await expect(backend.countUnpushedGitCommits('/repo')).resolves.toBe(2)
     expect(calls).toEqual([
       { command: 'discard_git_changes', args: { repoPath: '/repo', path: 'Q1.java' } },
       { command: 'show_in_file_manager', args: { repoPath: '/repo', path: 'Q1.java' } },
       { command: 'get_git_diff', args: { repoPath: '/repo', paths: ['Q1.java'] } },
       { command: 'commit_git', args: { repoPath: '/repo', paths: ['Q1.java'], message: 'Create Q1.java' } },
       { command: 'push_git', args: { repoPath: '/repo' } },
+      { command: 'count_unpushed_git_commits', args: { repoPath: '/repo' } },
     ])
   })
 
@@ -63,5 +66,10 @@ describe('backend client', () => {
       paths: ['Q1.java'],
     })
     expect(normalizeGitPushResult('pushed')).toEqual({ output: 'pushed', branch: null })
+  })
+
+  it('rejects an invalid unpushed commit count', async () => {
+    const backend = createBackendClient(async () => -1)
+    await expect(backend.countUnpushedGitCommits('/repo')).rejects.toThrow('unpushed commit count was invalid')
   })
 })

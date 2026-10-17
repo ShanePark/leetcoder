@@ -4,7 +4,7 @@ import {
   type GitCommitResult,
   type GitPushResult,
 } from '../backend'
-import type { GitChangedFile, GitStatusSnapshot } from './types'
+import type { GitChangedFile, GitState, GitStatusSnapshot } from './types'
 import { gitFileName } from './path-helpers'
 
 /**
@@ -22,6 +22,16 @@ export function defaultGitCommitMessage(files: Array<Pick<GitChangedFile, 'path'
     return `${allNew ? 'Add' : 'Update'} ${gitFileName(normalized[0].path)}`
   }
   return `${allNew ? 'Add' : 'Update'} ${normalized.length} files`
+}
+
+/**
+ * Whether the last loaded status has uncommitted changes or unpushed commits.
+ * Nothing is pending until a status snapshot for the repository has loaded.
+ */
+export function hasPendingGitWork(
+  git: Pick<GitState, 'loadedRepoPath' | 'files' | 'unpushedCommitCount'>,
+): boolean {
+  return git.loadedRepoPath !== null && (git.files.length > 0 || git.unpushedCommitCount > 0)
 }
 
 /** Best-effort commit-result parse; older backends may return anything. */

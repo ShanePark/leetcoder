@@ -97,6 +97,12 @@ describe('platform primary binding', () => {
 })
 
 describe('shortcut table', () => {
+  it('declares parameter info with platform labels and both modifier bindings', () => {
+    expect(shortcutBindings('show-parameter-info')).toEqual(['Mod-p', 'Alt-p'])
+    expect(shortcutLabel('show-parameter-info', true)).toBe('⌘P')
+    expect(shortcutLabel('show-parameter-info', false)).toBe('Alt+P')
+  })
+
   it('declares the Linux Alt twins for clipboard and history actions', () => {
     expect(shortcutBindings('cut-line')).toEqual(['Mod-x', 'Alt-x'])
     expect(shortcutBindings('copy')).toEqual(['Mod-c', 'Alt-c'])
@@ -142,6 +148,11 @@ describe('shortcut table', () => {
     expect(shortcutLabel('search-project', true)).toBe('⇧⌘F')
     expect(shortcutLabel('extract-method', false)).toBe('Ctrl+Alt+M')
     expect(shortcutLabel('extract-method', true)).toBe('⌘⌥M')
+    expect(shortcutLabel('inline-field', false)).toBe('Ctrl+Alt+N')
+    expect(shortcutLabel('inline-field', true)).toBe('⌘⌥N')
+    expect(shortcutBindings('inline-field')).toEqual(['Mod-Alt-n'])
+    expect(platformShortcutBindings('inline-field', false)).toEqual(['Mod-Alt-n'])
+    expect(platformShortcutBindings('inline-field', true)).toEqual(['Mod-Alt-n'])
     expect(shortcutLabel('rename-method', false)).toBe('Shift+F6')
     expect(shortcutLabel('rename-method', true)).toBe('⇧F6')
     expect(shortcutLabel('expand-template', false)).toBe('Tab')

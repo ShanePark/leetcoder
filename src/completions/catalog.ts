@@ -1,4 +1,5 @@
-import { snippet, type Completion } from '@codemirror/autocomplete'
+import { insertCompletionText, pickedCompletion, snippet, type Completion } from '@codemirror/autocomplete'
+import type { EditorView } from '@codemirror/view'
 import { applyJavaType, JAVA_TYPE_IMPORTS } from './imports'
 import { JAVA_KEYWORDS, JAVA_TYPES } from './model'
 import { javaPrintCompletion, javaTestCompletion } from './templates'
@@ -10,7 +11,11 @@ export interface MethodSpec {
 }
 
 export const JAVA_COMPLETIONS: Completion[] = [
-  ...JAVA_KEYWORDS.map((label) => ({ label, type: 'keyword' as const })),
+  ...JAVA_KEYWORDS.map((label) => ({
+    label,
+    type: 'keyword' as const,
+    ...(label === 'continue' ? { apply: applyContinue } : {}),
+  })),
   ...JAVA_TYPES.map((label) => ({
     label,
     type: 'type' as const,
@@ -34,6 +39,20 @@ export const JAVA_COMPLETIONS: Completion[] = [
   snippetCompletion('for (int i = 0; i < ...; i++)', 'loop', 'for (int ${i} = 0; ${i} < ${length}; ${i}++) {\n    ${}\n}'),
   snippetCompletion('for (var item : ...)', 'loop', 'for (var ${item} : ${items}) {\n    ${}\n}'),
 ]
+
+function applyContinue(
+  view: EditorView,
+  completion: Completion,
+  from: number,
+  to: number,
+): void {
+  const statement = 'continue;'
+  const end = view.state.sliceDoc(to, to + 1) === ';' ? to + 1 : to
+  view.dispatch({
+    ...insertCompletionText(view.state, statement, from, end),
+    annotations: pickedCompletion.of(completion),
+  })
+}
 
 export const CATALOG: Record<string, MethodSpec[]> = {
   Iterable: specs([

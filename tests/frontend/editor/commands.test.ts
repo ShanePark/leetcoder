@@ -2,7 +2,7 @@ import { closeBrackets, insertBracket } from '@codemirror/autocomplete'
 import { moveLineDown, moveLineUp } from '@codemirror/commands'
 import { java } from '@codemirror/lang-java'
 import { indentUnit } from '@codemirror/language'
-import { EditorSelection, EditorState, type TransactionSpec } from '@codemirror/state'
+import { EditorSelection, EditorState, type Transaction, type TransactionSpec } from '@codemirror/state'
 import { runScopeHandlers, type EditorView } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
 import {
@@ -16,6 +16,115 @@ import {
   moveToJavaLineEnd,
 } from '../../../src/editor'
 import { runEditorCommand, javaState } from './helpers'
+import { reformatJavaDocument } from '../../../src/editor/editing/commands'
+
+describe('reformat incomplete Java blocks', () => {
+  const formatState = (source: string): EditorState => EditorState.create({
+    doc: source,
+    extensions: [java(), indentUnit.of('    '), EditorState.tabSize.of(4)],
+  })
+
+  it('aligns the test method closing brace without completing its unfinished assertion', () => {
+    const source = [
+      'class Solution {',
+      '    @Test',
+      '    public void test() {',
+      '        assertThat()',
+      '    }',
+      '',
+      '    public int maxSum(List<Integer> nums, int k) {',
+      '        long MOD = 1;',
+      '        long a = MOD << 40; // 1099511627776',
+      '        long b = a << 40; // 256',
+      '        return -1;',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    const state = runEditorCommand(formatState(source), reformatJavaDocument)
+    expect(state.sliceDoc()).toBe(source)
+    expect(runEditorCommand(state, reformatJavaDocument).sliceDoc()).toBe(source)
+  })
+
+  it.each(['call()', 'call(', 'int value ='])('aligns nested block braces after %s', (statement) => {
+    const source = [
+      'class Solution {',
+      '    void test() {',
+      '        if (ready) {',
+      `            ${statement}`,
+      '        }',
+      '    }',
+      '    int next() {',
+      '        return 1;',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    const state = runEditorCommand(formatState(source), reformatJavaDocument)
+    expect(state.doc.toString()).toBe(source)
+    expect(runEditorCommand(state, reformatJavaDocument).doc.toString()).toBe(source)
+  })
+
+  it('ignores braces in comments, strings, and text blocks', () => {
+    const source = [
+      'class Solution {',
+      '    void test() {',
+      '        String text = "}";',
+      '        String block = """',
+      '            }',
+      '            """;',
+      '        /*',
+      '           }',
+      '        */',
+      '        // {',
+      '        call()',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    const state = runEditorCommand(formatState(source), reformatJavaDocument)
+    expect(state.doc.toString()).toBe(source)
+  })
+
+  it('preserves CRLF and comments after a recovered block closer', () => {
+    const source = 'class S {\r\n    void test() {\r\n        call()\r\n    } // unfinished\r\n}\r\n'
+    const initial = EditorState.create({
+      doc: source,
+      extensions: [java(), indentUnit.of('    '), EditorState.lineSeparator.of('\r\n')],
+    })
+    const state = runEditorCommand(initial, reformatJavaDocument)
+    expect(state.sliceDoc()).toBe(source)
+    expect(runEditorCommand(state, reformatJavaDocument).sliceDoc()).toBe(source)
+  })
+
+  it('preserves valid switch, lambda, array, and multiline method closers', () => {
+    const source = [
+      'class S {',
+      '    int[] values = {',
+      '        1, 2',
+      '    };',
+      '    void test(',
+      '        int value) {',
+      '        switch (value) {',
+      '            case 1:',
+      '                run(() -> {',
+      '                    call();',
+      '                });',
+      '                break;',
+      '        }',
+      '        if (ready) {',
+      '            call();',
+      '        } else {',
+      '            next();',
+      '        }',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    const state = runEditorCommand(formatState(source), reformatJavaDocument)
+    expect(state.doc.toString()).toBe(source)
+  })
+})
 
 describe('Java method-call parentheses', () => {
   it('handles the physical opening-parenthesis keymap before closeBrackets', () => {
@@ -357,6 +466,123 @@ describe('Complete Current Statement', () => {
       'class S {\n    void f() {\n        return answer;   // c\n    }\n}',
     )
     expect(state.selection.main.head).toBe(source.indexOf(statement) + 'return answer;'.length)
+  })
+
+  describe('expands a unique visible symbol prefix', () => {
+    const method = (body: string[]): string => [
+      'class Solution {',
+      '    public int sumCounts(List<Integer> nums) {',
+      ...body.map((line) => `        ${line}`),
+      '    }',
+      '}',
+    ].join('\n')
+    // The statement under test is the last occurrence, after any declarations it abbreviates.
+    const complete = (source: string, statement: string): EditorState => runEditorCommand(
+      javaState(source).update({
+        selection: { anchor: source.lastIndexOf(statement) + statement.length },
+      }).state,
+      completeJavaStatement,
+    )
+    const replaceLast = (source: string, search: string, replacement: string): string => {
+      const index = source.lastIndexOf(search)
+      return `${source.slice(0, index)}${replacement}${source.slice(index + search.length)}`
+    }
+
+    it('completes the name before adding the semicolon in one undoable change', () => {
+      const source = method([
+        'int answer = 0;',
+        'for (int num : nums) {',
+        '    answer += num;',
+        '}',
+        'return ans',
+      ])
+      const position = source.indexOf('return ans') + 'return ans'.length
+      const transactions: Transaction[] = []
+      let state = javaState(source).update({ selection: { anchor: position } }).state
+      const view = {
+        get state() {
+          return state
+        },
+        dispatch: (spec: TransactionSpec) => {
+          const transaction = state.update(spec)
+          transactions.push(transaction)
+          state = transaction.state
+        },
+      } as unknown as EditorView
+
+      expect(completeJavaStatement(view)).toBe(true)
+      expect(transactions).toHaveLength(1)
+      expect(transactions[0].isUserEvent('input.completeStatement')).toBe(true)
+      expect(state.doc.toString()).toBe(source.replace('return ans', 'return answer;'))
+      expect(state.selection.main.head).toBe(source.indexOf('return ans') + 'return answer;'.length)
+    })
+
+    it('combines the expansion with missing closing delimiters', () => {
+      const source = method(['int answer = 0;', 'foo(ans'])
+      const state = complete(source, 'foo(ans')
+
+      expect(state.doc.toString()).toBe(source.replace('foo(ans', 'foo(answer);'))
+      expect(state.selection.main.head).toBe(source.indexOf('foo(ans') + 'foo(answer);'.length)
+
+      const before = method(['int answer = 0;', 'foo(ans;'])
+      const closed = complete(before, 'foo(ans')
+      expect(closed.doc.toString()).toBe(before.replace('foo(ans;', 'foo(answer);'))
+      expect(closed.selection.main.head).toBe(before.indexOf('foo(ans') + 'foo(answer);'.length)
+    })
+
+    it('expands parameters and fields', () => {
+      const parameter = method(['return nu'])
+      expect(complete(parameter, 'return nu').doc.toString())
+        .toBe(parameter.replace('return nu', 'return nums;'))
+
+      const field = 'class S {\n    int total;\n    int f() {\n        return tot\n    }\n}'
+      expect(complete(field, 'return tot').doc.toString())
+        .toBe(field.replace('return tot', 'return total;'))
+    })
+
+    it('keeps ambiguous, declared, and unmatched names unchanged', () => {
+      for (const [body, statement] of [
+        [['int answer = 0;', 'List<Integer> ansList = nums;', 'return ans'], 'return ans'],
+        [['int ans = 0;', 'int answer = 0;', 'return ans'], 'return ans'],
+        [['int answer = 0;', 'return xyz'], 'return xyz'],
+        [['int answer = 0;', '// int ansOld = 0;', 'return answer'], 'return answer'],
+      ] as const) {
+        const source = method([...body])
+        expect(complete(source, statement).doc.toString())
+          .toBe(replaceLast(source, statement, `${statement};`))
+      }
+    })
+
+    it('ignores symbols declared later, out of scope, or only in comments', () => {
+      for (const body of [
+        ['for (int num : nums) {', '    Set<Integer> set = new HashSet<>();', '}', 'return se'],
+        ['if (nums.isEmpty()) {', '    int seen = 0;', '}', 'return se'],
+        ['for (int seen = 0; seen < 3; seen++) {', '}', 'return se'],
+        ['return se', 'int seen = 0;'],
+        ['// int seen = 0;', 'return se'],
+      ]) {
+        const source = method(body)
+        expect(complete(source, 'return se').doc.toString())
+          .toBe(source.replace('return se', 'return se;'))
+      }
+    })
+
+    it('does not expand members, declared names, keywords, or names before the cursor end', () => {
+      for (const [body, statement] of [
+        [['int answer = 0;', 'return nums.ans'], 'return nums.ans'],
+        [['int answer = 0;', 'int ans'], 'int ans'],
+        [['boolean truth = true;', 'return true'], 'return true'],
+      ] as const) {
+        const source = method([...body])
+        expect(complete(source, statement).doc.toString())
+          .toBe(replaceLast(source, statement, `${statement};`))
+      }
+
+      const source = method(['int answer = 0;', 'return ans + 1'])
+      // The cursor is after `ans`, but the statement continues past it.
+      const position = source.indexOf('return ans') + 'return ans'.length
+      expect(planJavaStatementCompletion(source, position)?.identifier).toBeUndefined()
+    })
   })
 
   it('matches only Shift+Option+Enter', () => {

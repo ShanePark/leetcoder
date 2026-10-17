@@ -54,6 +54,7 @@ import {
 } from './completions'
 import type { JavaTypeMembersMetadata } from './backend'
 import { createEditorFontSizeControls } from './editor/font-size'
+import { createJavaParameterInfo } from './editor/parameter-info'
 import {
   psLibraryExtension,
   readPsLibraryMetadata,
@@ -94,10 +95,12 @@ import {
   copySelectedText,
   expandJavaTemplateOnTab,
   extractJavaMethod,
+  inlineJavaField,
   formatJavaDocClipboard,
   introduceJavaVariable,
   planJavaDocInsertion,
   reformatJavaDocument,
+  smartBackspaceOnBlankLine,
 } from './editor/editing'
 import {
   completeJavaStatement,
@@ -136,6 +139,7 @@ export {
 export {
   expandJavaTemplateOnTab,
   extractJavaMethod,
+  inlineJavaField,
   formatJavaDocClipboard,
   introduceJavaVariable,
   planJavaDocInsertion,
@@ -357,6 +361,11 @@ export function isShowIntentionsAltShortcut(event: JavaDocAltShortcutEvent): boo
     && !event.ctrlKey
 }
 
+/** Match parameter info on the physical P key when Option produces a glyph. */
+export function isParameterInfoAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyP')
+}
+
 /** Match the Option+Right Arrow form of Move to Line End. */
 export function isLineEndAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'ArrowRight'
@@ -433,6 +442,14 @@ export function isExtractMethodShortcut(event: JavaDocAltShortcutEvent): boolean
     && (event.metaKey !== event.ctrlKey)
 }
 
+/** Match the cross-platform Ctrl/Command+Option+N chord by physical key. */
+export function isInlineFieldShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyN'
+    && event.altKey
+    && !event.shiftKey
+    && (event.metaKey !== event.ctrlKey)
+}
+
 /** A deliberately small CodeMirror wrapper used by the single editor pane. */
 export class JavaEditor {
   readonly view: EditorView
@@ -440,6 +457,7 @@ export class JavaEditor {
   constructor(parent: HTMLElement, callbacks: EditorCallbacks = {}) {
     const macPlatform = isMacPlatform()
     const fontSize = createEditorFontSizeControls(macPlatform, callbacks.storage)
+    const parameterInfo = createJavaParameterInfo(callbacks.requestJavaTypeMembers)
     const save = () => callbacks.onSave?.() !== false
     const run = () => callbacks.onRun?.() !== false
     const runTestAtCursor = (view: EditorView): boolean => {
@@ -474,13 +492,16 @@ export class JavaEditor {
     const projectSearchShortcuts = shortcutBindings('search-project')
     const introduceVariableShortcuts = bindings('introduce-variable')
     const extractMethodShortcuts = bindings('extract-method')
+    const inlineFieldShortcuts = bindings('inline-field')
     const renameMethodShortcuts = bindings('rename-method')
     const finishTemplateShortcuts = bindings('finish-template')
     const showIntentionsShortcuts = shortcutBindings('show-intentions')
+    const parameterInfoShortcuts = shortcutBindings('show-parameter-info')
     const shortcutLabel = testRunShortcutLabel(macPlatform ? 'mac' : 'other')
     const clipboard = callbacks.clipboard ?? createClipboardBridge()
     const cut = (view: EditorView): boolean => cutSelectionOrLine(view, clipboard)
     const extractMethod = (view: EditorView): boolean => extractJavaMethod(view, callbacks.onRefactorError)
+    const inlineField = (view: EditorView): boolean => inlineJavaField(view, callbacks.onRefactorError)
     const renameSymbol = (view: EditorView): boolean => renameJavaSymbol(view, callbacks.onRefactorError)
     const showIntentions = (view: EditorView): boolean => showJavaIntentions(view)
     const showShortcuts = (): boolean => {
@@ -591,9 +612,11 @@ export class JavaEditor {
         [isFileSearchAltShortcut, focusFileSearch],
       ] as Array<[(event: JavaDocAltShortcutEvent) => boolean, (view: EditorView) => boolean]> : []),
       [isProjectSearchAltShortcut, searchProject],
+      [isParameterInfoAltShortcut, parameterInfo.show],
       [isReformatShortcut, reformatJavaDocument],
       [isIntroduceVariableShortcut, introduceJavaVariable],
       [isExtractMethodShortcut, extractMethod],
+      [isInlineFieldShortcut, inlineField],
     ]
 
     const commandBindings = (
@@ -682,6 +705,7 @@ export class JavaEditor {
         EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
         javaIntentionsExtension,
+        parameterInfo.extension,
         // Consume the printable opening parenthesis before the browser can
         // emit a second input event with the stale selection range.
         javaIdentifierCallKeymap,
@@ -692,6 +716,7 @@ export class JavaEditor {
         Prec.highest(keymap.of(commandBindings(finishTemplateShortcuts, finishJavaTemplate, false))),
         keymap.of([
           ...closeBracketsKeymap,
+          { key: 'Backspace', run: smartBackspaceOnBlankLine },
           ...completionKeymap,
           ...defaultKeymap,
           ...historyKeymap,
@@ -700,6 +725,7 @@ export class JavaEditor {
         Prec.high(keymap.of([
           ...commandBindings(shortcutBindings('increase-editor-font-size'), fontSize.increase),
           ...commandBindings(shortcutBindings('decrease-editor-font-size'), fontSize.decrease),
+          ...commandBindings(parameterInfoShortcuts, parameterInfo.show),
           ...commandBindings(bindings('expand-template'), expandJavaTemplateOnTab, false),
           // Run chords intentionally use Ctrl on both macOS and Linux.
           ...commandBindings(saveShortcuts, save),
@@ -712,6 +738,7 @@ export class JavaEditor {
           ...commandBindings(moveLineDownShortcuts, moveLineDown),
           ...commandBindings(introduceVariableShortcuts, introduceJavaVariable),
           ...commandBindings(extractMethodShortcuts, extractMethod),
+          ...commandBindings(inlineFieldShortcuts, inlineField),
           ...commandBindings(renameMethodShortcuts, renameSymbol),
           // Familiar line-editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while

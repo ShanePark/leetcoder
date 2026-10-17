@@ -29,6 +29,7 @@ public class Q3622CheckDivisibilityByDigitSumAndProduct {
     public boolean checkDivisibility(int n) {
 
     }
+
 }
 `)
     expect(source).not.toContain('assertThat();')
@@ -53,6 +54,7 @@ public class Q123Example {
     public void test() {
         assertThat()
     }
+
 }
 `)
   })
@@ -120,6 +122,6 @@ describe('planProblemFile', () => {
 
     expect(plan.methodSignature).toBeNull()
     expect(plan.source).not.toContain('public int')
-    expect(plan.source).toContain('assertThat()\n    }\n}')
+    expect(plan.source).toContain('assertThat()\n    }\n\n}')
   })
 })

@@ -55,7 +55,7 @@ export interface JavaIterableCandidate {
 
 /** Java keywords offered by the top-level completion provider. */
 export const JAVA_KEYWORDS = [
-  'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class', 'const',
+  'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class',
   'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final', 'finally', 'float',
   'for', 'if', 'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'new', 'null',
   'package', 'private', 'protected', 'public', 'record', 'return', 'short', 'static', 'strictfp',

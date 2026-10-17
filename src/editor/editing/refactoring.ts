@@ -1,7 +1,7 @@
 import { syntaxTree } from '@codemirror/language'
 import { EditorSelection, type EditorState } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
-import { findJavaRefactorSelection, planJavaMethodExtraction } from '../../java-refactor'
+import { findJavaRefactorSelection, planJavaFieldInlining, planJavaMethodExtraction } from '../../java-refactor'
 import {
   balancedJavaDelimiters,
   isInsideCommentOrString,
@@ -259,5 +259,29 @@ export function extractJavaMethod(view: EditorView, onError?: (message: string) 
     return true
   }
   if (failure) onError?.(failure)
+  return true
+}
+
+/** Inline all field or local-variable usages and remove its declaration. */
+export function inlineJavaField(view: EditorView, onError?: (message: string) => void): boolean {
+  const { state } = view
+  if (state.readOnly) return true
+  if (state.selection.ranges.length !== 1) {
+    onError?.('Select one field or local variable to inline.')
+    return true
+  }
+  const selection = state.selection.main
+  const plan = planJavaFieldInlining(state.doc.toString(), selection.from, selection.to)
+  if ('reason' in plan) {
+    onError?.(plan.reason)
+    return true
+  }
+  const changes = state.changes(plan.changes)
+  view.dispatch({
+    changes,
+    selection: EditorSelection.cursor(changes.mapPos(selection.head, 1)),
+    scrollIntoView: true,
+    userEvent: 'input.inlineField',
+  })
   return true
 }

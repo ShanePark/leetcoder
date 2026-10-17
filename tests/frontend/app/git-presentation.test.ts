@@ -16,6 +16,7 @@ import {
   nextUtcMidnightDelayMs,
   utcDateKey,
 } from '../../../src/app'
+import { hasPendingGitWork } from '../../../src/app/git-helpers'
 
 describe('Git panel helpers', () => {
   it('normalizes porcelain-style and object Git status payloads', () => {
@@ -190,5 +191,16 @@ describe('git result toast copy', () => {
   it('splits a repo-relative path into directory and basename', () => {
     expect(gitDirectoryPath('src/main/java/easy/Q1.java')).toBe('src/main/java/easy')
     expect(gitDirectoryPath('README.md')).toBe('')
+  })
+})
+
+describe('Git tab change indicator', () => {
+  const change = { path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }
+
+  it('reports uncommitted changes or unpushed commits only after status loads', () => {
+    expect(hasPendingGitWork({ loadedRepoPath: '/repo', files: [], unpushedCommitCount: 0 })).toBe(false)
+    expect(hasPendingGitWork({ loadedRepoPath: '/repo', files: [change], unpushedCommitCount: 0 })).toBe(true)
+    expect(hasPendingGitWork({ loadedRepoPath: '/repo', files: [], unpushedCommitCount: 2 })).toBe(true)
+    expect(hasPendingGitWork({ loadedRepoPath: null, files: [change], unpushedCommitCount: 1 })).toBe(false)
   })
 })

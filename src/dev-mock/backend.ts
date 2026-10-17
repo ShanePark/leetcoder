@@ -48,6 +48,7 @@ export function createDevMockBackend(): BackendClient & {
       deletions: null,
     },
   ]
+  let unpushedCommits = 0
 
   return {
     async validateProject(): Promise<ProjectValidation> {
@@ -237,12 +238,18 @@ export function createDevMockBackend(): BackendClient & {
     async commitGit(_repoPath: string, paths: string[], message: string): Promise<GitCommitResult> {
       await delay(300)
       gitChanges = gitChanges.filter((change) => !paths.includes(change.path))
+      unpushedCommits += 1
       return { commitHash: 'a1b2c3d4e5f60789', message, paths }
     },
 
     async pushGit(): Promise<GitPushResult> {
       await delay(500)
+      unpushedCommits = 0
       return { output: 'To github.com:shane/ps.git', branch: 'main' }
+    },
+
+    async countUnpushedGitCommits(): Promise<number> {
+      return unpushedCommits
     },
 
     ...createMockTestRunner(),

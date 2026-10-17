@@ -1,5 +1,5 @@
 import type { AppState } from './types'
-import { gitFileName } from './git-helpers'
+import { gitFileName, hasPendingGitWork } from './git-helpers'
 import { updateGitCommitControls as updateGitCommitControlsView } from './git-view'
 import { iconFor } from '../icons'
 import { shortcutLabel } from '../shortcuts'
@@ -36,6 +36,7 @@ export class ShellControlsView {
     this.element<HTMLElement>('#tests-panel').hidden = !testsSelected
     this.element<HTMLElement>('#git-panel').hidden = testsSelected
     this.element<HTMLButtonElement>('#run-test').hidden = !testsSelected
+    this.element<HTMLElement>('#git-tab-indicator').hidden = !hasPendingGitWork(this.state.git)
   }
 
   /**

@@ -48,11 +48,19 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* A recessed segmented control: each tab owns a padded hit area and the
+   active one is raised, so the selection reads at a glance. */
 .bottom-panel-tab-list {
   display: flex;
+  align-self: center;
   align-items: stretch;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
 }
 
 .bottom-panel-actions {
@@ -82,30 +90,32 @@
 }
 
 .bottom-panel-tab {
-  position: relative;
   display: inline-flex;
   align-items: center;
-  padding: 0 10px;
+  gap: 6px;
+  padding: 0 12px;
+  border-radius: calc(var(--radius-sm) - 2px);
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
+  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }
 
-.bottom-panel-tab:hover {
+.bottom-panel-tab:hover:not(.is-active) {
+  background: var(--surface-2);
   color: var(--text);
 }
 
 .bottom-panel-tab.is-active {
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--text);
 }
 
-.bottom-panel-tab.is-active::after {
-  position: absolute;
-  right: 6px;
-  bottom: -1px;
-  left: 6px;
-  height: 2px;
-  border-radius: 1px;
+.bottom-panel-tab-indicator {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
   background: var(--accent);
-  content: "";
 }

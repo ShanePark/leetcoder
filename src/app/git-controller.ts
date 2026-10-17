@@ -54,6 +54,7 @@ export function createGitState(): GitState {
   return {
     branch: null,
     files: [],
+    unpushedCommitCount: 0,
     selectedPaths: [],
     activePath: null,
     diffByPath: {},
@@ -152,8 +153,8 @@ export class GitController {
     this.state.diffLoading = false
     if (this.hooks.isGitPanelVisible()) {
       this.hooks.renderPanel()
-      this.scheduleRefreshIfNeeded()
     }
+    this.scheduleRefreshIfNeeded()
   }
 
   scheduleRefreshIfNeeded(): void {
@@ -162,7 +163,7 @@ export class GitController {
     }
     const context = this.hooks.getContext()
     if (this.refreshTimer !== null
-      || !this.hooks.isGitPanelVisible()
+      || !this.needsRefresh()
       || !context.repoPath
       || !context.projectValid
       || !this.hooks.isWindowVisible()
@@ -177,7 +178,7 @@ export class GitController {
         return
       }
       const current = this.hooks.getContext()
-      if (!this.hooks.isGitPanelVisible()
+      if (!this.needsRefresh()
         || !current.repoPath
         || !current.projectValid
         || !this.hooks.isWindowVisible()
@@ -233,6 +234,7 @@ export class GitController {
     }
     this.clearScheduledRefresh()
     const method = this.backend.getGitStatus ?? this.backend.listGitChanges
+    const countUnpushed = this.backend.countUnpushedGitCommits
     if (!method) {
       this.state.error = 'Not available in this build'
       this.state.loadedRepoPath = repoPath
@@ -248,7 +250,13 @@ export class GitController {
     this.state.error = null
     this.hooks.renderPanel()
     try {
-      const snapshot = normalizeGitStatus(await method(repoPath))
+      const [status, unpushedCommitCount] = await Promise.all([
+        method(repoPath),
+        // The count only feeds the tab indicator; failing it must not hide
+        // the change list.
+        countUnpushed ? countUnpushed(repoPath).catch(() => 0) : 0,
+      ])
+      const snapshot = normalizeGitStatus(status)
       if (!this.isCurrentStatusRequest({ id: requestId, repoPath, repositoryGeneration })) {
         return
       }
@@ -259,6 +267,7 @@ export class GitController {
         : snapshot.files.map((file) => file.path)
       this.state.branch = snapshot.branch
       this.state.files = snapshot.files
+      this.state.unpushedCommitCount = unpushedCommitCount
       this.state.selectedPaths = selectedPaths
       this.state.activePath = snapshot.files.some((file) => file.path === this.state.activePath)
         ? this.state.activePath
@@ -266,7 +275,8 @@ export class GitController {
       this.state.diffByPath = {}
       this.state.fallbackDiff = ''
       this.state.loadedRepoPath = repoPath
-      const activePath = this.state.activePath
+      // A hidden panel skips the diff; showing it refreshes status again.
+      const activePath = this.hooks.isGitPanelVisible() ? this.state.activePath : null
       await this.loadDiff(
         repoPath,
         activePath ? [activePath] : [],
@@ -555,6 +565,14 @@ export class GitController {
       repoPath,
       repositoryGeneration: context.repositoryGeneration,
     }
+  }
+
+  /**
+   * The visible panel polls. A hidden one refreshes only after a change marks
+   * the snapshot stale, which keeps the tab's change indicator current.
+   */
+  private needsRefresh(): boolean {
+    return this.hooks.isGitPanelVisible() || this.state.stale
   }
 
   private isAlive(): boolean {

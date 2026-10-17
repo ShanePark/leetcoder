@@ -247,6 +247,7 @@ vi.mock('../../../src/app/git-controller', () => ({
   createGitState: () => ({
     branch: null,
     files: [],
+    unpushedCommitCount: 0,
     selectedPaths: [],
     activePath: null,
     diffByPath: {},

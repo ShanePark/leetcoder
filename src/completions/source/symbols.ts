@@ -373,7 +373,20 @@ function extractParameters(source: string, position: number, braces: ReturnType<
   return result
 }
 
-function extractDeclarations(source: string, position: number, braces: ReturnType<typeof matchingBraces>): JavaSymbol[] {
+/** Return the `{` that opens a loop body after the header starting at `open`, if any. */
+function loopBodyOpen(masked: string, open: number): number | null {
+  let depth = 0
+  for (let index = open; index < masked.length; index += 1) {
+    if (masked[index] === '(') depth += 1
+    else if (masked[index] === ')' && --depth === 0) {
+      const body = /^\s*\{/.exec(masked.slice(index + 1))
+      return body ? index + body[0].length : null
+    }
+  }
+  return null
+}
+
+function extractDeclarations(source: string, masked: string, position: number, braces: ReturnType<typeof matchingBraces>): JavaSymbol[] {
   const result: JavaSymbol[] = []
   // A declaration starts after a statement/block boundary. Keeping the
   // boundary in the expression avoids treating method calls as declarations.
@@ -420,7 +433,13 @@ function extractDeclarations(source: string, position: number, braces: ReturnTyp
   while ((match = forDeclaration.exec(source))) {
     const declaredAt = match.index + match[0].lastIndexOf(match[2])
     if (declaredAt > position) continue
-    const scope = enclosingScope(match.index, braces)
+    // A braced loop limits the variable to its header and body; otherwise the
+    // enclosing block is the conservative fallback.
+    const bodyOpen = loopBodyOpen(masked, match.index + match[0].indexOf('('))
+    const bodyClose = bodyOpen === null ? undefined : braces.openToClose.get(bodyOpen)
+    const scope = bodyClose !== undefined
+      ? { start: match.index, end: bodyClose }
+      : enclosingScope(match.index, braces)
     const variableType = `${match[1]}${match[3] ?? ''}`
     const elementType = inferElementType(variableType, match[4])
     result.push({
@@ -448,7 +467,7 @@ function extractDeclarations(source: string, position: number, braces: ReturnTyp
 
 export function collectJavaSymbolsFromMasked(source: string, position: number, masked: string): JavaSymbol[] {
   const braces = matchingBraces(masked)
-  return [...extractDeclarations(source, position, braces), ...extractParameters(source, position, braces)]
+  return [...extractDeclarations(source, masked, position, braces), ...extractParameters(source, position, braces)]
 }
 
 export function collectJavaSymbols(source: string, position = source.length): JavaSymbol[] {
