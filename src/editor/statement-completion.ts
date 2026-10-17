@@ -195,6 +195,7 @@ export function balancedJavaDelimiters(text: string): boolean {
 function missingJavaClosingDelimiters(text: string): string | null {
   const stack: string[] = []
   let blockComment = false
+  let lineComment = false
   let quote: '"' | "'" | null = null
   let escaped = false
   let textBlock = false
@@ -202,6 +203,12 @@ function missingJavaClosingDelimiters(text: string): string | null {
   for (let index = 0; index < text.length; index += 1) {
     const character = text[index]
     const next = text[index + 1]
+    if (lineComment) {
+      if (character === '\n' || character === '\r') {
+        lineComment = false
+      }
+      continue
+    }
     if (blockComment) {
       if (character === '*' && next === '/') {
         blockComment = false
@@ -225,6 +232,11 @@ function missingJavaClosingDelimiters(text: string): string | null {
       } else if (character === quote) {
         quote = null
       }
+      continue
+    }
+    if (character === '/' && next === '/') {
+      lineComment = true
+      index += 1
       continue
     }
     if (character === '/' && next === '*') {
@@ -375,6 +387,34 @@ function expandTrailingIdentifier(
     : null
 }
 
+function* multilineStatementStarts(source: string, codeEnd: number): Generator<number> {
+  const masked = maskJavaCommentsAndLiterals(source.slice(0, codeEnd)).trimEnd()
+  // Semicolons inside a closed lambda body belong to the enclosing statement.
+  const stack: string[] = []
+  let index = masked.length - 1
+  if (masked[index] === ';') index -= 1
+  for (; index >= 0; index -= 1) {
+    const character = masked[index]
+    if (character === ')' || character === ']' || character === '}') {
+      // A preceding block may end here; syntax validation distinguishes it
+      // from a lambda or anonymous class belonging to the current expression.
+      if (character === '}' && stack.length === 0) yield index + 1
+      stack.push(character === ')' ? '(' : character === ']' ? '[' : '{')
+    } else if (character === '(' || character === '[' || character === '{') {
+      if (stack.at(-1) === character) {
+        stack.pop()
+      } else if (character === '{') {
+        yield index + 1
+        return
+      }
+    } else if (character === ';' && stack.length === 0) {
+      yield index + 1
+      return
+    }
+  }
+  yield 0
+}
+
 /** Plan the minimal syntax completion for the current Java statement. */
 export function planJavaStatementCompletion(
   source: string,
@@ -385,9 +425,26 @@ export function planJavaStatementCompletion(
     return null
   }
   const codeEnd = line.from + lineCodeEnd(line.text)
-  const code = source.slice(line.from, codeEnd)
+  if (!source.slice(line.from, codeEnd).trim()) return null
+  const plan = planJavaStatementFrom(source, position, line.from, codeEnd)
+  if (plan) return plan
+  for (const from of multilineStatementStarts(source, codeEnd)) {
+    if (from >= line.from) continue
+    const multilinePlan = planJavaStatementFrom(source, position, from, codeEnd)
+    if (multilinePlan) return multilinePlan
+  }
+  return null
+}
+
+function planJavaStatementFrom(
+  source: string,
+  position: number,
+  from: number,
+  codeEnd: number,
+): JavaStatementCompletion | null {
+  const code = source.slice(from, codeEnd)
   const trimmed = code.trim()
-  if (!trimmed || code.includes('/*')) {
+  if (!trimmed) {
     return null
   }
   const hasSemicolon = /;\s*$/.test(trimmed)
@@ -398,11 +455,11 @@ export function planJavaStatementCompletion(
   if (closing === null || (!isStatementCandidate(statement, closing) && !controlHeader)) {
     return null
   }
-  const codeEndWithoutSpaces = line.from + code.trimEnd().length
+  const codeEndWithoutSpaces = from + code.trimEnd().length
   const semicolonPosition = hasSemicolon ? codeEndWithoutSpaces - 1 : codeEndWithoutSpaces
   const semicolonFrom = closing && hasSemicolon ? semicolonPosition : codeEndWithoutSpaces
   const semicolon = hasSemicolon || controlHeader ? '' : ';'
-  const statementFrom = line.from + code.length - code.trimStart().length
+  const statementFrom = from + code.length - code.trimStart().length
   const identifier = expandTrailingIdentifier(
     source, statement, statementFrom, position, `${statement}${closing};`,
   )

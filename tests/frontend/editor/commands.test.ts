@@ -328,6 +328,119 @@ describe('line movement commands', () => {
 })
 
 describe('Complete Current Statement', () => {
+  const streamDeclaration = [
+    '        List<Integer> list = Arrays.stream(nums)',
+    '                .boxed()',
+    '                .sorted((a, b) -> {',
+    '                    int aDigitSum = digitSum(a);',
+    '                    int bDigitSum = digitSum(b);',
+    '                    if (aDigitSum == bDigitSum) {',
+    '                        return a - b;',
+    '                    }',
+    '                    return aDigitSum - bDigitSum;',
+    '                }).collect(Collectors.toList())',
+  ].join('\n')
+
+  it.each(['\n', '\r\n'])('completes a multiline lambda chain with %j line endings', (lineBreak) => {
+    const source = [
+      'class Solution {',
+      '    public int minSwaps(int[] nums) {',
+      '        assertThat(nums).isNotEmpty();',
+      streamDeclaration,
+      '        Map<Integer, Integer> valueIndexMap = new HashMap<>();',
+      '        Map<Integer, Integer> indexValueMap = new HashMap<>();',
+      '        return 0;',
+      '    }',
+      '}',
+    ].join('\n').replaceAll('\n', lineBreak)
+    const terminal = '}).collect(Collectors.toList())'
+    const end = source.indexOf(terminal) + terminal.length
+    expect(planJavaStatementCompletion(source, end)).toMatchObject({
+      semicolonFrom: end, semicolon: ';', closing: '', cursor: end + 1,
+    })
+    // EditorState normalizes line endings, so command offsets use its document.
+    const normalized = javaState(source).doc.toString()
+    const normalizedEnd = normalized.indexOf(terminal) + terminal.length
+    for (const position of [normalizedEnd, normalizedEnd - 1, normalized.indexOf('Collectors.toList')]) {
+      const state = runEditorCommand(
+        javaState(normalized).update({ selection: { anchor: position } }).state,
+        completeJavaStatement,
+      )
+      expect(state.doc.toString()).toBe(`${normalized.slice(0, normalizedEnd)};${normalized.slice(normalizedEnd)}`)
+      expect(state.selection.main.head).toBe(normalizedEnd + 1)
+      expect(runEditorCommand(state, completeJavaStatement).doc.toString()).toBe(state.doc.toString())
+    }
+  })
+
+  it('ignores delimiter punctuation in comments within a multiline chain', () => {
+    const declaration = streamDeclaration.replace('.boxed()', '.boxed() // unmatched ) } ;')
+    const source = `class S {\n    void f() {\n${declaration}   // keep\n    }\n}`
+    const position = source.indexOf('   // keep')
+    const state = runEditorCommand(
+      javaState(source).update({ selection: { anchor: position } }).state,
+      completeJavaStatement,
+    )
+    expect(state.doc.toString()).toBe(`${source.slice(0, position)};${source.slice(position)}`)
+    expect(state.selection.main.head).toBe(position + 1)
+  })
+
+  it.each([
+    'for (int i = 0; i < nums.length; i++) { map.put(nums[i], i); }',
+    'if (ready) { call(); }',
+  ])('completes a multiline chain after a completed block: %s', (block) => {
+    const source = `class S {\n    void f() {\n        ${block}\n${streamDeclaration}\n    }\n}`
+    const position = source.indexOf('Collectors.toList())') + 'Collectors.toList())'.length
+    const state = runEditorCommand(
+      javaState(source).update({ selection: { anchor: position } }).state,
+      completeJavaStatement,
+    )
+    expect(state.doc.toString()).toBe(`${source.slice(0, position)};${source.slice(position)}`)
+  })
+
+  it('ignores balanced block comments in a multiline chain', () => {
+    const declaration = streamDeclaration.replace('.boxed()', '.boxed() /* unmatched ) } ; */')
+    const source = `class S {\n    void f() {\n${declaration}\n    }\n}`
+    const position = source.indexOf('Collectors.toList())') + 'Collectors.toList())'.length
+    const state = runEditorCommand(
+      javaState(source).update({ selection: { anchor: position } }).state,
+      completeJavaStatement,
+    )
+    expect(state.doc.toString()).toBe(`${source.slice(0, position)};${source.slice(position)}`)
+  })
+
+  it.each([
+    'int[] values = new int[]{\n            1, 2\n        }',
+    'Runnable task = new Runnable() {\n            public void run() { call(); }\n        }',
+  ])('keeps expression bodies ending with a brace in their declaration', (declaration) => {
+    const source = `class S {\n    void f() {\n        ${declaration}\n    }\n}`
+    const position = source.indexOf(declaration) + declaration.length
+    const state = runEditorCommand(
+      javaState(source).update({ selection: { anchor: position } }).state,
+      completeJavaStatement,
+    )
+    expect(state.doc.toString()).toBe(`${source.slice(0, position)};${source.slice(position)}`)
+  })
+
+  it('completes an unfinished return inside the lambda without completing the outer chain', () => {
+    const source = `class S {\n    void f() {\n${streamDeclaration}\n    }\n}`
+      .replace('return aDigitSum - bDigitSum;', 'return aDigitSum - bDigitSum')
+    const position = source.indexOf('return aDigitSum - bDigitSum') + 'return aDigitSum - bDigitSum'.length
+    const state = runEditorCommand(
+      javaState(source).update({ selection: { anchor: position } }).state,
+      completeJavaStatement,
+    )
+    expect(state.doc.toString()).toBe(`${source.slice(0, position)};${source.slice(position)}`)
+    expect(state.selection.main.head).toBe(position + 1)
+  })
+
+  it('does not complete a preceding statement from an empty or comment-only line', () => {
+    for (const blank of ['        ', '        // keep']) {
+      const source = `class S {\n    void f() {\n${streamDeclaration}\n${blank}\n    }\n}`
+      const position = source.indexOf(`\n${blank}\n`) + 1 + blank.length
+      expect(planJavaStatementCompletion(source, position)).toBeNull()
+    }
+  })
+
   it('adds a missing semicolon without inserting a line break', () => {
     const source = 'class Solution {\n    void solve() {\n        return answer\n    }\n}'
     const position = source.indexOf('return answer') + 'return answer'.length
