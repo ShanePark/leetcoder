@@ -42,6 +42,11 @@ export const leetcoderTheme = EditorView.theme({
   '.cm-selectionMatch': {
     backgroundColor: 'var(--editor-link-background)',
   },
+  '.cm-symbolHighlight': {
+    backgroundColor: 'var(--editor-link-background)',
+    boxShadow: 'inset 0 -1px var(--editor-link-border)',
+    borderRadius: '2px',
+  },
   '.cm-activeLine': {
     backgroundColor: editorPalette.activeLine,
   },
