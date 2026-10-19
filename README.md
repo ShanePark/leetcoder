@@ -1,18 +1,52 @@
 # leetcoder
 
 A focused Tauri desktop editor for Java solutions in the `ps` repository:
-load a problem, create its class, edit the solution, and run its JUnit tests.
+browse problems, edit solutions with Java-aware assistance, run JUnit tests,
+and review and commit changes.
 The app supports that repository's layout rather than arbitrary Java projects.
 
 <p align="center">
   <img src="src-tauri/icons/icon.png" width="144" alt="leetcoder app icon: a white ghost holding a green check mark" />
   <br />
-  <img src="artifacts/leetcoder-q86-passed.jpg" width="960" alt="Q86 Partition List with five passing JUnit tests and Gradle output" />
+  <img src="artifacts/leetcoder-q86-passed.jpg" width="960" alt="Current desktop editor showing the Q86 Partition List solution, project explorer, and five passing JUnit tests" />
 </p>
 
 See [architecture and work ownership](docs/architecture.md) for module boundaries,
 [the performance audit](docs/performance.md) for measured results and caveats,
 and [AGENTS.md](AGENTS.md) for contribution policy.
+
+## Features
+
+- **Problem browsing:** load today's daily problem or look up a problem by
+  number, read its description in the app, and create or reopen its Java file.
+- **Workspace:** browse problems by difficulty, filter filenames, and search
+  saved project contents. Open solutions in tabs with autosave and external
+  file change detection. Duplicate a solution for another attempt while
+  retaining its test harness and fixtures, or rename, delete, and reveal files.
+- **Java assistance:** complete local symbols, members, common collection APIs,
+  supported Stream chains and Collectors recipes, and public library APIs from
+  the repository classpath. Parameter hints show overloads and the current
+  argument. `Ps` helper completions reflect resolved dependencies and refresh
+  after Gradle changes.
+- **Editing tools:** expand live templates such as `test`, `iter`, `mod`,
+  `sout`/`soutv`, and `serr`/`serrv`, with linked editable fields and inferred
+  names or types. Use automatic imports, unused-import cleanup, formatting,
+  JavaDoc generation, string-aware paste, and statement completion. Navigate to
+  same-file definitions, highlight same-file usages, and rename local variables,
+  parameters, or methods. Introduce variables, extract methods, and inline
+  supported fields or local variables, including local array initializers.
+  Apply supported intentions such as creating a missing helper or adding a
+  missing parameter when the required types can be inferred safely.
+- **Tests and diagnostics:** run a class or one test from the cursor or gutter,
+  follow compilation and execution progress, stop a run, and inspect individual
+  test output and failures. Compiler diagnostics also appear while editing.
+- **Git:** inspect the branch, changed files, and diffs; select files to
+  **Commit** or **Commit & Push**, or confirm a discard. The Git tab indicates
+  uncommitted or unpushed changes.
+- **App controls:** choose System, Light, or Dark appearance, resize panes, and
+  adjust the editor font size. Theme, layout, and font preferences persist.
+  **Settings → Keyboard shortcuts** lists bindings for macOS and Linux from
+  [the shared shortcut definitions](src/shortcuts.ts).
 
 ## Requirements
 
@@ -105,25 +139,40 @@ A frontend build alone does not update the installed app. Production rebuilds
 intentionally use the persistent `src-tauri/target` path; preserve it for this
 workflow.
 
+The in-app **Update leetcoder** action also rebuilds, installs, and restarts
+from the existing local source checkout when its commit differs from the
+installed build. It requires a clean working tree and the build tools above;
+it does not fetch or pull remote changes or download a published release.
+
 ## Daily workflow
 
 1. Choose the `ps` root containing `build.gradle`, `settings.gradle`, and
    `gradlew`. The app validates
    `src/main/java/shane/leetcode/problems/{easy,medium,xhard}` and remembers
    the selected path locally.
-2. The Today card requests the daily problem through LeetCode GraphQL.
-   Refresh to request it again, or open its link in a browser.
-3. Select **New problem file**. Easy maps to `shane.leetcode.problems.easy`,
-   Medium to `.medium`, and Hard to `.xhard`. Class names follow the
-   repository's `ClassNameFactory` convention. Collisions use the first
-   available suffix (`Q3622CheckDivisibilityByDigitSumAndProduct`, then
-   `...2`, `...3`, etc.), including existing Java and Kotlin files; no
-   confirmation is requested.
-4. Edit the created file with Java highlighting, completions, and editing
-   actions. Save with **Save**; the in-app shortcut list shows the current
-   platform bindings, defined in [src/shortcuts.ts](src/shortcuts.ts).
-5. Run the test at the cursor or all tests in the current class. Unsaved
-   changes are saved first; stdout and stderr appear in Output.
+2. Load today's problem or enter a problem number in the header. Read its
+   description in the app, open the problem in a browser, or use **Back to
+   today** after browsing another problem.
+3. Select **Create file**, or **Open file** if a Java solution already exists.
+   When several attempts exist, the app opens the highest numbered Java
+   variant. Easy maps to `shane.leetcode.problems.easy`, Medium to `.medium`,
+   and Hard to `.xhard`. Generated names follow the repository's
+   `ClassNameFactory` convention, using an available numeric suffix to avoid
+   collisions with Java or Kotlin files.
+4. Edit the solution in a tab. Changes autosave after a short pause and are
+   flushed before navigation, tests, and Git operations; a manual save action
+   is also available. Clean documents reload external changes, while unsaved
+   edits are preserved. Use the file context menu's **Duplicate** action to
+   start another attempt with the existing tests.
+5. Use **Run** for the class, or run the test at the cursor or from its gutter
+   marker. Inspect progress, individual results, compiler errors, and stdout
+   or stderr in **Tests**; use **Stop** to cancel a running test.
+6. Open **Git** to inspect diffs and choose the files to commit. Enter a commit
+   message, then choose **Commit** or **Commit & Push**. Pushing uses the
+   repository's configured upstream and existing Git credentials.
+
+When macOS blocks access to the selected repository folder, the app offers
+**Choose folder again** and **Open permission settings** to help restore access.
 
 ### Generated scaffold and test execution
 
@@ -154,17 +203,15 @@ and `@Test` method; add the solution method yourself.
 
 Problem tests live alongside solutions in `src/main/java`. Each run creates a
 temporary Gradle init script rather than modifying `build.gradle` or installing
-a permanent task:
+a permanent task. It compiles the selected problem and shared Java sources
+outside the problem folders, then runs JUnit Platform with the test runtime
+JARs and main resources. Other problem files do not need to compile for the
+selected problem to run.
 
-```bash
-./gradlew --init-script /temporary/leetcoder-init.gradle \
-  leetcoderProblemTest \
-  --tests shane.leetcode.problems.easy.Q3622CheckDivisibilityByDigitSumAndProduct
-```
-
-The task uses main source-set output, the test runtime classpath, and JUnit
-Platform. The script is removed afterward. Execution depends on the selected
-repository's wrapper, downloaded dependencies, and supported JDK.
+Compiled shared and problem classes are cached under the selected repository's
+`build/leetcoder/v1/` directory. The temporary init script is removed afterward.
+Test execution has a five-second limit, excluding compilation. Execution still
+depends on the repository's wrapper, downloaded dependencies, and supported JDK.
 
 ## CI and limitations
 
@@ -174,8 +221,11 @@ matrix runs frontend typecheck/test/build, Rust format/test/check, and the
 native bundle build; Ubuntu first installs the dependencies above. Bundles
 are uploaded as workflow artifacts, without signing or publishing releases.
 
-The app has no login, submission, or guaranteed offline cache. Daily requests
-use an unauthenticated endpoint that may change or reject requests. Java
-completion, formatting, and refactoring are lightweight; there is no Java
-language server or debugger. Repository layout and local Gradle/JDK
-requirements remain part of the supported workflow.
+The app has no login, submission, or guaranteed offline cache. Problem requests
+use an unauthenticated endpoint that may change or reject requests. Project
+content search reads saved files; it does not search unsaved editor buffers.
+Java assistance uses lightweight analysis and available classpath metadata;
+refactorings and intentions apply only when their supported patterns can be
+resolved safely. There is no Java language server, debugger, or project-wide
+rename. Repository layout and local Gradle/JDK requirements remain part of the
+supported workflow.
