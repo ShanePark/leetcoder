@@ -271,11 +271,13 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     return (identifiers.at(-2) === ownerName && identifiers.at(-1) === name)
       || (identifiers.at(-1) === ownerName && descendants(node).some((part) => source.slice(part.from, part.to) === '*'))
   })) return { reason: 'A static import may refer to this field; it cannot be resolved safely.' }
-  const type = target.type?.trim()
-  if (!type || !/^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)$/.test(type)
-    || source.slice(target.definition.to, variable.to).match(/^\s*\[/)) return { reason: CONSTANT_ERROR }
+  const declaratorDimensions = children(variable).filter((part) => part.name === 'Dimension')
+  const type = (target.type?.trim().replace(/\s+/g, '') ?? '') + '[]'.repeat(declaratorDimensions.length)
+  const arrayType = /^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)\[\]$/.test(type)
+  if ((!arrayType && !/^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)$/.test(type))
+    || (arrayType && target.field)) return { reason: CONSTANT_ERROR }
   const initializer = children(variable).find((node) => node.from > target.definition.to && node.name !== 'AssignOp'
-    && !['LineComment', 'BlockComment'].includes(node.name))
+    && !['LineComment', 'BlockComment', 'Dimension'].includes(node.name))
   if (!initializer || !children(variable).some((node) => node.name === 'AssignOp')) return { reason: 'The variable has no initializer.' }
   const canMoveToAdjacentArgument = (): boolean => {
     if (target.field || ['String', 'java.lang.String'].includes(type)
@@ -366,8 +368,36 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     const binding = resolve(reference)
     return Boolean(binding && binding !== 'ambiguous' && constantResults.get(binding.definition.from))
   })
+  const canMoveArrayInitializer = (): boolean => {
+    if (!arrayType || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1) return false
+    const array = initializer.name === 'ArrayInitializer' ? initializer
+      : initializer.name === 'ArrayCreationExpression' ? initializer.getChild('ArrayInitializer') : null
+    if (!array) return false
+    if (initializer.name === 'ArrayCreationExpression') {
+      const creationType = children(initializer).find((part) => TYPE_NODES.has(part.name))
+      const dimensions = children(initializer).filter((part) => part.name === 'Dimension')
+      if (!creationType || dimensions.length !== 1 || children(dimensions[0]).some((part) => !['[', ']'].includes(part.name))
+        || `${source.slice(creationType.from, creationType.to).replace(/\s+/g, '')}[]`.replace(/^java\.lang\./, '') !== type.replace(/^java\.lang\./, '')) return false
+    }
+    if (!children(array).filter((part) => !['{', '}', ',', 'LineComment', 'BlockComment'].includes(part.name))
+      .every((part) => stableExpression(part, new Set([target.definition.from])))) return false
+    const references = nodes.filter((part) => identifierReference(part) && source.slice(part.from, part.to) === name
+      && resolve(part) === target)
+    if (references.length !== 1) return false
+    const reference = references[0]
+    let context: Node | null = reference
+    while (context && context.name !== 'ExpressionStatement') {
+      if (['LambdaExpression', 'ClassBody', 'TernaryExpression', 'AssignmentExpression', 'UpdateExpression'].includes(context.name)
+        || (context.name === 'BinaryExpression' && children(context).some((part) => part.name === 'LogicOp'))) return false
+      context = context.parent
+    }
+    const siblings = children(declaration.parent!).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
+    // A single unconditional use in the next statement keeps one allocation in the same execution path.
+    return context?.parent?.from === declaration.parent?.from
+      && siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]?.from === context?.from
+  }
   const stableInitializer = stableExpression(initializer, new Set([target.definition.from]))
-  if (!stableInitializer && (dependencySyntaxError || !canMoveToAdjacentArgument())) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
+  if (!stableInitializer && (dependencySyntaxError || !(arrayType ? canMoveArrayInitializer() : canMoveToAdjacentArgument()))) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
   const initializerConstant = stableInitializer && compileConstant(initializer)
   if (!initializerConstant && ['String', 'java.lang.String'].includes(type)) return { reason: 'A runtime String initializer cannot be duplicated safely.' }
   for (const reference of descendants(initializer).filter(identifierReference)) {
@@ -392,7 +422,7 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   })) {
     return { reason: 'An earlier initializer may read the field before it is initialized.' }
   }
-  if (!isFinal && (type === 'String' || type === 'java.lang.String'
+  if (!arrayType && !isFinal && (type === 'String' || type === 'java.lang.String'
     || descendants(initializer).some((node) => ['StringLiteral', 'TextBlock'].includes(node.name)))) {
     // Non-constant String reads must not gain constant-expression concatenation and interning semantics.
     return { reason: 'String variables must be final to inline safely.' }
@@ -522,8 +552,9 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
       && returnTypes.every((returnType) => returnType === returnTypes[0]) ? returnTypes[0] : null
   }
   const inferredType = constantType(source, initializer, referenceType, methodType)
-  const initializerText = source.slice(initializer.from, initializer.to)
-  const needsCast = type !== 'String' && type !== 'java.lang.String' && inferredType !== type
+  const initializerText = (arrayType && initializer.name === 'ArrayInitializer' ? `new ${type} ` : '')
+    + source.slice(initializer.from, initializer.to)
+  const needsCast = !arrayType && type !== 'String' && type !== 'java.lang.String' && inferredType !== type
   const castOperand = new Set([
     'Identifier', 'FieldAccess', 'MethodInvocation', 'ArrayAccess', 'ObjectCreationExpression',
     'ArrayCreationExpression', 'IntegerLiteral', 'FloatingPointLiteral', 'CharacterLiteral',
@@ -620,7 +651,16 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   if (declarators.length === 1) {
     const allComments = descendants(declaration).filter((node) => ['LineComment', 'BlockComment'].includes(node.name))
     const insert = allComments.map((node) => source.slice(node.from, node.to) + (node.name === 'LineComment' ? (source.includes('\r\n') ? '\r\n' : '\n') : ' ')).join('')
-    changes.push({ from: declaration.from, to: declaration.to, insert })
+    const lineStart = source.lastIndexOf('\n', declaration.from - 1) + 1
+    const lineEnd = source.indexOf('\n', declaration.to)
+    const contentEnd = lineEnd < 0 ? source.length : lineEnd
+    const occupiesLines = !insert && /^[\t ]*$/.test(source.slice(lineStart, declaration.from))
+      && /^[\t \r]*$/.test(source.slice(declaration.to, contentEnd))
+    changes.push({
+      from: occupiesLines ? lineStart : declaration.from,
+      to: occupiesLines ? (lineEnd < 0 ? source.length : lineEnd + 1) : declaration.to,
+      insert,
+    })
   } else {
     const index = declarators.findIndex((node) => node.from === variable.from)
     const comma = children(declaration).find((node) => node.name === ',' && (index === 0 ? node.from >= variable.to : node.to <= variable.from && node.from >= declarators[index - 1].to))
