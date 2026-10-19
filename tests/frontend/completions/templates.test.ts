@@ -1,7 +1,7 @@
 import { EditorState } from '@codemirror/state'
 import { java } from '@codemirror/lang-java'
 import type { EditorView } from '@codemirror/view'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { collectJavaSymbols, javaIterableCandidates } from '../../../src/completions'
 import { expandJavaTestTemplate } from '../../../src/completions/templates'
 import { labels, applyCompletion, expandPrintTemplateState, expandPrintTemplate } from './helpers'
@@ -24,6 +24,26 @@ function expandTestTemplate(source: string): { expanded: boolean, state: EditorS
 }
 
 describe('lightweight Java completions', () => {
+it('expands test when the initial syntax parse exceeds its time budget', () => {
+    let now = 0
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now += 25)
+    try {
+      const result = expandTestTemplate(`class Solution {
+  test|
+}`)
+
+      expect(result.expanded).toBe(true)
+      expect(result.state.doc.toString()).toContain('@Test\n  public void ()')
+      expect(expandTestTemplate(`class Solution {
+  void helper() {
+    test|
+  }
+}`).expanded).toBe(false)
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
 it('expands the test live template at a class declaration', () => {
     const result = expandTestTemplate(`class Solution {
   test|
