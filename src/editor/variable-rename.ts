@@ -11,6 +11,7 @@ interface Binding {
   scopeFrom: number
   scopeTo: number
   field: boolean
+  ownerFrom: number | null
 }
 
 const CURSOR_ERROR = 'Place the cursor on a variable declaration or reference.'
@@ -72,6 +73,7 @@ function bindingFor(definition: Node, source: string): Binding | null {
     scopeFrom: scopeFrom ?? scope.from,
     scopeTo: scopeTo ?? scope.to,
     field,
+    ownerFrom: ancestor(definition, ['ClassBody'])?.from ?? null,
   }
 }
 
@@ -94,8 +96,27 @@ function resolve(bindings: readonly Binding[], name: string, position: number): 
     ))[0] ?? null
 }
 
-/** Find the lexical declaration and its references without touching matching text. */
-export function planJavaVariableRename(sourceOrState: string | EditorState, position: number): JavaMethodRenameResult {
+function isThisFieldReference(node: Node): boolean {
+  if (node.name !== 'Identifier' || node.parent?.name !== 'FieldAccess') return false
+  const parts = children(node.parent)
+  return parts.length === 3 && parts[0]?.name === 'this' && parts[2]?.from === node.from
+}
+
+function resolveOccurrence(bindings: readonly Binding[], name: string, node: Node): Binding | null {
+  const owner = ancestor(node, ['ClassBody'])
+  const binding = isThisFieldReference(node)
+    ? bindings.find((candidate) => candidate.field && candidate.name === name && candidate.scopeFrom === owner?.from) ?? null
+    : resolve(bindings, name, node.from)
+  // An inherited field may shadow any enclosing field, local or parameter.
+  // Without hierarchy information, do not resolve across a class boundary.
+  return binding && binding.ownerFrom !== (owner?.from ?? null) ? null : binding
+}
+
+function planVariableReferences(
+  sourceOrState: string | EditorState,
+  position: number,
+  includeFields: boolean,
+): JavaMethodRenameResult {
   const source = typeof sourceOrState === 'string' ? sourceOrState : sourceOrState.doc.toString()
   const root = javaLanguage.parser.parse(source).topNode
   const nodes: Node[] = []
@@ -107,14 +128,15 @@ export function planJavaVariableRename(sourceOrState: string | EditorState, posi
   const definitions = nodes.filter((node) => node.name === 'Definition')
   const bindings = definitions.map((node) => bindingFor(node, source))
     .filter((binding): binding is Binding => binding !== null)
-  const selected = nodes.find((node) => (node.name === 'Definition' || isVariableReference(node))
+  const selected = nodes.find((node) => (node.name === 'Definition' || isVariableReference(node)
+    || (includeFields && isThisFieldReference(node)))
     && node.from <= position && position <= node.to)
   if (!selected) return { reason: CURSOR_ERROR }
   const name = source.slice(selected.from, selected.to)
   const target = selected.name === 'Definition'
     ? bindings.find((binding) => binding.from === selected.from)
-    : resolve(bindings, name, selected.from)
-  if (!target || target.field) return { reason: CURSOR_ERROR }
+    : includeFields ? resolveOccurrence(bindings, name, selected) : resolve(bindings, name, selected.from)
+  if (!target || (target.field && !includeFields)) return { reason: CURSOR_ERROR }
   // Unsupported declarations can shadow a captured variable; do not leave
   // those references unchanged or accidentally rename them as the outer one.
   if (definitions.some((node) => source.slice(node.from, node.to) === name
@@ -124,11 +146,23 @@ export function planJavaVariableRename(sourceOrState: string | EditorState, posi
   }
   const ranges = [{ from: target.from, to: target.to }]
   for (const node of nodes) {
-    if (!isVariableReference(node) || source.slice(node.from, node.to) !== name) continue
-    if (resolve(bindings, name, node.from)?.from === target.from) {
+    if (!(isVariableReference(node) || (includeFields && isThisFieldReference(node)))
+      || source.slice(node.from, node.to) !== name) continue
+    const binding = includeFields ? resolveOccurrence(bindings, name, node) : resolve(bindings, name, node.from)
+    if (binding?.from === target.from) {
       ranges.push({ from: node.from, to: node.to })
     }
   }
   ranges.sort((left, right) => left.from - right.from)
   return { name, ranges }
+}
+
+/** Find the lexical declaration and its references without touching matching text. */
+export function planJavaVariableRename(sourceOrState: string | EditorState, position: number): JavaMethodRenameResult {
+  return planVariableReferences(sourceOrState, position, false)
+}
+
+/** Resolve local variables and same-owner fields for passive occurrence highlighting. */
+export function planJavaVariableOccurrences(sourceOrState: string | EditorState, position: number): JavaMethodRenameResult {
+  return planVariableReferences(sourceOrState, position, true)
 }

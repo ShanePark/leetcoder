@@ -113,6 +113,7 @@ import {
 import {
   renameJavaSymbol,
 } from './editor/rename'
+import { javaSymbolHighlights } from './editor/symbol-highlighting'
 import {
   definitionHover,
   javaDefinitionAt,
@@ -646,6 +647,7 @@ export class JavaEditor {
         failureDecorations,
         diagnosticHoverTooltips,
         definitionHover,
+        javaSymbolHighlights,
         gutter({
           class: 'cm-failure-gutter',
           markers: (view) => view.state.field(failureMarkers),

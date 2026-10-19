@@ -20,7 +20,7 @@ import {
   type Transaction,
   type TransactionSpec,
 } from '@codemirror/state'
-import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
+import { ensureSyntaxTree } from '@codemirror/language'
 import type { EditorView } from '@codemirror/view'
 
 import {
@@ -179,8 +179,9 @@ function javaTestAbbreviation(source: string, position: number): { from: number 
 }
 
 function javaDeclarationContext(state: EditorView['state'], position: number): boolean {
-  ensureSyntaxTree(state, state.doc.length, 1000)
-  let node: ReturnType<typeof syntaxTree>['topNode'] | null = syntaxTree(state).resolveInner(position, 1)
+  const tree = ensureSyntaxTree(state, state.doc.length, 1000)
+  if (!tree) return false
+  let node: typeof tree.topNode | null = tree.resolveInner(position, 1)
   while (node) {
     if (node.name === 'Block') return false
     if (node.name === 'ClassBody' || node.name === 'InterfaceBody' || node.name === 'EnumBody') {

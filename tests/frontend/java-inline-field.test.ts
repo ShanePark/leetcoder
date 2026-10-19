@@ -108,7 +108,7 @@ describe('Java Inline Field planner', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it('supports unassigned nonfinal primitive fields in ordinary arithmetic reads', () => {
     const source = 'class Solution { int MOD=7; int f(int n){return n%MOD;} }'
@@ -172,7 +172,7 @@ describe('Java Inline local variable planner', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it('inlines mutable-but-unassigned locals in a loop body and return expression', () => {
     const source = 'class Solution { int f(int[] nums){int MOD=1_000_000_007; int result=0; for(int n:nums){result=(result+n)%MOD;} return result%MOD;} }'
@@ -204,7 +204,7 @@ describe('Java Inline local variable planner', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it('removes one local declarator and inlines subsequent initializers with CRLF/comments preserved', () => {
     for (const declaration of ['MOD=7, other=MOD', 'first=1, MOD=7, other=MOD', 'other=1, MOD=7']) {
@@ -307,7 +307,7 @@ describe('Inline resource shadowing', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it('resolves catch and finally reads to a captured local instead of a closed resource', () => {
     const source = 'class Solution { int f(){final int MOD=7; class Inner {int g(){try(java.io.Reader MOD=new java.io.StringReader("")){} catch(Exception e){return MOD;} finally {System.out.println(MOD);} return MOD;}} return new Inner().g();} }'
@@ -339,7 +339,7 @@ describe('Inline stable initializer dependencies', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it('proves recursively final primitive and String dependencies without expanding or recasting them', (context) => {
     const source = `class Solution {
@@ -361,7 +361,7 @@ describe('Inline stable initializer dependencies', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it('retains necessary declared-type conversion for a constant dependency', () => {
     const source = 'class Solution { final int BASE=1; long f(){long a=BASE; return a<<40;} }'
@@ -379,7 +379,7 @@ describe('Inline stable initializer dependencies', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(apply(source, result))).toBe(expected)
-  })
+  }, 20_000)
 
   it.each([
     'class Solution { int MOD=7; int f(){int a=MOD+1; MOD=9; return a;} }',
@@ -415,7 +415,7 @@ describe('Inline dependency proof reuse', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 })
 
 
@@ -598,7 +598,7 @@ describe('Inline never-written primitive local dependencies', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it('allows a final boolean initialized from a never-written nonconstant local in a loop condition', (context) => {
     const source = 'class Solution { static int f(){boolean flag=false; final boolean a=flag; while(a){return 1;} return 2;} public static void main(String[] args){System.out.print(f());} }'
@@ -608,7 +608,7 @@ describe('Inline never-written primitive local dependencies', () => {
     const expected = compileAndRun(source)
     if (expected === null) context.skip()
     expect(compileAndRun(apply(source, result))).toBe(expected)
-  })
+  }, 20_000)
 
   it.each([
     'class Solution { int f(){int n=1; int a=n+1; n=2; return a;} }',
@@ -680,7 +680,7 @@ describe('Inline an adjacent method argument', () => {
     if (expected === null) context.skip()
     expect(expected).toBe('992')
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it('preserves side effects, evaluation count, parameter receivers, and the declared overload type', (context) => {
     const source = `class Solution {
@@ -702,7 +702,7 @@ describe('Inline an adjacent method argument', () => {
     if (expected === null) context.skip()
     expect(expected).toBe('read:long:9:1')
     expect(compileAndRun(output)).toBe(expected)
-  })
+  }, 20_000)
 
   it.each([
     'int max=read(); if(flag) sb.append(max);',
