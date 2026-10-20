@@ -10,9 +10,9 @@
   min-height: 180px;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-bottom: 0;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-radius: var(--panel-radius);
   background: var(--surface);
+  box-shadow: var(--shadow-panel);
 }
 
 .file-tabs-shell {
@@ -20,21 +20,19 @@
   flex: none;
   align-items: stretch;
   min-width: 0;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  background: transparent;
 }
 
 .file-tabs {
   display: flex;
   flex: 1 1 auto;
-  align-items: stretch;
+  align-items: center;
   gap: 2px;
   min-width: 0;
-  min-height: 36px;
+  height: 40px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 4px 8px 0;
-  background: var(--surface);
+  padding: 0 8px;
   scrollbar-width: none;
 }
 
@@ -42,21 +40,23 @@
   display: none;
 }
 
+/* Capsule chips; the 12px label inset plus the strip's 8px padding sets the
+   20px left edge that the path row below lines up with. */
 .file-tab {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   max-width: 260px;
-  min-height: 31px;
-  padding: 0 8px 0 10px;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  height: 28px;
+  padding: 0 4px 0 12px;
+  border-radius: var(--radius-pill);
   color: var(--text-dim);
   cursor: pointer;
   font-size: 12px;
+  font-weight: 500;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .file-tab:hover {
@@ -65,8 +65,7 @@
 }
 
 .file-tab.is-active {
-  border-color: var(--border);
-  background: var(--surface-2);
+  background: var(--surface-3);
   color: var(--text);
 }
 
@@ -74,9 +73,9 @@
   display: inline-flex;
   flex: 1 1 auto;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
-  min-height: 30px;
+  height: 28px;
   padding: 0;
   color: inherit;
   text-align: left;
@@ -107,14 +106,15 @@
   justify-content: center;
   width: 20px;
   height: 20px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   color: var(--text-faint);
   font-size: 16px;
   line-height: 1;
 }
 
+/* A translucent fill stays visible on both the hover and the active chip. */
 .file-tab-close:hover:not(:disabled) {
-  background: var(--surface-3);
+  background: var(--border-strong);
   color: var(--text);
 }
 
@@ -128,24 +128,23 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 40px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
+  height: 28px;
+  padding: 0 20px;
+  background: transparent;
 }
 
 .file-heading {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .selected-file {
   overflow: hidden;
-  color: var(--text);
+  color: var(--text-faint);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -154,8 +153,9 @@
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
+  gap: 4px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .save-status.is-unsaved {
@@ -186,7 +186,7 @@
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--surface);
 }
 
 .editor {
@@ -273,7 +273,7 @@
   max-width: min(420px, calc(100vw - 24px));
   max-height: min(240px, calc(100vh - 24px));
   overflow: auto;
-  padding: 8px 10px;
+  padding: 8px 12px;
   border-left: 2px solid var(--red);
   box-shadow: var(--shadow-menu);
   overflow-wrap: anywhere;
@@ -308,7 +308,7 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: var(--bg);
+  background: var(--surface);
 }
 
 .editor-empty-icon {
@@ -323,17 +323,26 @@
   font-size: 13px;
 }
 
+/* Each hint is a key + label pair; flattening the pairs into one four-column
+   grid lines every key up against its label across both columns. */
 .editor-empty-hints {
   display: grid;
-  grid-template-columns: repeat(2, auto);
-  gap: 6px 20px;
+  grid-template-columns: repeat(4, max-content);
+  align-items: center;
+  gap: 8px 10px;
   margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 12px;
 }
 
 .editor-empty-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-faint);
-  font-size: 11px;
+  display: contents;
+}
+
+.editor-empty-hint kbd {
+  justify-self: end;
+}
+
+.editor-empty-hint:nth-child(even) kbd {
+  margin-left: 22px;
 }

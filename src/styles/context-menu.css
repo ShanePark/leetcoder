@@ -1,14 +1,14 @@
 /* Context menu                                                      */
 /* ---------------------------------------------------------------- */
 
+/* Item height and padding stay within the clamp sizes in app/dialogs-view.ts. */
 .file-context-menu {
   position: fixed;
   z-index: 50;
   min-width: 96px;
   padding: 4px;
-  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  background: var(--surface-3);
+  background: var(--surface-2);
   box-shadow: var(--shadow-menu);
 }
 
@@ -16,14 +16,17 @@
   display: flex;
   align-items: center;
   width: 100%;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: calc(var(--radius-md) - 4px);
   color: var(--red);
   font-size: 13px;
   text-align: left;
+  white-space: nowrap;
 }
 
-.file-context-menu-item:hover:not(:disabled) {
+.file-context-menu-item:hover:not(:disabled),
+.file-context-menu-item:focus-visible {
   background: var(--red-soft);
 }
 
@@ -31,8 +34,9 @@
   color: var(--text);
 }
 
-.file-context-menu-item-neutral:hover:not(:disabled) {
-  background: var(--surface-2);
+.file-context-menu-item-neutral:hover:not(:disabled),
+.file-context-menu-item-neutral:focus-visible {
+  background: var(--surface-3);
 }
 
 .file-context-menu-item:disabled {

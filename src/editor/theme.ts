@@ -8,7 +8,7 @@ import { EditorView } from '@codemirror/view'
  * CodeMirror surface without rebuilding the editor state.
  */
 const editorPalette = {
-  background: 'var(--bg)',
+  background: 'var(--surface)',
   surface: 'var(--surface-2)',
   text: 'var(--text)',
   textDim: 'var(--text-dim)',
@@ -17,8 +17,12 @@ const editorPalette = {
   green: 'var(--green)',
   amber: 'var(--amber)',
   red: 'var(--red)',
-  violet: 'var(--editor-violet)',
-  blue: 'var(--editor-blue)',
+  keyword: 'var(--syntax-keyword)',
+  type: 'var(--syntax-type)',
+  string: 'var(--syntax-string)',
+  number: 'var(--syntax-number)',
+  func: 'var(--syntax-function)',
+  annotation: 'var(--syntax-annotation)',
   selection: 'var(--editor-selection)',
   activeLine: 'var(--editor-active-line)',
 } as const
@@ -145,7 +149,8 @@ export const leetcoderTheme = EditorView.theme({
     backgroundColor: editorPalette.surface,
     color: editorPalette.text,
     border: '1px solid var(--border-strong)',
-    borderRadius: '8px',
+    borderRadius: '10px',
+    boxShadow: 'var(--shadow-menu)',
   },
   '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': {
     backgroundColor: 'var(--accent-soft)',
@@ -158,13 +163,13 @@ export const leetcoderTheme = EditorView.theme({
 }, { dark: true })
 
 export const leetcoderHighlight = HighlightStyle.define([
-  { tag: [tags.keyword, tags.modifier, tags.controlKeyword, tags.operatorKeyword, tags.definitionKeyword, tags.self], color: editorPalette.violet },
-  { tag: [tags.string, tags.character, tags.special(tags.string)], color: editorPalette.green },
-  { tag: [tags.number, tags.integer, tags.float, tags.bool, tags.null], color: editorPalette.amber },
+  { tag: [tags.keyword, tags.modifier, tags.controlKeyword, tags.operatorKeyword, tags.definitionKeyword, tags.self], color: editorPalette.keyword },
+  { tag: [tags.string, tags.character, tags.special(tags.string)], color: editorPalette.string },
+  { tag: [tags.number, tags.integer, tags.float, tags.bool, tags.null], color: editorPalette.number },
   { tag: [tags.comment, tags.blockComment, tags.lineComment, tags.docComment], color: editorPalette.textFaint, fontStyle: 'italic' },
-  { tag: [tags.typeName, tags.className, tags.namespace, tags.standard(tags.typeName)], color: editorPalette.blue },
-  { tag: [tags.annotation, tags.meta], color: editorPalette.amber },
-  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: editorPalette.text },
+  { tag: [tags.typeName, tags.className, tags.namespace, tags.standard(tags.typeName)], color: editorPalette.type },
+  { tag: [tags.annotation, tags.meta], color: editorPalette.annotation },
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: editorPalette.func },
   { tag: [tags.punctuation, tags.separator, tags.bracket, tags.operator], color: editorPalette.textDim },
   { tag: [tags.propertyName, tags.variableName], color: editorPalette.text },
   { tag: tags.invalid, color: editorPalette.red },

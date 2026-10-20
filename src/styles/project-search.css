@@ -30,35 +30,39 @@
   scrollbar-gutter: auto;
 }
 
+/* Matches the file list: an 8px gutter plus 4px row padding keeps every
+   left edge at 12px. Spacing, not a rule, separates it from the file list. */
 .project-content-search {
   flex: 0 0 auto;
   min-width: 0;
-  padding: 8px 8px 10px;
-  border-top: 1px solid var(--border);
+  padding: 8px 8px 12px;
 }
 
 .project-content-search-heading {
-  padding: 2px 4px 6px;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 4px;
   color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .project-content-search-status {
-  padding: 2px 4px 6px;
+  padding: 0 4px 8px;
   color: var(--text-faint);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .project-content-search-notices {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 2px 4px 6px;
+  gap: 4px;
+  padding: 0 4px 8px;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .project-content-search-list {
@@ -77,13 +81,18 @@
   min-width: 0;
   flex-direction: column;
   align-items: flex-start;
-  gap: 3px;
-  padding: 6px 6px;
+  gap: 2px;
+  padding: 6px 4px;
   border-radius: var(--radius-sm);
   text-align: left;
 }
 
-.project-content-search-hit-button:hover:not(:disabled) {
+.project-content-search-hit-button {
+  transition: background-color 120ms ease;
+}
+
+.project-content-search-hit-button:hover:not(:disabled),
+.project-content-search-hit-button:focus-visible {
   background: var(--surface-2);
 }
 
@@ -94,9 +103,11 @@
 .project-content-search-path {
   overflow: hidden;
   max-width: 100%;
-  color: var(--accent);
+  color: var(--text);
   font-family: var(--font-mono);
   font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -107,7 +118,7 @@
   width: 100%;
   color: var(--text-faint);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -115,5 +126,5 @@
 
 .project-content-search-preview-only {
   color: var(--text-faint);
-  font-size: 9px;
+  font-size: 11px;
 }

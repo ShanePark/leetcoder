@@ -1,7 +1,9 @@
 /* ------------------------------------------------------------------ */
-/* leetcoder — dark workspace theme                                    */
+/* leetcoder — workspace theme                                         */
 /*                                                                     */
-/* Single token block; every color in the app derives from these.      */
+/* Single token block; every color in the app derives from these.     */
+/* Neutral graphite surfaces, floating panels on a darker backdrop,    */
+/* monochrome primary actions and a restrained indigo accent.          */
 /* Type scale: 11 / 12 / 13 / 14 / 15px. Spacing on a 4px grid.        */
 /* The CodeMirror palette in editor/theme.ts uses these values — keep  */
 /* them in sync when editing.                                          */
@@ -9,116 +11,144 @@
 
 :root {
   color-scheme: dark;
-  /* neutral dark, slightly cool but not navy */
-  --bg: #0d1017;          /* app background */
-  --surface: #12161f;     /* cards, sidebar */
-  --surface-2: #171c27;   /* raised: toolbars, inputs, hovers */
-  --surface-3: #1e2432;   /* active rows, chips */
-  --border: rgba(148, 163, 190, 0.10);
-  --border-strong: rgba(148, 163, 190, 0.18);
-  --text: #e8ecf4;
-  --text-dim: #98a2b6;
-  --text-faint: #5d6778;
-  --accent: #5b9dff;
-  --accent-soft: rgba(91, 157, 255, 0.13);
-  --green: #3ecf8e;   --green-soft: rgba(62, 207, 142, 0.12);
-  --amber: #ffbf3f;   --amber-soft: rgba(255, 191, 63, 0.12);
-  --red: #ff5c7a;     --red-soft: rgba(255, 92, 122, 0.12);
+  /* true neutral graphite: no blue cast in any surface */
+  --bg: #09090a;          /* window backdrop behind floating panels */
+  --surface: #141416;     /* panels: sidebar, editor, bottom panel */
+  --surface-2: #1c1c1f;   /* raised: inputs, hovers, inset wells */
+  --surface-3: #26262a;   /* active rows, chips, pressed */
+  --control-raised: #2e2e33; /* selected segment, lifted above its track */
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --text: #ededef;
+  --text-dim: #a1a1a8;
+  --text-faint: #85858d;
+  --accent: #8e8cff;
+  --accent-soft: rgba(142, 140, 255, 0.14);
+  --green: #4ade80;   --green-soft: rgba(74, 222, 128, 0.12);
+  --amber: #fbbf24;   --amber-soft: rgba(251, 191, 36, 0.13);
+  --red: #fb7185;     --red-soft: rgba(251, 113, 133, 0.13);
   /* LeetCode-recognizable difficulty colors */
-  --easy: #00c8b3;  --medium: #ffb700;  --hard: #ff4d6a;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  --radius-sm: 6px; --radius-md: 8px; --radius-lg: 10px;
-  --shadow-menu: 0 8px 24px rgba(0, 0, 0, 0.45);
-  --on-accent: #0b1220;
+  --easy: #2dd4bf;  --medium: #fbbf24;  --hard: #fb7185;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --radius-sm: 8px; --radius-md: 10px; --radius-lg: 14px; --radius-pill: 999px;
+  /* floating panel shell */
+  --panel-gap: 8px;
+  --panel-radius: 14px;
+  --shadow-panel: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 10px 28px rgba(0, 0, 0, 0.4);
+  --shadow-menu: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 16px 40px rgba(0, 0, 0, 0.55);
+  /* primary actions are monochrome; the accent is kept for focus and state */
+  --primary: #f2f2f4;
+  --on-primary: #0a0a0b;
+  --on-accent: #0b0b14;
   --on-danger: #210810;
-  --accent-ink-border: rgba(11, 18, 32, 0.25);
-  --accent-ink-soft: rgba(11, 18, 32, 0.12);
-  --accent-ink-muted: rgba(11, 18, 32, 0.75);
-  --selection: rgba(91, 157, 255, 0.28);
-  --dialog-backdrop: rgb(5 8 13 / 68%);
-  --editor-selection: rgba(91, 157, 255, 0.22);
-  --editor-active-line: rgba(255, 255, 255, 0.04);
-  --editor-violet: #c792ea;
-  --editor-blue: #82aaff;
-  --editor-link-background: rgba(91, 157, 255, 0.14);
-  --editor-link-border: rgba(148, 163, 190, 0.24);
+  --accent-ink-border: rgba(0, 0, 0, 0.12);
+  --accent-ink-soft: rgba(0, 0, 0, 0.07);
+  --accent-ink-muted: rgba(0, 0, 0, 0.62);
+  --selection: rgba(142, 140, 255, 0.3);
+  --dialog-backdrop: rgb(0 0 0 / 62%);
+  --editor-selection: rgba(142, 140, 255, 0.24);
+  --editor-active-line: rgba(255, 255, 255, 0.035);
+  --syntax-keyword: #b4a7ff;
+  --syntax-type: #7ee0c9;
+  --syntax-string: #a6d189;
+  --syntax-number: #f5c27a;
+  --syntax-function: #f0a6ca;
+  --syntax-annotation: #9a9aa3;
+  --editor-link-background: rgba(142, 140, 255, 0.14);
+  --editor-link-border: rgba(255, 255, 255, 0.18);
 }
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --bg: #f5f7fb;
+  --bg: #e8e8eb;
   --surface: #ffffff;
-  --surface-2: #edf1f7;
-  --surface-3: #e4eaf3;
-  --border: rgba(53, 67, 90, 0.14);
-  --border-strong: rgba(53, 67, 90, 0.24);
-  --text: #1b2430;
-  --text-dim: #4e5d70;
-  --text-faint: #718096;
-  --accent: #1f6feb;
-  --accent-soft: rgba(31, 111, 235, 0.12);
-  --green: #1c7c54;
-  --green-soft: rgba(28, 124, 84, 0.12);
-  --amber: #996c00;
-  --amber-soft: rgba(153, 108, 0, 0.12);
-  --red: #c23b52;
-  --red-soft: rgba(194, 59, 82, 0.12);
-  --easy: #008f80;
-  --medium: #a66c00;
-  --hard: #c63b52;
-  --shadow-menu: 0 8px 24px rgba(34, 48, 70, 0.16);
+  --surface-2: #f4f4f6;
+  --surface-3: #eaeaed;
+  --control-raised: #ffffff;
+  --border: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --text: #18181b;
+  --text-dim: #52525b;
+  --text-faint: #6b6b73;
+  --accent: #5b57e8;
+  --accent-soft: rgba(91, 87, 232, 0.11);
+  --green: #15803d;
+  --green-soft: rgba(21, 128, 61, 0.11);
+  --amber: #a16207;
+  --amber-soft: rgba(234, 179, 8, 0.16);
+  --red: #be123c;
+  --red-soft: rgba(190, 18, 60, 0.1);
+  --easy: #0f8a7a;
+  --medium: #a16207;
+  --hard: #be123c;
+  --shadow-panel: 0 0 0 1px rgba(0, 0, 0, 0.02), 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+  --shadow-menu: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.14);
+  --primary: #18181b;
+  --on-primary: #ffffff;
   --on-accent: #ffffff;
   --on-danger: #ffffff;
-  --accent-ink-border: rgba(255, 255, 255, 0.28);
-  --accent-ink-soft: rgba(255, 255, 255, 0.16);
-  --accent-ink-muted: rgba(255, 255, 255, 0.82);
-  --selection: rgba(31, 111, 235, 0.22);
-  --dialog-backdrop: rgb(30 42 60 / 28%);
-  --editor-selection: rgba(31, 111, 235, 0.18);
-  --editor-active-line: rgba(31, 54, 82, 0.06);
-  --editor-violet: #7a3e9d;
-  --editor-blue: #1f5fae;
-  --editor-link-background: rgba(31, 111, 235, 0.12);
-  --editor-link-border: rgba(53, 67, 90, 0.28);
+  --accent-ink-border: rgba(255, 255, 255, 0.2);
+  --accent-ink-soft: rgba(255, 255, 255, 0.14);
+  --accent-ink-muted: rgba(255, 255, 255, 0.8);
+  --selection: rgba(91, 87, 232, 0.2);
+  --dialog-backdrop: rgb(24 24 27 / 24%);
+  --editor-selection: rgba(91, 87, 232, 0.16);
+  --editor-active-line: rgba(0, 0, 0, 0.03);
+  --syntax-keyword: #5b45d6;
+  --syntax-type: #0f766e;
+  --syntax-string: #3f7d20;
+  --syntax-number: #b45309;
+  --syntax-function: #be185d;
+  --syntax-annotation: #71717a;
+  --editor-link-background: rgba(91, 87, 232, 0.1);
+  --editor-link-border: rgba(0, 0, 0, 0.2);
 }
 
 @media (prefers-color-scheme: light) {
   :root[data-theme='system'] {
     color-scheme: light;
-    --bg: #f5f7fb;
+    --bg: #e8e8eb;
     --surface: #ffffff;
-    --surface-2: #edf1f7;
-    --surface-3: #e4eaf3;
-    --border: rgba(53, 67, 90, 0.14);
-    --border-strong: rgba(53, 67, 90, 0.24);
-    --text: #1b2430;
-    --text-dim: #4e5d70;
-    --text-faint: #718096;
-    --accent: #1f6feb;
-    --accent-soft: rgba(31, 111, 235, 0.12);
-    --green: #1c7c54;
-    --green-soft: rgba(28, 124, 84, 0.12);
-    --amber: #996c00;
-    --amber-soft: rgba(153, 108, 0, 0.12);
-    --red: #c23b52;
-    --red-soft: rgba(194, 59, 82, 0.12);
-    --easy: #008f80;
-    --medium: #a66c00;
-    --hard: #c63b52;
-    --shadow-menu: 0 8px 24px rgba(34, 48, 70, 0.16);
+    --surface-2: #f4f4f6;
+    --surface-3: #eaeaed;
+  --control-raised: #ffffff;
+    --border: rgba(0, 0, 0, 0.07);
+    --border-strong: rgba(0, 0, 0, 0.12);
+    --text: #18181b;
+    --text-dim: #52525b;
+    --text-faint: #6b6b73;
+    --accent: #5b57e8;
+    --accent-soft: rgba(91, 87, 232, 0.11);
+    --green: #15803d;
+    --green-soft: rgba(21, 128, 61, 0.11);
+    --amber: #a16207;
+    --amber-soft: rgba(234, 179, 8, 0.16);
+    --red: #be123c;
+    --red-soft: rgba(190, 18, 60, 0.1);
+    --easy: #0f8a7a;
+    --medium: #a16207;
+    --hard: #be123c;
+    --shadow-panel: 0 0 0 1px rgba(0, 0, 0, 0.02), 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+    --shadow-menu: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.14);
+    --primary: #18181b;
+    --on-primary: #ffffff;
     --on-accent: #ffffff;
     --on-danger: #ffffff;
-    --accent-ink-border: rgba(255, 255, 255, 0.28);
-    --accent-ink-soft: rgba(255, 255, 255, 0.16);
-    --accent-ink-muted: rgba(255, 255, 255, 0.82);
-    --selection: rgba(31, 111, 235, 0.22);
-    --dialog-backdrop: rgb(30 42 60 / 28%);
-    --editor-selection: rgba(31, 111, 235, 0.18);
-    --editor-active-line: rgba(31, 54, 82, 0.06);
-    --editor-violet: #7a3e9d;
-    --editor-blue: #1f5fae;
-    --editor-link-background: rgba(31, 111, 235, 0.12);
-    --editor-link-border: rgba(53, 67, 90, 0.28);
+    --accent-ink-border: rgba(255, 255, 255, 0.2);
+    --accent-ink-soft: rgba(255, 255, 255, 0.14);
+    --accent-ink-muted: rgba(255, 255, 255, 0.8);
+    --selection: rgba(91, 87, 232, 0.2);
+    --dialog-backdrop: rgb(24 24 27 / 24%);
+    --editor-selection: rgba(91, 87, 232, 0.16);
+    --editor-active-line: rgba(0, 0, 0, 0.03);
+    --syntax-keyword: #5b45d6;
+    --syntax-type: #0f766e;
+    --syntax-string: #3f7d20;
+    --syntax-number: #b45309;
+    --syntax-function: #be185d;
+    --syntax-annotation: #71717a;
+    --editor-link-background: rgba(91, 87, 232, 0.1);
+    --editor-link-border: rgba(0, 0, 0, 0.2);
   }
 }
