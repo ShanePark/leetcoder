@@ -32,7 +32,7 @@ export interface SettingsDialogRenderOptions {
 }
 
 export interface DiscardGitDialogRenderOptions {
-  file: GitChangedFile | null
+  files: GitChangedFile[] | null
   busy: boolean
   gitBusy: boolean
 }
@@ -164,14 +164,14 @@ export function renderSettingsDialog(root: HTMLElement, options: SettingsDialogR
 /** Render the destructive Git confirmation dialog. */
 export function renderDiscardGitDialog(root: HTMLElement, options: DiscardGitDialogRenderOptions): void {
   const dialog = requiredElement<HTMLElement>(root, '#discard-git-dialog')
-  const file = options.file
-  dialog.hidden = !file
-  if (!file) {
+  const files = options.files
+  dialog.hidden = !files
+  if (!files) {
     requiredElement<HTMLElement>(root, '#discard-git-path').textContent = ''
     requiredElement<HTMLElement>(root, '#discard-git-message').textContent = ''
     return
   }
-  requiredElement<HTMLElement>(root, '#discard-git-path').textContent = file.path
+  requiredElement<HTMLElement>(root, '#discard-git-path').textContent = files.map((file) => file.path).join('\n')
   requiredElement<HTMLElement>(root, '#discard-git-message').textContent = discardGitChangesWarningMessage()
   requiredElement<HTMLButtonElement>(root, '#confirm-discard-git').disabled = options.busy || options.gitBusy
 }

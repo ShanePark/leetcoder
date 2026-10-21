@@ -114,6 +114,9 @@
 }
 
 .discard-git-path {
+  white-space: pre-line;
+  max-height: 40vh;
+  overflow-y: auto;
   overflow-wrap: anywhere;
   padding: 8px 12px;
   border-radius: var(--radius-sm);

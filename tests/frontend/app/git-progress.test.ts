@@ -49,6 +49,7 @@ function controlsRoot(): {
     ['#git-commit', commit],
     ['#git-commit-push', commitPush],
     ['#git-select-all', { disabled: false }],
+    ['#git-select-all-checkbox', { disabled: false }],
     ['#git-select-none', { disabled: false }],
   ])
   const root = {

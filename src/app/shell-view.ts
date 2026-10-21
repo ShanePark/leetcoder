@@ -117,6 +117,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
           <div class="git-toolbar">
             <div class="git-heading">
               <span id="git-branch-icon" class="git-branch-icon" aria-hidden="true"></span>
+              <input id="git-select-all-checkbox" class="git-file-checkbox" type="checkbox" aria-label="Select all changed files">
               <span class="git-heading-label">Changes</span>
               <span id="git-file-count" class="git-count"></span>
               <span id="git-branch" class="git-branch-name"></span>

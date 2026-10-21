@@ -720,6 +720,10 @@ export class LeetcoderApp {
         this.selectBottomPanelTab(nextTab, true)
       })
     }
+    this.listen(this.element<HTMLInputElement>('#git-select-all-checkbox'), 'change', (event) => {
+      if ((event.target as HTMLInputElement).checked) this.gitController.selectAllFiles()
+      else this.gitController.selectNoFiles()
+    })
     this.listen(this.element<HTMLButtonElement>('#git-select-all'), 'click', () => {
       this.gitController.selectAllFiles()
     })

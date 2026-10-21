@@ -395,7 +395,10 @@ export class FileOperationsController {
     }
   }
 
-  async discardGitChanges(file: GitChangedFile): Promise<void> {
+  async discardGitChanges(selection: GitChangedFile | GitChangedFile[]): Promise<void> {
+    const files = Array.isArray(selection) ? selection : [selection]
+    if (files.length === 0) return
+    let file = files[0]
     if (!this.isActive() || this.hooks.state.busy) {
       return
     }
@@ -403,8 +406,9 @@ export class FileOperationsController {
     if (!repoPath || !this.hooks.state.projectValid) {
       return
     }
-    if (!this.hooks.getGitFiles().some((entry) => sameFilePath(entry.path, file.path))) {
-      this.hooks.setMessage(`The Git change for ${gitFileName(file.path)} is no longer available.`, 'info')
+    const missing = files.find((target) => !this.hooks.getGitFiles().some((entry) => sameFilePath(entry.path, target.path)))
+    if (missing) {
+      this.hooks.setMessage(`The Git change for ${gitFileName(missing.path)} is no longer available.`, 'info')
       return
     }
     const method = this.hooks.backend.discardGitChanges
@@ -413,14 +417,6 @@ export class FileOperationsController {
       return
     }
 
-    const targetTab = this.hooks.document.openTabForPath(file.path)
-    const targetTabIndex = targetTab ? this.hooks.state.openTabs.indexOf(targetTab) : -1
-    const wasActive = targetTab?.id === this.hooks.state.activeTabId
-    const wasSelected = sameFilePath(this.hooks.state.selectedPath ?? '', file.path)
-    const removesFile = isGitNewFile(file.status)
-    const restoredPath = file.originalPath && !sameFilePath(file.originalPath, file.path)
-      ? file.originalPath
-      : null
     const operation = this.hooks.git.startOperation('Discarding changes…')
     if (!operation) {
       return
@@ -436,75 +432,90 @@ export class FileOperationsController {
       // Do not allow a queued pre-discard source to be written back after Git
       // restores the file. Editor changes remain visible while this awaits.
       this.hooks.document.cancelPendingAutosave()
-      await method(repoPath, file.path)
-      if (!this.hooks.git.isCurrentOperation(operation)) {
-        return
-      }
+      for (file of files) {
+        if (!this.hooks.git.isCurrentOperation(operation)) return
+        const targetTab = this.hooks.document.openTabForPath(file.path)
+        const targetTabIndex = targetTab ? this.hooks.state.openTabs.indexOf(targetTab) : -1
+        const wasActive = targetTab?.id === this.hooks.state.activeTabId
+        const wasSelected = sameFilePath(this.hooks.state.selectedPath ?? '', file.path)
+        const removesFile = isGitNewFile(file.status)
+        const restoredPath = file.originalPath && !sameFilePath(file.originalPath, file.path)
+          ? file.originalPath
+          : null
 
-      let replacement: OpenFileTab | null = null
-      if (removesFile && targetTab) {
-        if (wasActive) {
-          replacement = this.hooks.document.removeOpenTab(targetTab.id)
-        } else {
-          this.hooks.document.removeOpenTab(targetTab.id)
-        }
-      } else if (removesFile && wasSelected) {
-        this.hooks.document.resetCurrentFile()
-      }
-
-      if (!removesFile && wasSelected && !restoredPath) {
-        const source = await this.hooks.backend.readProblemFile(repoPath, file.path)
+        await method(repoPath, file.path)
         if (!this.hooks.git.isCurrentOperation(operation)) {
           return
         }
-        this.hooks.document.applySavedSource(source)
-      }
 
-      this.hooks.git.markStale()
-      await this.hooks.refreshFiles()
-      if (!this.hooks.git.isCurrentOperation(operation)) {
-        return
-      }
-
-      let restoredRename: ProblemFileEntry | null = null
-      if (restoredPath && !this.hooks.state.files.some((entry) => sameFilePath(entry.path, file.path))) {
-        restoredRename = findRestoredFileAfterGitRename(this.hooks.state.files, file)
-        if (restoredRename && targetTab) {
-          targetTab.path = restoredRename.path
-          targetTab.name = restoredRename.name
-          targetTab.packageSegment = restoredRename.packageSegment
-          if (!this.hooks.state.openTabs.includes(targetTab)) {
-            const insertionIndex = targetTabIndex < 0
-              ? this.hooks.state.openTabs.length
-              : Math.min(targetTabIndex, this.hooks.state.openTabs.length)
-            this.hooks.state.openTabs.splice(insertionIndex, 0, targetTab)
-          }
+        let replacement: OpenFileTab | null = null
+        if (removesFile && targetTab) {
           if (wasActive) {
-            this.hooks.state.activeTabId = targetTab.id
+            replacement = this.hooks.document.removeOpenTab(targetTab.id)
+          } else {
+            this.hooks.document.removeOpenTab(targetTab.id)
           }
+        } else if (removesFile && wasSelected) {
+          this.hooks.document.resetCurrentFile()
         }
-      }
-      if (restoredRename && wasSelected) {
-        this.hooks.state.selectedPath = restoredRename.path
-        this.hooks.state.selectedFqcn = fqcnFromJavaPath(restoredRename.path)
-        const source = await this.hooks.backend.readProblemFile(repoPath, restoredRename.path)
+
+        if (!removesFile && wasSelected && !restoredPath) {
+          const source = await this.hooks.backend.readProblemFile(repoPath, file.path)
+          if (!this.hooks.git.isCurrentOperation(operation)) {
+            return
+          }
+          this.hooks.document.applySavedSource(source)
+        }
+
+        this.hooks.git.markStale()
+        await this.hooks.refreshFiles()
         if (!this.hooks.git.isCurrentOperation(operation)) {
           return
         }
-        this.hooks.document.applySavedSource(source)
-      }
 
-      await this.hooks.git.refreshStatus(true)
-      if (!this.hooks.git.isCurrentOperation(operation)) {
-        return
-      }
-      if (wasActive && replacement) {
-        const replacementFile = this.hooks.state.files.find((entry) => sameFilePath(entry.path, replacement!.path))
-        if (replacementFile) {
-          await this.hooks.document.openFile(replacementFile)
+        let restoredRename: ProblemFileEntry | null = null
+        if (restoredPath && !this.hooks.state.files.some((entry) => sameFilePath(entry.path, file.path))) {
+          restoredRename = findRestoredFileAfterGitRename(this.hooks.state.files, file)
+          if (restoredRename && targetTab) {
+            targetTab.path = restoredRename.path
+            targetTab.name = restoredRename.name
+            targetTab.packageSegment = restoredRename.packageSegment
+            if (!this.hooks.state.openTabs.includes(targetTab)) {
+              const insertionIndex = targetTabIndex < 0
+                ? this.hooks.state.openTabs.length
+                : Math.min(targetTabIndex, this.hooks.state.openTabs.length)
+              this.hooks.state.openTabs.splice(insertionIndex, 0, targetTab)
+            }
+            if (wasActive) {
+              this.hooks.state.activeTabId = targetTab.id
+            }
+          }
         }
+        if (restoredRename && wasSelected) {
+          this.hooks.state.selectedPath = restoredRename.path
+          this.hooks.state.selectedFqcn = fqcnFromJavaPath(restoredRename.path)
+          const source = await this.hooks.backend.readProblemFile(repoPath, restoredRename.path)
+          if (!this.hooks.git.isCurrentOperation(operation)) {
+            return
+          }
+          this.hooks.document.applySavedSource(source)
+        }
+
+        await this.hooks.git.refreshStatus(true)
+        if (!this.hooks.git.isCurrentOperation(operation)) {
+          return
+        }
+        if (wasActive && replacement) {
+          const replacementFile = this.hooks.state.files.find((entry) => sameFilePath(entry.path, replacement!.path))
+          if (replacementFile) {
+            await this.hooks.document.openFile(replacementFile)
+          }
+        }
+        if (!this.hooks.git.isCurrentOperation(operation)) return
       }
-      this.hooks.setMessage(`Discarded changes to ${gitFileName(file.path)}.`, 'success')
+      this.hooks.setMessage(files.length === 1
+        ? `Discarded changes to ${gitFileName(file.path)}.`
+        : `Discarded changes to ${files.length} files.`, 'success')
     } catch (error) {
       if (this.hooks.git.isCurrentOperation(operation)) {
         // A Git command may mutate the worktree before surfacing an error.
