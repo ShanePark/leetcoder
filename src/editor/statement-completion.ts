@@ -2,9 +2,10 @@ import { javaLanguage } from '@codemirror/lang-java'
 import {
   getIndentation,
   indentString,
+  indentUnit,
   syntaxTree,
 } from '@codemirror/language'
-import { EditorSelection } from '@codemirror/state'
+import { countColumn, EditorSelection } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { maskJavaCommentsAndLiterals } from '../completions/source'
 import { collectJavaSymbolsFromMasked } from '../completions/source/symbols'
@@ -342,10 +343,60 @@ export interface JavaStatementCompletion {
   semicolon: string
   /** Closing parentheses/brackets needed to make the statement syntactically complete. */
   closing: string
-  /** Cursor position immediately after the completed statement, after all changes apply. */
+  /** Cursor position after completion, inside a newly opened block when present. */
   cursor: number
   /** Expands the trailing identifier when it uniquely prefixes one visible symbol. */
   identifier?: { from: number; to: number; insert: string }
+  /** Replaces the header's trailing text with a new empty block. */
+  block?: { from: number; to: number; insert: string }
+}
+
+function planEmptyIfBlock(
+  source: string,
+  position: number,
+  line: SourceLine,
+  codeEnd: number,
+  indentationUnit: string,
+): JavaStatementCompletion | null {
+  const statement = source.slice(line.from, codeEnd).trim()
+  const closing = missingJavaClosingDelimiters(statement)
+  if (!/^if\s*\(/.test(statement) || closing === null) {
+    return null
+  }
+  const header = `${statement}${closing}`
+  const tree = javaLanguage.parser.parse(`${header} {}`)
+  const node = tree.topNode.firstChild
+  if (node?.name !== 'IfStatement' || node.nextSibling || hasJavaSyntaxError(tree.topNode)
+    || node.lastChild?.name !== 'Block' || node.lastChild.from !== header.length + 1) {
+    return null
+  }
+  const indent = /^[\t ]*/.exec(line.text)?.[0] ?? ''
+  const following = maskJavaCommentsAndLiterals(source.slice(line.to))
+  const followingOffset = /\S/.exec(following)?.index
+  if (followingOffset !== undefined) {
+    const code = following.slice(followingOffset)
+    const followingLine = lineAt(source, line.to + followingOffset)
+    const followingIndent = /^[\t ]*/.exec(followingLine.text)?.[0] ?? ''
+    // Keep explicit and indented bodies; a sibling at the header's indent stays outside the new block.
+    if (code.startsWith('{') || /^else\b/.test(code)
+      || (!code.startsWith('}') && countColumn(followingIndent, 4) > countColumn(indent, 4))) {
+      return null
+    }
+  }
+  const from = line.from + source.slice(line.from, codeEnd).trimEnd().length
+  const statementFrom = line.from + line.text.length - line.text.trimStart().length
+  const identifier = expandTrailingIdentifier(source, statement, statementFrom, position, `${header};`)
+  const growth = identifier ? identifier.insert.length - (identifier.to - identifier.from) : 0
+  const lineBreak = lineBreakFor(source, line)
+  const opening = `${closing} {${source.slice(from, line.to)}${lineBreak}${indent}${indentationUnit}`
+  return {
+    semicolonFrom: from,
+    semicolon: '',
+    closing,
+    cursor: from + opening.length + growth,
+    block: { from, to: line.to, insert: `${opening}${lineBreak}${indent}}` },
+    ...(identifier ? { identifier } : {}),
+  }
 }
 
 /** Return the one visible symbol name that a trailing, undeclared identifier abbreviates. */
@@ -419,6 +470,7 @@ function* multilineStatementStarts(source: string, codeEnd: number): Generator<n
 export function planJavaStatementCompletion(
   source: string,
   position: number,
+  indentationUnit = '    ',
 ): JavaStatementCompletion | null {
   const line = lineAt(source, position)
   if (isInsideCommentOrString(source, line.from) || isInsideCommentOrString(source, position)) {
@@ -426,6 +478,8 @@ export function planJavaStatementCompletion(
   }
   const codeEnd = line.from + lineCodeEnd(line.text)
   if (!source.slice(line.from, codeEnd).trim()) return null
+  const block = planEmptyIfBlock(source, position, line, codeEnd, indentationUnit)
+  if (block) return block
   const plan = planJavaStatementFrom(source, position, line.from, codeEnd)
   if (plan) return plan
   for (const from of multilineStatementStarts(source, codeEnd)) {
@@ -475,19 +529,20 @@ function planJavaStatementFrom(
   }
 }
 
-/** Complete the current Java statement without inserting a line break. */
+/** Complete the current Java statement, opening an empty if body when needed. */
 export function completeJavaStatement(view: EditorView): boolean {
   const { state } = view
   const selection = state.selection.main
   if (state.selection.ranges.length !== 1 || !selection.empty) {
     return false
   }
-  const plan = planJavaStatementCompletion(state.doc.toString(), selection.head)
+  const plan = planJavaStatementCompletion(state.doc.toString(), selection.head, state.facet(indentUnit))
   if (!plan) {
     return false
   }
-  const insert = `${plan.closing}${plan.semicolon}`
+  const insert = plan.block ? '' : `${plan.closing}${plan.semicolon}`
   const changes = [
+    ...(plan.block ? [plan.block] : []),
     ...(plan.identifier ? [plan.identifier] : []),
     ...(insert ? [{ from: plan.semicolonFrom, insert }] : []),
   ]

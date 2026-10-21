@@ -460,7 +460,7 @@ describe('Complete Current Statement', () => {
     expect(state.selection.main.head).toBe(position + 1)
   })
 
-  it('does not duplicate an existing semicolon or complete control headers', () => {
+  it('does not duplicate an existing semicolon', () => {
     const complete = 'class S {\n    void f() {\n        call();\n    }\n}'
     const completePosition = complete.indexOf('call') + 4
     const completed = runEditorCommand(
@@ -470,9 +470,127 @@ describe('Complete Current Statement', () => {
     expect(completed.doc.toString()).toBe(complete)
     expect(completed.selection.main.head).toBe(complete.indexOf('call();') + 'call();'.length)
 
-    const control = 'class S {\n    void f() {\n        if (ready)\n    }\n}'
-    expect(planJavaStatementCompletion(control, control.indexOf('ready') + 5)).toBeNull()
     expect(planJavaStatementCompletion('// return value', 8)).toBeNull()
+  })
+
+  it('opens a nested if block and places the cursor on its indented empty line in one edit', () => {
+    const source = [
+      'class S {',
+      '    int f(String s, String sorted) {',
+      '        for (int i = 0; i < s.length(); i++) {',
+      '            if(s.charAt(i) != sorted.charAt(i))',
+      '        }',
+      '        return -1;',
+      '    }',
+      '}',
+    ].join('\n')
+    const header = 'if(s.charAt(i) != sorted.charAt(i))'
+    const position = source.indexOf(header) + header.length
+    let state = javaState(source).update({ selection: { anchor: position } }).state
+    const transactions: Transaction[] = []
+    const view = {
+      get state() { return state },
+      dispatch: (spec: TransactionSpec) => {
+        const transaction = state.update(spec)
+        transactions.push(transaction)
+        state = transaction.state
+      },
+    } as unknown as EditorView
+
+    expect(completeJavaStatement(view)).toBe(true)
+    const bodyIndent = '            ' + state.facet(indentUnit)
+    expect(state.doc.toString()).toBe(source.replace(header, `${header} {\n${bodyIndent}\n            }`))
+    expect(state.selection.main.head).toBe(position + ' {\n'.length + bodyIndent.length)
+    expect(transactions).toHaveLength(1)
+    expect(transactions[0].isUserEvent('input.completeStatement')).toBe(true)
+    expect(planJavaStatementCompletion(state.doc.toString(), state.selection.main.head)).toBeNull()
+  })
+
+  it.each(['    ', '\t'])('uses the configured indentation unit %j and preserves trailing comments', (unit) => {
+    const source = 'class S {\n    void f() {\n        if (ready) // keep\n    }\n}'
+    const position = source.indexOf('if (ready)') + 'if (ready)'.length
+    const state = runEditorCommand(EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), indentUnit.of(unit)],
+    }), completeJavaStatement)
+    expect(state.doc.toString()).toBe(source.replace('if (ready) // keep', `if (ready) { // keep\n        ${unit}\n        }`))
+    expect(state.selection.main.head).toBe(position + ' { // keep\n        '.length + unit.length)
+  })
+
+  it.each(['', ' // keep'])('closes an unfinished if condition and opens its body in the same command%s', (comment) => {
+    const header = 'if (sorted.charAt(0) == s.charAt(s.length() - 1) && sorted.charAt(0) != sorted.charAt(1)'
+    const source = `class S {\n    void f() {\n        ${header}${comment}\n    }\n}`
+    const position = source.indexOf(header) + header.length
+    const plan = planJavaStatementCompletion(source, position)
+    expect(plan?.closing).toBe(')')
+    expect(plan?.semicolon).toBe('')
+    expect(plan?.block).toBeDefined()
+    const state = runEditorCommand(EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), indentUnit.of('    ')],
+    }), completeJavaStatement)
+    expect(state.doc.toString()).toBe(source.replace(`${header}${comment}`, `${header}) {${comment}\n            \n        }`))
+    expect(state.selection.main.head).toBe(position + `) {${comment}\n            `.length)
+  })
+
+  it('preserves unique symbol expansion while closing an if header and opening its body', () => {
+    const source = 'class S {\n    void f(boolean ready) {\n        if (rea\n    }\n}'
+    const position = source.indexOf('if (rea') + 'if (rea'.length
+    const state = runEditorCommand(EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), indentUnit.of('    ')],
+    }), completeJavaStatement)
+    expect(state.doc.toString()).toBe(source.replace('if (rea', 'if (ready) {\n            \n        }'))
+    expect(state.selection.main.head).toBe(source.indexOf('if (rea') + 'if (ready) {\n            '.length)
+  })
+
+  it.each([')', ''])('opens an empty if before a following sibling loop with header ending %j', (closing) => {
+    const header = `if (s.charAt(0) == min || s.charAt(n - 1) == max${closing}`
+    const following = '\n\n        for (int i = 1; i < n - 1; i++) {\n            if (s.charAt(i) == min || s.charAt(i) == max) {\n                return 2;\n            }\n        }\n        return 3;\n    }\n}'
+    const source = `class S {\n    int f(String s) {\n        ${header}${following}`
+    const position = source.indexOf(header) + header.length
+    const state = runEditorCommand(EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), indentUnit.of('    ')],
+    }), completeJavaStatement)
+    const insertion = `${closing ? '' : ')'} {\n            \n        }`
+    expect(state.doc.toString()).toBe(source.slice(0, position) + insertion + following)
+    expect(state.selection.main.head).toBe(position + `${closing ? '' : ')'} {\n            `.length)
+  })
+
+  it.each(['        ', '\t\t', '    '])('skips comments and compares following sibling indentation by columns: %j', (followingIndent) => {
+    const source = `class S {\n    void f() {\n        if (ready)\n\n            // unrelated comment\n        /* another comment */\n${followingIndent}call();\n    }\n}`
+    const position = source.indexOf('if (ready)') + 'if (ready)'.length
+    const state = runEditorCommand(EditorState.create({
+      doc: source,
+      selection: { anchor: position },
+      extensions: [java(), indentUnit.of('    ')],
+    }), completeJavaStatement)
+    expect(state.doc.toString()).toBe(source.replace('if (ready)', 'if (ready) {\n            \n        }'))
+  })
+
+  it.each([
+    'if (ready) { call(); }',
+    'if (ready) call();',
+    'if (ready) if (other)',
+    'if (ready)\n            call();',
+    'if (ready)\n            // keep\n            call();',
+    'if (ready)\n        // keep\n\n            call();',
+    'if (ready)\n\t\t\tcall();',
+    'if (ready)\n        {\n            call();\n        }',
+    'if (ready)\n    {\n            call();\n    }',
+    'if (ready)\n        // keep\n    else call();',
+    'if (ready)\n        else call();',
+    'for (int i = 0; i < 3; i++)',
+    'while (ready)',
+  ])('preserves existing bodies and other control headers: %s', (statement) => {
+    const source = `class S {\n    void f() {\n        ${statement}\n    }\n}`
+    const position = source.indexOf(statement) + statement.split('\n')[0].length
+    expect(planJavaStatementCompletion(source, position)).toBeNull()
   })
 
   it('accepts array initializers that end with a closing brace', () => {
