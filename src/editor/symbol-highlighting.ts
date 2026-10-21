@@ -19,9 +19,11 @@ function highlightsFor(state: EditorState): SymbolHighlights {
     ? planJavaMethodRename(state.doc.toString(), selection.head)
     : variable
   if ('reason' in result) return emptyHighlights
+  // Parser recovery can represent a missing declaration name as an empty range.
+  const ranges = result.ranges.filter(({ from, to }) => from < to)
   return {
-    ranges: result.ranges,
-    decorations: Decoration.set(result.ranges.map(({ from, to }) => symbolMark.range(from, to))),
+    ranges,
+    decorations: Decoration.set(ranges.map(({ from, to }) => symbolMark.range(from, to))),
   }
 }
 

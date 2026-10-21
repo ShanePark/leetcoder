@@ -49,7 +49,7 @@ vi.mock('@codemirror/view', async (importOriginal) => {
   class StateOnlyEditorView {
     state: EditorState
     constructor(options: { state: EditorState }) { this.state = options.state }
-    dispatch(spec: TransactionSpec) { this.state = this.state.update(spec).state }
+    dispatch = (spec: TransactionSpec) => { this.state = this.state.update(spec).state }
     static domEventHandlers(handlers: Parameters<typeof original.EditorView.domEventHandlers>[0]) {
       parameterInfoMocks.handlers.push(handlers)
       return original.EditorView.domEventHandlers(handlers)
@@ -188,6 +188,34 @@ describe('parameter info shortcut integration', () => {
     } as KeyboardEvent
     expect(runScopeHandlers(editor.view, event, 'editor')).toBe(true)
     expect(parameterInfoMocks.show).toHaveBeenCalledWith(editor.view)
+  })
+})
+
+describe('template Tab shortcut integration', () => {
+  it('expands test with Tab between existing methods without a completion popup', () => {
+    const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement)
+    const source = [
+      'import org.junit.jupiter.api.Test;',
+      'import static org.assertj.core.api.Assertions.assertThat;',
+      'class S {',
+      '    @Test',
+      '    public void previous() { assertThat(1).isEqualTo(1); }',
+      '',
+      '    ',
+      '',
+      '    public int minOperations(String s) { return 1; }',
+      '}',
+    ].join('\n')
+    const from = source.indexOf('\n    \n') + '\n    '.length
+    editor.view.dispatch({ changes: { from: 0, insert: source }, selection: { anchor: from } })
+    editor.view.dispatch({ changes: { from, insert: 'test' }, selection: { anchor: from + 4 }, userEvent: 'input.type' })
+    const event = { key: 'Tab', keyCode: 9, shiftKey: false, altKey: false, metaKey: false, ctrlKey: false } as KeyboardEvent
+    expect(runScopeHandlers(editor.view, event, 'editor')).toBe(true)
+    expect(editor.view.state.doc.toString()).toBe(source.slice(0, from)
+      + '@Test\n    public void () {\n        assertThat()\n    }' + source.slice(from))
+    expect(editor.view.state.selection.main.head).toBe(from + '@Test\n    public void '.length)
+    expect(runScopeHandlers(editor.view, event, 'editor')).toBe(true)
+    expect(editor.view.state.selection.main.head).toBe(from + '@Test\n    public void () {\n        assertThat('.length)
   })
 })
 

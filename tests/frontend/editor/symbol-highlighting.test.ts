@@ -23,6 +23,20 @@ function marked(state: EditorState): number[] {
 }
 
 describe('Java cursor symbol highlighting', () => {
+  it('leaves an empty method-name placeholder unmarked and resumes highlighting after typing', () => {
+    const source = 'class A { public void () { assertThat(); } }'
+    const position = source.indexOf('()')
+    const state = stateAt(source, position)
+    expect(marked(state)).toEqual([])
+    expect(state.field(javaSymbolHighlights).ranges).toEqual([])
+
+    const named = state.update({
+      changes: { from: position, insert: 'example' },
+      selection: { anchor: position + 'example'.length },
+    }).state
+    expect(marked(named)).toEqual([position])
+  })
+
   it('marks the array declaration and argument from either occurrence', () => {
     const source = 'class A { void test() { int[] arr = {1, 2, 3}; targetIndices(arr, 2); } }'
     const declaration = source.indexOf('arr =')
