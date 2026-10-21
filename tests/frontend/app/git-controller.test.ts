@@ -99,6 +99,51 @@ describe('GitController', () => {
     expect(controller.state.loading).toBe(true)
   })
 
+  it('commits selected variants with the problem name', async () => {
+    const commitGit = vi.fn().mockResolvedValue(null)
+    const { controller } = harness({
+      commitGit,
+      listGitChanges: vi.fn().mockResolvedValue([]),
+    })
+    controller.state.files = [
+      'Q3863MinimumOperationsToSortAString.java',
+      'Q3863MinimumOperationsToSortAString2.java',
+    ].map((path) => ({ path, status: 'added', staged: false, additions: 1, deletions: 0 }))
+    controller.state.selectedPaths = controller.state.files.map((file) => file.path)
+
+    const paths = [...controller.state.selectedPaths]
+    await controller.commitSelectedFiles(false)
+
+    expect(commitGit).toHaveBeenCalledWith('/repo', paths,
+      'Add Q3863MinimumOperationsToSortAString')
+  })
+
+  it('requires a manual message for different problems and honors the supplied message', async () => {
+    const commitGit = vi.fn().mockResolvedValue(null)
+    const { controller, hooks } = harness({
+      commitGit,
+      listGitChanges: vi.fn().mockResolvedValue([]),
+    })
+    controller.state.files = ['Q1First.java', 'Q2Second.java'].map((path) => ({
+      path, status: 'added', staged: false, additions: 1, deletions: 0,
+    }))
+    controller.state.selectedPaths = controller.state.files.map((file) => file.path)
+    controller.state.commitMessage = '   '
+
+    await controller.commitSelectedFiles(false)
+
+    expect(controller.state.error).toBe('Enter a commit message')
+    expect(commitGit).not.toHaveBeenCalled()
+    expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+    expect(controller.state.busy).toBe(false)
+
+    controller.state.commitMessage = '  Solve two problems  '
+    await controller.commitSelectedFiles(false)
+
+    expect(commitGit).toHaveBeenCalledWith('/repo', ['Q1First.java', 'Q2Second.java'],
+      'Solve two problems')
+  })
+
   it('reports commit-and-push phases and restores app controls', async () => {
     const commit = deferred<unknown>()
     const push = deferred<unknown>()

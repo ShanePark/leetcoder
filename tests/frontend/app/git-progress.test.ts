@@ -134,6 +134,36 @@ function appHarness(options: {
 }
 
 describe('Git commit progress', () => {
+  it('requires an editable message for multiple problems and enables grouped defaults', () => {
+    const controls = controlsRoot()
+    const git = createGitState()
+    git.files = ['Q1First.java', 'Q2Second.java'].map((path) => ({
+      path, status: 'added', staged: false, additions: 1, deletions: 0,
+    }))
+    git.selectedPaths = git.files.map((file) => file.path)
+    const model = { bottomPanelTab: 'git' as const, busy: false, git }
+
+    updateGitCommitControls(controls.root, model)
+
+    expect(controls.input.placeholder).toBe('Enter a commit message')
+    expect(controls.input.disabled).toBe(false)
+    expect(controls.commit.disabled).toBe(true)
+    expect(controls.commitPush.disabled).toBe(true)
+
+    git.commitMessage = 'Solve two problems'
+    updateGitCommitControls(controls.root, model)
+    expect(controls.commit.disabled).toBe(false)
+    expect(controls.commitPush.disabled).toBe(false)
+
+    git.commitMessage = '  '
+    git.files[1].path = 'Q1First2.java'
+    git.selectedPaths = git.files.map((file) => file.path)
+    updateGitCommitControls(controls.root, model)
+    expect(controls.input.placeholder).toBe('Add Q1First')
+    expect(controls.commit.disabled).toBe(false)
+    expect(controls.commitPush.disabled).toBe(false)
+  })
+
   it('renders an accessible blocking overlay with each commit-and-push phase', () => {
     const overlay = renderGitProgressOverlay()
 

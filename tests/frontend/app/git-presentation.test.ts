@@ -127,21 +127,21 @@ describe('Git panel helpers', () => {
   })
 
   it('derives the auto commit message from the change kinds and clamps panel height', () => {
-    expect(defaultGitCommitMessage([])).toBe('Update files')
+    expect(defaultGitCommitMessage([])).toBe('')
     expect(defaultGitCommitMessage([
       { path: 'src/Q1386CinemaSeatAllocation.java', status: 'added' },
-    ])).toBe('Add Q1386CinemaSeatAllocation.java')
+    ])).toBe('Add Q1386CinemaSeatAllocation')
     expect(defaultGitCommitMessage([
       { path: 'Q1.java', status: 'untracked' },
       { path: 'Q2.java', status: 'added' },
-    ])).toBe('Add 2 files')
+    ])).toBe('')
     expect(defaultGitCommitMessage([
       { path: 'src/Q1.java', status: 'modified' },
-    ])).toBe('Update Q1.java')
+    ])).toBe('Update Q1')
     expect(defaultGitCommitMessage([
       { path: 'Q1.java', status: 'added' },
       { path: 'Q2.java', status: 'modified' },
-    ])).toBe('Update 2 files')
+    ])).toBe('')
     expect(clampBottomPanelHeight(20, 900)).toBe(180)
     expect(clampBottomPanelHeight(1000, 900)).toBe(640)
     expect(clampBottomPanelHeight(Number.POSITIVE_INFINITY, 300)).toBe(240)
@@ -159,6 +159,37 @@ describe('Git panel helpers', () => {
     )
     expect(clampContextMenuPosition(900, 780, 190, 76, 1000, 800)).toEqual({ x: 802, y: 716 })
     expect(clampContextMenuPosition(-10, -20, 190, 76, 1000, 800)).toEqual({ x: 8, y: 8 })
+  })
+
+  it('groups selected problem variants without guessing at title digits', () => {
+    const added = (path: string) => ({ path, status: 'added' })
+    expect(defaultGitCommitMessage([
+      added('Q3863MinimumOperationsToSortAString2.java'),
+      added('Q3863MinimumOperationsToSortAString.java'),
+    ])).toBe('Add Q3863MinimumOperationsToSortAString')
+    expect(defaultGitCommitMessage([
+      added('Q1Title2.java'),
+      { path: 'Q1Title22.java', status: 'modified' },
+    ])).toBe('Update Q1Title2')
+    expect(defaultGitCommitMessage([
+      added('Q1Title2.java'), added('Q1Title3.java'),
+    ])).toBe('')
+    expect(defaultGitCommitMessage([
+      added('Q1Title.java'), added('Q1OtherTitle2.java'),
+    ])).toBe('')
+    expect(defaultGitCommitMessage([
+      added('Q38Title.java'), added('Q3863Title.java'),
+    ])).toBe('')
+    expect(defaultGitCommitMessage([
+      added('Q3_3Sum.java'), added('Q3_3Sum10.java'),
+    ])).toBe('Add Q3_3Sum')
+    expect(defaultGitCommitMessage([
+      added('Q1Title.java'), added('Q1Title01.java'),
+    ])).toBe('')
+    expect(defaultGitCommitMessage([
+      added('Q1Title.java'), added('README.md'),
+    ])).toBe('')
+    expect(defaultGitCommitMessage([added('README.md')])).toBe('Add README.md')
   })
 
   it('uses UTC dates and schedules just after the next UTC midnight', () => {
