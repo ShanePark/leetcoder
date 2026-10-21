@@ -279,6 +279,20 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   const initializer = children(variable).find((node) => node.from > target.definition.to && node.name !== 'AssignOp'
     && !['LineComment', 'BlockComment', 'Dimension'].includes(node.name))
   if (!initializer || !children(variable).some((node) => node.name === 'AssignOp')) return { reason: 'The variable has no initializer.' }
+  const sourceTypeNames = new Set(definitions.filter((definition) => [
+    'ClassDeclaration', 'InterfaceDeclaration', 'EnumDeclaration', 'RecordDeclaration',
+    'AnnotationTypeDeclaration', 'TypeParameter',
+  ].includes(definition.parent?.name ?? '')).map((definition) => source.slice(definition.from, definition.to)))
+  const imports = nodes.filter((node) => node.name === 'ImportDeclaration')
+    .map((node) => source.slice(node.from, node.to).replace(/\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, ''))
+  const inheritedNamesPossible = (node: Node): boolean => {
+    for (let ancestor: Node | null = node; ancestor; ancestor = ancestor.parent) {
+      if (!CLASS_BODIES.has(ancestor.name) || !ancestor.parent) continue
+      if (!['ClassDeclaration', 'InterfaceDeclaration', 'EnumDeclaration'].includes(ancestor.parent.name)
+        || children(ancestor.parent).some((part) => ['Superclass', 'SuperInterfaces', 'ExtendsInterfaces'].includes(part.name))) return true
+    }
+    return false
+  }
   const canMoveToAdjacentArgument = (): boolean => {
     if (target.field || ['String', 'java.lang.String'].includes(type)
       || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1
@@ -396,9 +410,59 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     return context?.parent?.from === declaration.parent?.from
       && siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]?.from === context?.from
   }
-  const stableInitializer = stableExpression(initializer, new Set([target.definition.from]))
+  const stableStringLengthReceiver = (): Binding | null => {
+    if (target.field || arrayType || initializer.name !== 'MethodInvocation'
+      || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1) return null
+    const receiver = children(initializer)[0]
+    const method = initializer.getChild('MethodName')
+    const argumentsNode = initializer.getChild('ArgumentList')
+    if (receiver?.name !== 'Identifier' || children(initializer)[1]?.name !== '.'
+      || !method || source.slice(method.from, method.to) !== 'length'
+      || !argumentsNode || children(argumentsNode).some((part) => !['(', ')', 'LineComment', 'BlockComment'].includes(part.name))) return null
+    const binding = resolve(receiver)
+    if (!binding || binding === 'ambiguous' || binding.field || !binding.type
+      || !['String', 'java.lang.String'].includes(binding.type.trim())
+      || binding.definition.parent?.name === 'SpreadParameter'
+      || source.slice(binding.definition.to, binding.definition.parent?.to).match(/^\s*\[/)
+      || !reliable(binding.definition.parent!)
+      || !understoodOccurrences(nameOf(source, binding), { from: binding.scope.from, to: binding.scope.to })) return null
+    const rootName = binding.type.trim() === 'String' ? 'String' : 'java'
+    if (sourceTypeNames.has(rootName) || inheritedNamesPossible(binding.definition)
+      || imports.some((text) => {
+        if (text.startsWith('importstatic')) return text.endsWith(`.${rootName};`) || text.endsWith('.*;')
+        const imported = text.slice('import'.length, -1)
+        return rootName === 'java' ? imported.endsWith('.java')
+          : (imported.endsWith('.String') && imported !== 'java.lang.String')
+            || (imported.endsWith('.*') && imported !== 'java.lang.*')
+      })) return null
+    if (nodes.some((reference) => {
+      if (!identifierReference(reference) || source.slice(reference.from, reference.to) !== nameOf(source, binding)) return false
+      const resolvedReference = resolve(reference)
+      if (resolvedReference !== 'ambiguous' && resolvedReference?.definition.from !== binding.definition.from) return false
+      let expression = reference
+      while (expression.parent?.name === 'ParenthesizedExpression') expression = expression.parent
+      return expression.parent?.name === 'UpdateExpression'
+        || (expression.parent?.name === 'AssignmentExpression' && children(expression.parent)[0]?.from === expression.from)
+    })) return null
+    const siblings = children(declaration.parent!).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
+    const next = siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]
+    const nextVariable = next?.name === 'LocalVariableDeclaration' ? next.getChild('VariableDeclarator') : null
+    const nextValue = nextVariable && children(nextVariable).find((part) => EXPRESSION_NODES.has(part.name))
+    const nextReceiver = nextValue && children(nextValue)[0]
+    const nextMethod = nextValue?.getChild('MethodName')
+    const nextArguments = nextValue?.getChild('ArgumentList')
+    const argumentParts = nextArguments && children(nextArguments).filter((part) => !['(', ')', 'LineComment', 'BlockComment'].includes(part.name))
+    // The next initializer checks the same receiver for null before any effects can move ahead of that check.
+    if (!next || !reliable(next) || nextValue?.name !== 'MethodInvocation'
+      || nextReceiver?.name !== 'Identifier' || resolve(nextReceiver) !== binding
+      || !nextMethod || source.slice(nextMethod.from, nextMethod.to) !== 'charAt'
+      || argumentParts?.length !== 1 || argumentParts[0].name !== 'IntegerLiteral') return null
+    return binding
+  }
+  const lengthReceiver = stableStringLengthReceiver()
+  const stableInitializer = Boolean(lengthReceiver) || stableExpression(initializer, new Set([target.definition.from]))
   if (!stableInitializer && (dependencySyntaxError || !(arrayType ? canMoveArrayInitializer() : canMoveToAdjacentArgument()))) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
-  const initializerConstant = stableInitializer && compileConstant(initializer)
+  const initializerConstant = !lengthReceiver && stableInitializer && compileConstant(initializer)
   if (!initializerConstant && ['String', 'java.lang.String'].includes(type)) return { reason: 'A runtime String initializer cannot be duplicated safely.' }
   for (const reference of descendants(initializer).filter(identifierReference)) {
     const binding = resolve(reference)
@@ -442,20 +506,6 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
           && (text.endsWith(`.${receiver};`) || text.endsWith('.*;'))))) return null
     }
     return binding.type?.trim().replace(/^java\.lang\.String$/, 'String') ?? null
-  }
-  const sourceTypeNames = new Set(definitions.filter((definition) => [
-    'ClassDeclaration', 'InterfaceDeclaration', 'EnumDeclaration', 'RecordDeclaration',
-    'AnnotationTypeDeclaration', 'TypeParameter',
-  ].includes(definition.parent?.name ?? '')).map((definition) => source.slice(definition.from, definition.to)))
-  const imports = nodes.filter((node) => node.name === 'ImportDeclaration')
-    .map((node) => source.slice(node.from, node.to).replace(/\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, ''))
-  const inheritedNamesPossible = (node: Node): boolean => {
-    for (let ancestor: Node | null = node; ancestor; ancestor = ancestor.parent) {
-      if (!CLASS_BODIES.has(ancestor.name) || !ancestor.parent) continue
-      if (!['ClassDeclaration', 'InterfaceDeclaration', 'EnumDeclaration'].includes(ancestor.parent.name)
-        || children(ancestor.parent).some((part) => ['Superclass', 'SuperInterfaces', 'ExtendsInterfaces'].includes(part.name))) return true
-    }
-    return false
   }
   const standardMath = (receiver: string, invocation: Node): boolean => {
     const rootName = receiver === 'java.lang.Math' ? 'java' : 'Math'
@@ -551,7 +601,7 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     return returnTypes[0] && /^(byte|short|char|int|long|float|double|boolean)$/.test(returnTypes[0])
       && returnTypes.every((returnType) => returnType === returnTypes[0]) ? returnTypes[0] : null
   }
-  const inferredType = constantType(source, initializer, referenceType, methodType)
+  const inferredType = lengthReceiver ? 'int' : constantType(source, initializer, referenceType, methodType)
   const initializerText = (arrayType && initializer.name === 'ArrayInitializer' ? `new ${type} ` : '')
     + source.slice(initializer.from, initializer.to)
   const needsCast = !arrayType && type !== 'String' && type !== 'java.lang.String' && inferredType !== type
