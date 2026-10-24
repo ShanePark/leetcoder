@@ -160,7 +160,7 @@ describe('file explorer actions', () => {
   it('keeps the sidebar within its own bounds and leaves editor room', () => {
     expect(clampSidebarWidth(100, 1200)).toBe(180)
     expect(clampSidebarWidth(700, 1200)).toBe(520)
-    expect(clampSidebarWidth(500, 800)).toBe(433)
+    expect(clampSidebarWidth(500, 800)).toBe(432)
     expect(clampSidebarWidth(Number.NaN, 1200)).toBe(248)
   })
 

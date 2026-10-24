@@ -191,10 +191,16 @@ export function updateGitCommitControls(
 ): void {
   const { busy, git } = model
   const selectedFiles = selectedGitFiles(git.files, selectedPaths)
+  const selectAll = requiredElement<HTMLInputElement>(root, '#git-select-all-checkbox')
+  selectAll.checked = git.files.length > 0 && selectedFiles.length === git.files.length
+  selectAll.indeterminate = selectedFiles.length > 0 && selectedFiles.length < git.files.length
+  selectAll.disabled = busy || git.busy || git.loading || git.files.length === 0
   const input = requiredElement<HTMLInputElement>(root, '#git-commit-message')
-  input.placeholder = defaultGitCommitMessage(selectedFiles)
+  const defaultMessage = defaultGitCommitMessage(selectedFiles)
+  input.placeholder = defaultMessage || 'Enter a commit message'
   input.disabled = busy || git.busy || git.files.length === 0
   const commitDisabled = busy || git.busy || git.loading || git.selectedPaths.length === 0
+    || (!git.commitMessage.trim() && !defaultMessage)
   requiredElement<HTMLButtonElement>(root, '#git-commit').disabled = commitDisabled
   requiredElement<HTMLButtonElement>(root, '#git-commit-push').disabled = commitDisabled
   requiredElement<HTMLButtonElement>(root, '#git-select-all').disabled = busy || git.busy || git.loading || git.files.length === 0

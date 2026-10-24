@@ -346,6 +346,59 @@ describe('FileOperationsController', () => {
     expect(h.messages.at(-1)?.message).toBe(`Discarded changes to ${destination.name}.`)
   })
 
+  it('discards a batch sequentially under one autosave guard and operation', async () => {
+    const changes = ['Q1.java', 'Q2.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    const h = harness()
+    h.setGitFiles(changes)
+    const pending = deferred<void>()
+    h.backend.discardGitChanges = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(undefined)
+    const operation = h.controller.discardGitChanges(changes)
+    await Promise.resolve()
+    expect(h.backend.discardGitChanges).toHaveBeenCalledExactlyOnceWith(repoPath, 'Q1.java')
+    expect(h.document.endGitDiscard).not.toHaveBeenCalled()
+    pending.resolve()
+    await operation
+    expect(h.backend.discardGitChanges).toHaveBeenNthCalledWith(2, repoPath, 'Q2.java')
+    expect(h.document.flushPendingSave).toHaveBeenCalledOnce()
+    expect(h.document.beginGitDiscard).toHaveBeenCalledOnce()
+    expect(h.document.endGitDiscard).toHaveBeenCalledOnce()
+    expect(h.git.finishOperation).toHaveBeenCalledOnce()
+    expect(h.messages.at(-1)?.message).toBe('Discarded changes to 2 files.')
+  })
+
+  it('stops a batch on failure and refreshes the changes already applied', async () => {
+    const changes = ['Q1.java', 'Q2.java', 'Q3.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    const h = harness()
+    h.setGitFiles(changes)
+    h.backend.discardGitChanges = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValue(new Error('failed'))
+    await h.controller.discardGitChanges(changes)
+    expect(h.backend.discardGitChanges).toHaveBeenCalledTimes(2)
+    expect(h.refreshFiles).toHaveBeenCalledTimes(2)
+    expect(h.git.refreshStatus).toHaveBeenCalledTimes(2)
+    expect(h.messages.at(-1)?.message).toBe('Could not discard changes to Q2.java: failed')
+    expect(h.document.endGitDiscard).toHaveBeenCalledOnce()
+  })
+
+  it('stops a batch before later files when the operation is invalidated', async () => {
+    const changes = ['Q1.java', 'Q2.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    const h = harness()
+    h.setGitFiles(changes)
+    const current = vi.spyOn(h.git, 'isCurrentOperation')
+    h.refreshFiles.mockImplementation(async () => {
+      current.mockReturnValue(false)
+      return true
+    })
+    await h.controller.discardGitChanges(changes)
+    expect(h.backend.discardGitChanges).toHaveBeenCalledExactlyOnceWith(repoPath, 'Q1.java')
+    expect(h.document.endGitDiscard).toHaveBeenCalledOnce()
+  })
+
   it('keeps Git autosave suppression active while discard is awaiting the backend', async () => {
     const target = file('src/main/java/easy/Q1TwoSum.java')
     const change: GitChangedFile = {

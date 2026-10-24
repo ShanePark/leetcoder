@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { file, deferred, installDom, type DomHarness } from './lifecycle-harness'
+import { file, deferred, installDom, startApp, createBackend, type DomHarness } from './lifecycle-harness'
 import { FileDialogController, type FileDialogState } from '../../../src/app/file-dialog-controller'
+import { renderDiscardGitDialog } from '../../../src/app/dialogs-view'
 import { createGitState } from '../../../src/app/git-controller'
 
 function harness(dom: DomHarness) {
@@ -120,6 +121,65 @@ describe('file dialog orchestration', () => {
     await Promise.resolve()
     await Promise.resolve()
     expect(dom.document.activeElement).toBe(dom.root.querySelector('#git-tab'))
+  })
+
+  it('confirms a snapshot of all selected changes when the clicked file is selected', () => {
+    const changes = ['Q1.java', 'Q2.java', 'Q3.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    h.state.git.files = changes
+    h.state.git.selectedPaths = ['Q1.java', 'Q2.java', 'missing.java']
+    h.controller.openGitContextMenu(changes[1], 0, 0)
+    dom.root.querySelector('#git-discard-action').dispatch('click')
+    expect(h.operations.discardGitChanges).not.toHaveBeenCalled()
+    expect(renderDiscardGitDialog).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      files: changes.slice(0, 2),
+    }))
+    h.state.git.selectedPaths = ['Q3.java']
+    dom.root.querySelector('#discard-git-form').dispatch('submit', { preventDefault: vi.fn() })
+    expect(h.operations.discardGitChanges).toHaveBeenCalledExactlyOnceWith(changes.slice(0, 2))
+  })
+
+  it('discards only an unselected clicked file without changing selection', () => {
+    const changes = ['Q1.java', 'Q2.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    h.state.git.files = changes
+    h.state.git.selectedPaths = ['Q1.java']
+    h.controller.openGitContextMenu(changes[1], 0, 0)
+    dom.root.querySelector('#git-discard-action').dispatch('click')
+    dom.root.querySelector('#discard-git-form').dispatch('submit', { preventDefault: vi.fn() })
+    expect(h.operations.discardGitChanges).toHaveBeenCalledExactlyOnceWith(changes[1])
+    expect(h.state.git.selectedPaths).toEqual(['Q1.java'])
+  })
+
+  it('wires the heading checkbox to select-all and clear commands', async () => {
+    const { backend } = createBackend()
+    const app = await startApp(dom, backend)
+    try {
+      const git = (app as unknown as { gitController: {
+        selectAllFiles: () => void; selectNoFiles: () => void
+      } }).gitController
+      const selectAll = vi.spyOn(git, 'selectAllFiles')
+      const selectNone = vi.spyOn(git, 'selectNoFiles')
+      const checkbox = dom.root.querySelector('#git-select-all-checkbox')
+      checkbox.dispatch('change', { target: { checked: true } })
+      expect(selectAll).toHaveBeenCalledOnce()
+      expect(selectNone).not.toHaveBeenCalled()
+      checkbox.dispatch('change', { target: { checked: false } })
+      expect(selectNone).toHaveBeenCalledOnce()
+    } finally {
+      await app.destroy()
+    }
+  })
+
+  it('cancels a pending discard when the repository dialog state resets', () => {
+    const change = { path: file.path, status: 'M', staged: false, additions: null, deletions: null }
+    h.controller.openGitContextMenu(change, 0, 0)
+    dom.root.querySelector('#git-discard-action').dispatch('click')
+    h.controller.resetGitDiscardDialog()
+    dom.root.querySelector('#discard-git-form').dispatch('submit', { preventDefault: vi.fn() })
+    expect(h.operations.discardGitChanges).not.toHaveBeenCalled()
   })
 
   it('blocks busy operations and removes its DOM listeners when disposed', () => {

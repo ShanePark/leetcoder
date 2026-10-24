@@ -6,7 +6,9 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  gap: var(--panel-gap);
   height: 100%;
+  padding: var(--panel-gap);
   background: var(--bg);
 }
 
@@ -14,28 +16,29 @@
   flex: none;
 }
 
+/* Anchored under the menu button: the shell gap, the sidebar's 1px border and
+   its 12px inner padding, then 4px below the 52px repository row's button. */
 .app-menu {
   position: absolute;
   z-index: 70;
-  top: 40px;
-  left: 12px;
-  min-width: 220px;
+  top: calc(var(--panel-gap) + 45px);
+  left: calc(var(--panel-gap) + 13px);
+  min-width: 224px;
   padding: 4px;
-  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  background: var(--surface-3);
+  background: var(--surface-2);
   box-shadow: var(--shadow-menu);
 }
 
 .app-menu-item {
   display: grid;
   width: 100%;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: 32px;
-  padding: 6px 9px;
-  border-radius: var(--radius-sm);
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: calc(var(--radius-md) - 4px);
   color: var(--text);
   font-size: 13px;
   text-align: left;
@@ -43,7 +46,7 @@
 
 .app-menu-item:hover:not(:disabled),
 .app-menu-item:focus-visible {
-  background: var(--surface-2);
+  background: var(--surface-3);
 }
 
 .app-menu-item:disabled {
@@ -87,12 +90,13 @@
   margin-top: 0;
   color: var(--text-faint);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .app-menu-divider {
   height: 1px;
-  margin: 4px 6px;
+  margin: 4px 8px;
   background: var(--border);
 }
 
@@ -125,27 +129,41 @@
   gap: 6px;
   height: 28px;
   max-width: 340px;
-  padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
+  padding: 0 10px 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
-  color: var(--text-dim);
+  color: var(--text);
   font-size: 12px;
+  font-weight: 500;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.repo-chip .button-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
 }
 
 .repo-chip:hover:not(:disabled) {
   background: var(--surface-3);
-  color: var(--text);
 }
 
 .repo-chip:disabled {
   opacity: 0.55;
 }
 
+/* No repository yet: an outlined placeholder rather than a filled chip. */
 .repo-chip.is-empty {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent);
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.repo-chip.is-empty:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .repo-chip-label {
@@ -157,6 +175,8 @@
 .workspace {
   display: grid;
   flex: 1;
-  grid-template-columns: var(--sidebar-width, 248px) 7px minmax(0, 1fr);
+  /* The splitter column is the gap between floating panels; keep it equal to
+     --panel-gap and SIDEBAR_SPLITTER_WIDTH in app/layout.ts. */
+  grid-template-columns: var(--sidebar-width, 248px) 8px minmax(0, 1fr);
   min-height: 0;
 }

@@ -5,26 +5,31 @@
 .editor-column {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--panel-gap);
   min-width: 0;
   min-height: 0;
-  padding: 12px 16px 0;
 }
 
 .daily-card {
   flex: none;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--panel-radius);
   background: var(--surface);
+  box-shadow: var(--shadow-panel);
 }
 
+/* One 52px toolbar row: 28px controls centered with 12px vertical padding. */
 .daily-header {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  min-height: 48px;
-  padding: 8px 16px;
+  gap: 8px 12px;
+  min-height: 52px;
+  padding: 12px 14px;
+}
+
+.daily-header .icon-button {
+  border-radius: var(--radius-pill);
 }
 
 .problem-lookup {
@@ -37,65 +42,30 @@
 .problem-lookup-field {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   height: 28px;
-  padding: 0 7px;
-  border: 1px solid var(--border-strong);
+  padding: 0 10px;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
   color: var(--text-faint);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .problem-lookup-field:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .problem-lookup-prefix {
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
-.daily-today {
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface-2);
-  color: var(--text-dim);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.daily-today:hover:not(:disabled) {
-  border-color: var(--text-faint);
-  background: var(--surface-3);
-  color: var(--text);
-}
-
-.daily-today:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
-
-.daily-today-status {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 5px;
-  color: var(--text-faint);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.daily-today-status .button-icon {
-  color: var(--accent);
-}
-
 .problem-lookup-input {
   width: 64px;
-  height: 24px;
+  height: 26px;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -104,6 +74,7 @@
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .problem-lookup-input::placeholder {
@@ -132,31 +103,72 @@
   color: var(--text);
   font-size: 15px;
   font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 28px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .difficulty {
+  display: inline-flex;
   flex: none;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
   font-weight: 600;
+  line-height: 1;
 }
 
 .difficulty-easy {
-  background: rgba(0, 200, 179, 0.12);
+  background: color-mix(in srgb, var(--easy) 14%, transparent);
   color: var(--easy);
 }
 
 .difficulty-medium {
-  background: rgba(255, 183, 0, 0.12);
+  background: color-mix(in srgb, var(--medium) 14%, transparent);
   color: var(--medium);
 }
 
 .difficulty-hard {
-  background: rgba(255, 77, 106, 0.12);
+  background: color-mix(in srgb, var(--hard) 14%, transparent);
   color: var(--hard);
+}
+
+.daily-today {
+  height: 28px;
+  padding: 0 12px;
+  border-color: transparent;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.daily-today:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.daily-today:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.daily-today-status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.daily-today-status .button-icon {
+  color: var(--accent);
 }
 
 .daily-actions {
@@ -190,7 +202,7 @@
 .daily-skeleton {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 @keyframes skeleton-shimmer {
@@ -201,7 +213,7 @@
 
 .skeleton-bar {
   height: 12px;
-  border-radius: 4px;
+  border-radius: var(--radius-pill);
   background: var(--surface-3);
   animation: skeleton-shimmer 1.4s ease-in-out infinite;
 }
@@ -213,37 +225,43 @@
   }
 }
 
+/* Same 14px inset as the header so left edges line up; spacing, not a rule,
+   separates it from the toolbar row. */
 .daily-description {
   overflow-y: auto;
   height: var(--daily-description-height, 220px);
   min-height: 0;
-  padding: 4px 16px 16px;
-  border-top: 1px solid var(--border);
+  padding: 0 14px 12px;
 }
 
+/* Invisible until hovered or dragged, then a 2px accent line like the
+   sidebar splitter. */
 .daily-description-resize-handle {
   position: relative;
   z-index: 1;
-  height: 7px;
+  height: 8px;
   cursor: row-resize;
 }
 
 .daily-description-resize-handle span {
   position: absolute;
   top: 3px;
-  right: 0;
-  left: 0;
-  height: 1px;
-  background: var(--border);
+  right: var(--panel-radius);
+  left: var(--panel-radius);
+  height: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background-color 120ms ease;
 }
 
 .daily-description-resize-handle:hover span,
 .daily-description-resize-handle:focus-visible span,
 .is-resizing-description .daily-description-resize-handle span {
-  top: 2px;
-  height: 3px;
-  border-radius: 2px;
   background: var(--accent);
+}
+
+.daily-description-resize-handle:focus-visible {
+  outline: none;
 }
 
 .is-resizing-description {
@@ -253,24 +271,25 @@
 
 .daily-description-body {
   max-width: 720px;
-  padding-top: 8px;
+  padding-top: 4px;
   color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: 13.5px;
+  line-height: 1.6;
 }
 
 .daily-description-body p {
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 
 .daily-description-body strong,
 .daily-description-body b {
   color: var(--text);
+  font-weight: 600;
 }
 
 .daily-description-body ul,
 .daily-description-body ol {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   padding-left: 20px;
 }
 
@@ -278,16 +297,22 @@
   margin-bottom: 4px;
 }
 
+/* Keep superscripts (10<sup>4</sup>) from stretching their line. */
+.daily-description-body sup,
+.daily-description-body sub {
+  line-height: 0;
+}
+
 .daily-description-body pre {
   overflow-x: auto;
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
+  color: var(--text-dim);
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 12.5px;
+  line-height: 1.55;
 }
 
 .daily-description-body code {
@@ -296,12 +321,13 @@
   background: var(--surface-2);
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 0.9em;
 }
 
 .daily-description-body pre code {
   padding: 0;
   background: none;
+  font-size: inherit;
 }
 
 .daily-description-body img {
@@ -310,13 +336,13 @@
 }
 
 .daily-description-body hr {
-  margin: 12px 0;
+  margin: 16px 0;
   border: 0;
   border-top: 1px solid var(--border);
 }
 
 .daily-description-body blockquote {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   padding-left: 12px;
   border-left: 2px solid var(--border-strong);
 }

@@ -494,6 +494,11 @@ export class GitController {
     const selectedPathSet = new Set(paths)
     const selectedFiles = this.state.files.filter((file) => selectedPathSet.has(file.path))
     const message = this.state.commitMessage.trim() || defaultGitCommitMessage(selectedFiles)
+    if (!message) {
+      this.state.error = 'Enter a commit message'
+      this.hooks.renderPanel()
+      return
+    }
     const token = this.startOperation(
       pushAfterCommit ? 'Preparing commit and push…' : 'Preparing commit…',
       pushAfterCommit ? 'commit-push' : null,

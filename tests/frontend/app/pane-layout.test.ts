@@ -219,10 +219,10 @@ describe('PaneLayoutController', () => {
     expect(storage.getItem(BOTTOM_PANEL_HEIGHT_KEY)).toBe('600')
     expect(elements.bottomHandle.attributes.get('aria-valuenow')).toBe('240')
     expect(storage.getItem(GIT_FILE_LIST_WIDTH_KEY)).toBe('217')
-    expect(storage.getItem(SIDEBAR_WIDTH_KEY)).toBe('333')
+    expect(storage.getItem(SIDEBAR_WIDTH_KEY)).toBe('332')
     expect(storage.getItem(DAILY_DESCRIPTION_HEIGHT_KEY)).toBe('184')
     expect(elements.gitSplitter.attributes.get('aria-valuemax')).toBe('217')
-    expect(elements.sidebarSplitter.attributes.get('aria-valuemax')).toBe('333')
+    expect(elements.sidebarSplitter.attributes.get('aria-valuemax')).toBe('332')
     expect(elements.descriptionHandle.attributes.get('aria-valuemax')).toBe('184')
   })
 

@@ -9,14 +9,17 @@
   flex-direction: column;
   height: var(--bottom-panel-height, 280px);
   min-height: 180px;
-  border-top: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--panel-radius);
   background: var(--surface);
+  box-shadow: var(--shadow-panel);
 }
 
+/* Centered in the gap above the panel. */
 .bottom-panel-resize-handle {
   position: absolute;
   z-index: 10;
-  top: -4px;
+  top: calc(var(--panel-gap) / -2 - 4px);
   right: 0;
   left: 0;
   height: 8px;
@@ -28,9 +31,14 @@
   height: 100%;
 }
 
+/* A short centered pill in the gap above the panel. */
 .bottom-panel-resize-handle:hover span,
 .is-resizing-panel .bottom-panel-resize-handle span {
-  background: linear-gradient(to bottom, transparent 3px, var(--accent) 3px, var(--accent) 5px, transparent 5px);
+  width: 48px;
+  height: 2px;
+  margin: 3px auto 0;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
 }
 
 .is-resizing-panel {
@@ -41,38 +49,62 @@
 .bottom-panel-tabs {
   display: flex;
   flex: none;
-  align-items: stretch;
+  align-items: center;
   justify-content: space-between;
-  height: 36px;
+  gap: 12px;
+  height: 46px;
   padding: 0 12px;
-  border-bottom: 1px solid var(--border);
 }
 
-/* A recessed segmented control: each tab owns a padded hit area and the
-   active one is raised, so the selection reads at a glance. */
+/* Capsule segmented control: a recessed track with a raised active segment. */
 .bottom-panel-tab-list {
   display: flex;
-  align-self: center;
-  align-items: stretch;
+  align-items: center;
   gap: 2px;
   min-width: 0;
   height: 28px;
   padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+}
+
+.bottom-panel-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.bottom-panel-tab:hover:not(.is-active) {
+  color: var(--text);
+}
+
+.bottom-panel-tab.is-active {
+  background: var(--control-raised);
+  box-shadow: inset 0 0 0 1px var(--border), 0 1px 2px rgb(0 0 0 / 18%);
+  color: var(--text);
+}
+
+.bottom-panel-tab-indicator {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .bottom-panel-actions {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 8px;
-}
-
-.bottom-panel-actions .primary-button {
-  min-height: 28px;
-  padding: 0 10px;
+  gap: 12px;
 }
 
 .bottom-panel-actions .primary-button.is-stop-action {
@@ -83,39 +115,8 @@
 .selected-test-shortcut-hint {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: var(--text-faint);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.bottom-panel-tab {
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
-  padding: 0 12px;
-  border-radius: calc(var(--radius-sm) - 2px);
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-size: 12px;
-  font-weight: 500;
-  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
-}
-
-.bottom-panel-tab:hover:not(.is-active) {
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.bottom-panel-tab.is-active {
-  background: var(--surface-3);
-  box-shadow: inset 0 0 0 1px var(--border-strong);
-  color: var(--text);
-}
-
-.bottom-panel-tab-indicator {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
+  white-space: nowrap;
 }

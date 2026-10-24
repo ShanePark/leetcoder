@@ -9,19 +9,29 @@ import { gitFileName } from './path-helpers'
 
 /**
  * Auto commit message chosen by change kind: brand-new files read `Add …`,
- * anything touching an existing file reads `Update …`.
+ * anything touching an existing file reads `Update …`. Ambiguous selections
+ * need a message supplied by the user.
  */
 export function defaultGitCommitMessage(files: Array<Pick<GitChangedFile, 'path' | 'status'>>): string {
   const normalized = files.filter((file) => file.path.trim().length > 0)
   if (normalized.length === 0) {
-    return 'Update files'
+    return ''
   }
   const isNew = (status: string): boolean => status === 'added' || status === 'untracked'
   const allNew = normalized.every((file) => isNew(file.status))
-  if (normalized.length === 1) {
-    return `${allNew ? 'Add' : 'Update'} ${gitFileName(normalized[0].path)}`
+  const names = normalized.map((file) => gitFileName(file.path))
+  const problems = names.map((name) => /^(Q(\d+)[A-Za-z_\d]*)\.java$/.exec(name))
+  if (problems.every((problem) => problem !== null)
+    && problems.every((problem) => problem![2] === problems[0]![2])) {
+    const stems = problems.map((problem) => problem![1])
+    const base = stems.reduce((shortest, stem) => stem.length < shortest.length ? stem : shortest)
+    // Only a selected base proves a duplicate family; title digits stay intact.
+    if (stems.every((stem) => stem === base
+      || (stem.startsWith(base) && /^(?:[2-9]|[1-9]\d+)$/.test(stem.slice(base.length))))) {
+      return `${allNew ? 'Add' : 'Update'} ${base}`
+    }
   }
-  return `${allNew ? 'Add' : 'Update'} ${normalized.length} files`
+  return normalized.length === 1 ? `${allNew ? 'Add' : 'Update'} ${names[0]}` : ''
 }
 
 /**

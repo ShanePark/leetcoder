@@ -26,7 +26,7 @@ export class FileDialogController {
   private readonly root: HTMLElement
   private readonly state: FileDialogState
   private readonly listeners: Array<() => void> = []
-  private gitDiscardDialogFile: GitChangedFile | null = null
+  private gitDiscardDialogFiles: GitChangedFile[] | null = null
   private gitDiscardDialogFocusTarget: HTMLElement | null = null
   private deleteDialogFile: ProblemFileEntry | null = null
   private deleteDialogFocusTarget: HTMLElement | null = null
@@ -96,7 +96,7 @@ export class FileDialogController {
   }
 
   resetGitDiscardDialog(): void {
-    this.gitDiscardDialogFile = null
+    this.gitDiscardDialogFiles = null
     this.gitDiscardDialogFocusTarget = null
   }
 
@@ -114,7 +114,7 @@ export class FileDialogController {
 
   handleEscape(event: KeyboardEvent): void {
     if (event.key !== 'Escape') return
-    if (this.gitDiscardDialogFile) {
+    if (this.gitDiscardDialogFiles) {
       event.preventDefault()
       this.closeDiscardGitDialog()
     } else if (this.deleteDialogFile) {
@@ -199,41 +199,44 @@ export class FileDialogController {
     }
     this.gitDiscardDialogFocusTarget = this.findGitFileFocusTarget(context.file.path)
     this.closeGitContextMenu()
-    this.gitDiscardDialogFile = context.file
+    this.gitDiscardDialogFiles = this.state.git.selectedPaths.includes(context.file.path)
+      ? this.state.git.files.filter((file) => this.state.git.selectedPaths.includes(file.path))
+      : [context.file]
+    const files = this.gitDiscardDialogFiles
     this.renderDiscardGitDialog()
     queueMicrotask(() => {
-      if (this.gitDiscardDialogFile === context.file) {
+      if (this.gitDiscardDialogFiles === files) {
         this.element<HTMLButtonElement>('#cancel-discard-git').focus()
       }
     })
   }
 
   private closeDiscardGitDialog(): void {
-    if (!this.gitDiscardDialogFile) {
+    if (!this.gitDiscardDialogFiles) {
       return
     }
     const focusTarget = this.gitDiscardDialogFocusTarget
-    this.gitDiscardDialogFile = null
+    this.gitDiscardDialogFiles = null
     this.gitDiscardDialogFocusTarget = null
     this.renderDiscardGitDialog()
     this.restoreGitDiscardFocus(focusTarget)
   }
 
   private confirmDiscardGitDialog(): void {
-    const file = this.gitDiscardDialogFile
-    if (!file || this.state.busy || this.state.git.busy) {
+    const files = this.gitDiscardDialogFiles
+    if (!files || this.state.busy || this.state.git.busy) {
       return
     }
     const focusTarget = this.gitDiscardDialogFocusTarget
-    this.gitDiscardDialogFile = null
+    this.gitDiscardDialogFiles = null
     this.gitDiscardDialogFocusTarget = null
     this.renderDiscardGitDialog()
-    void this.discardGitChangesAfterConfirmation(file, focusTarget)
+    void this.discardGitChangesAfterConfirmation(files, focusTarget)
   }
 
   renderDiscardGitDialog(): void {
     renderDiscardGitDialogView(this.root, {
-      file: this.gitDiscardDialogFile,
+      files: this.gitDiscardDialogFiles,
       busy: this.state.busy,
       gitBusy: this.state.git.busy,
     })
@@ -317,11 +320,11 @@ export class FileDialogController {
   }
 
   private async discardGitChangesAfterConfirmation(
-    file: GitChangedFile,
+    files: GitChangedFile[],
     focusTarget: HTMLElement | null,
   ): Promise<void> {
     try {
-      await this.options.operations.discardGitChanges(file)
+      await this.options.operations.discardGitChanges(files.length === 1 ? files[0] : files)
     } finally {
       this.restoreGitDiscardFocus(focusTarget)
     }
