@@ -82,6 +82,22 @@ describe('GitController', () => {
     expect(controller.state.diffLoading).toBe(false)
   })
 
+  it('selects files that appear between refreshes while keeping explicit unchecks', async () => {
+    const backend: GitBackendClient = {
+      listGitChanges: vi.fn()
+        .mockResolvedValueOnce(' M Q1.java\n M Q2.java')
+        .mockResolvedValueOnce(' M Q1.java\n M Q2.java\n?? Q3.java'),
+      getGitDiff: vi.fn().mockResolvedValue(''),
+    }
+    const { controller } = harness(backend)
+
+    await controller.refreshStatus()
+    controller.toggleFile('Q1.java', false)
+    await controller.refreshStatus()
+
+    expect(controller.state.selectedPaths).toEqual(['Q2.java', 'Q3.java'])
+  })
+
   it('keeps an in-flight status response from an older repository out of state', async () => {
     const status = deferred<unknown>()
     const backend: GitBackendClient = {

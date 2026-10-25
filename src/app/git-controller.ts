@@ -241,7 +241,8 @@ export class GitController {
       this.hooks.renderPanel()
       return
     }
-    const previousPaths = [...this.state.selectedPaths]
+    const previouslySelected = new Set(this.state.selectedPaths)
+    const previouslyKnown = new Set(this.state.files.map((file) => file.path))
     const repositoryGeneration = context.repositoryGeneration
     const requestId = ++this.statusRequestId
     this.pendingDiffPath = null
@@ -260,11 +261,15 @@ export class GitController {
       if (!this.isCurrentStatusRequest({ id: requestId, repoPath, repositoryGeneration })) {
         return
       }
-      const availablePaths = new Set(snapshot.files.map((file) => file.path))
+      // Every change starts selected, including one that appears between
+      // refreshes; only an explicit uncheck survives while the file stays
+      // changed.
       const preserveSelection = this.state.loadedRepoPath === repoPath
-      const selectedPaths = preserveSelection
-        ? previousPaths.filter((path) => availablePaths.has(path))
-        : snapshot.files.map((file) => file.path)
+      const selectedPaths = snapshot.files
+        .map((file) => file.path)
+        .filter((path) => !preserveSelection
+          || previouslySelected.has(path)
+          || !previouslyKnown.has(path))
       this.state.branch = snapshot.branch
       this.state.files = snapshot.files
       this.state.unpushedCommitCount = unpushedCommitCount
