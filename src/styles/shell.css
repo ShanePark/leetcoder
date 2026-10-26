@@ -113,6 +113,12 @@
   animation: none;
 }
 
+/* A running build or restart ignores clicks but keeps the button's look. */
+.update-button[aria-disabled='true'],
+.app-menu-item-update[aria-disabled='true'] {
+  cursor: default;
+}
+
 .update-button.is-spinning .button-icon {
   animation: spin 0.9s linear infinite;
 }

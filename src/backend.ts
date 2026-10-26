@@ -36,6 +36,7 @@ export type {
   TestRunProgress,
   TestRunProgressHandler,
   TestSummary,
+  UpdateBuild,
   UpdateStatus,
 } from './backend/contracts'
 
@@ -44,6 +45,7 @@ export { createBackendClient } from './backend/client'
 export { BackendError, errorMessage, isConflictError } from './backend/errors'
 
 export {
+  normalizeUpdateBuild,
   normalizeUpdateStatus,
 } from './backend/normalizers/problem'
 

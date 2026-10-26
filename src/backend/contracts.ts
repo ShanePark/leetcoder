@@ -20,6 +20,11 @@ export interface UpdateStatus {
   latestCommit: string
 }
 
+/** The commit of a release build staged in the background and ready to install. */
+export interface UpdateBuild {
+  commit: string
+}
+
 /** A Java source file returned by the repository file-list command. */
 export interface ProblemFileEntry {
   path: string
@@ -253,7 +258,10 @@ export interface BackendClient {
     handler: (change: RepositoryFilesChanged) => void,
   ): Promise<() => void>
   checkForUpdate(): Promise<UpdateStatus>
-  updateAndRestart(): Promise<void>
+  /** Build and stage the latest local commit without replacing the running app. */
+  buildUpdate(): Promise<UpdateBuild>
+  /** Install the staged build and restart into it. */
+  applyUpdate(): Promise<void>
 }
 
 /** Tauri's event bridge, narrowed to what the watcher subscription needs. */

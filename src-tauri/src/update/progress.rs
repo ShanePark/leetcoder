@@ -10,10 +10,20 @@ use std::{
 use tauri::Emitter;
 
 const UPDATE_PROGRESS_EVENT: &str = "update-progress";
-pub(super) const UPDATE_PROGRESS_TOTAL: u8 = 4;
+pub(super) const BUILD_PROGRESS_TOTAL: u8 = 3;
+pub(super) const APPLY_PROGRESS_TOTAL: u8 = 2;
 const UPDATE_STAGE_PREFIX: &str = "LEETCODER_UPDATE_STAGE:";
 pub(super) const UPDATE_DETAIL_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const UPDATE_DETAIL_MAX_CHARS: usize = 240;
+
+/// The two independently reported halves of an update: building and staging
+/// the release in the background, then installing it and restarting.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UpdatePhase {
+    Build,
+    Apply,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,19 +38,38 @@ pub(crate) struct UpdateProgress {
 
 impl UpdateProgress {
     pub(super) fn validating() -> Self {
-        Self::new("validating", 1, "Checking the latest local commit")
+        Self::new(
+            "validating",
+            1,
+            BUILD_PROGRESS_TOTAL,
+            "Checking the latest local commit",
+        )
     }
 
     pub(super) fn building() -> Self {
-        Self::new("building", 2, "Building a fresh release")
+        Self::new("building", 2, BUILD_PROGRESS_TOTAL, "Building the update")
+    }
+
+    pub(super) fn staging() -> Self {
+        Self::new("staging", 3, BUILD_PROGRESS_TOTAL, "Preparing the update")
     }
 
     pub(super) fn preparing() -> Self {
-        Self::new("preparing", 3, "Installing the updated application")
+        Self::new(
+            "preparing",
+            1,
+            APPLY_PROGRESS_TOTAL,
+            "Installing the update",
+        )
     }
 
     pub(super) fn restarting() -> Self {
-        Self::new("restarting", 4, "Restarting leetcoder")
+        Self::new(
+            "restarting",
+            2,
+            APPLY_PROGRESS_TOTAL,
+            "Restarting leetcoder",
+        )
     }
 
     fn building_with_detail(detail: String) -> Self {
@@ -50,14 +79,27 @@ impl UpdateProgress {
         }
     }
 
-    fn new(stage: &str, step: u8, message: &str) -> Self {
+    fn new(stage: &str, step: u8, total: u8, message: &str) -> Self {
         Self {
             stage: stage.into(),
             step,
-            total: UPDATE_PROGRESS_TOTAL,
+            total,
             message: message.into(),
             detail: None,
         }
+    }
+}
+
+/// Maps a script stage marker to the progress it reports in `phase`. Markers
+/// that belong to the other phase, or are unknown, are ignored.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) fn stage_progress(phase: UpdatePhase, stage: &str) -> Option<UpdateProgress> {
+    match (phase, stage) {
+        (UpdatePhase::Build, "building") => Some(UpdateProgress::building()),
+        (UpdatePhase::Build, "staging") => Some(UpdateProgress::staging()),
+        (UpdatePhase::Apply, "preparing") => Some(UpdateProgress::preparing()),
+        (UpdatePhase::Apply, "restarting") => Some(UpdateProgress::restarting()),
+        _ => None,
     }
 }
 
@@ -73,16 +115,18 @@ pub(super) fn emit_update_progress(app: &tauri::AppHandle, progress: UpdateProgr
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) struct UpdateProgressReporter {
     app: tauri::AppHandle,
+    phase: UpdatePhase,
     state: Mutex<ProgressEmissionState>,
     emission_lock: Mutex<()>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl UpdateProgressReporter {
-    pub(super) fn new(app: tauri::AppHandle) -> Self {
+    pub(super) fn new(app: tauri::AppHandle, phase: UpdatePhase) -> Self {
         Self {
             app,
-            state: Mutex::new(ProgressEmissionState::new()),
+            phase,
+            state: Mutex::new(ProgressEmissionState::for_phase(phase)),
             emission_lock: Mutex::new(()),
         }
     }
@@ -114,21 +158,13 @@ impl UpdateProgressReporter {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match stage {
-                "building" => {
-                    state.start_building();
-                    Some(UpdateProgress::building())
-                }
-                "preparing" => {
-                    state.finish_building();
-                    Some(UpdateProgress::preparing())
-                }
-                "restarting" => {
-                    state.finish_building();
-                    Some(UpdateProgress::restarting())
-                }
-                _ => None,
+            let progress = stage_progress(self.phase, stage);
+            match progress.as_ref().map(|progress| progress.stage.as_str()) {
+                Some("building") => state.start_building(),
+                Some(_) => state.finish_building(),
+                None => {}
             }
+            progress
         };
         if let Some(progress) = progress {
             emit_update_progress(&self.app, progress);
@@ -176,9 +212,11 @@ pub(super) struct ProgressEmissionState {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl ProgressEmissionState {
-    pub(super) fn new() -> Self {
+    /// Build output detail is only reported while building; the build phase
+    /// starts in that stage because it is announced before the script runs.
+    pub(super) fn for_phase(phase: UpdatePhase) -> Self {
         Self {
-            building: true,
+            building: phase == UpdatePhase::Build,
             ..Self::default()
         }
     }

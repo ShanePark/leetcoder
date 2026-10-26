@@ -1,4 +1,4 @@
-import type { DailyProblem, ProjectValidation, UpdateStatus } from '../contracts'
+import type { DailyProblem, ProjectValidation, UpdateBuild, UpdateStatus } from '../contracts'
 import { isRecord, stringValue } from './common'
 
 export function normalizeValidation(value: unknown): ProjectValidation {
@@ -30,6 +30,14 @@ export function normalizeUpdateStatus(value: unknown): UpdateStatus {
     ? value.available
     : supported && commitsDiffer(currentCommit, latestCommit)
   return { supported, available, currentCommit, latestCommit }
+}
+
+export function normalizeUpdateBuild(value: unknown): UpdateBuild {
+  const commit = isRecord(value) ? stringValue(value.commit) : undefined
+  if (!commit) {
+    throw new Error('The update build response was invalid.')
+  }
+  return { commit }
 }
 
 function commitsDiffer(currentCommit: string, latestCommit: string): boolean {

@@ -1,14 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  appBinaryPath,
   appImageCandidateNames,
   isLeetcoderOwnedLegacyDesktopEntry,
   isLeetcoderOwnedLegacyLauncher,
   isRegularNonSymlink,
+  parseRebuildMode,
   parseUpdateOldPid,
   rebuildPlan,
+  requireExpectedCommit,
   selectUniqueAppImageName,
   stopRunningAppStrategy,
+  validateStagedManifest,
 } from '../../scripts/leetcoder-rebuild.mjs'
 
 describe('leetcoder rebuild platform plan', () => {
@@ -17,6 +21,8 @@ describe('leetcoder rebuild platform plan', () => {
     expect(plan.bundleKind).toBe('app')
     expect(plan.artifact).toMatch(/src-tauri\/target\/release\/bundle\/macos\/leetcoder\.app$/)
     expect(plan.installedApp).toBe('/Applications/leetcoder.app')
+    expect(plan.stagedApp).toBe('/Applications/.leetcoder.app.staged')
+    expect(plan.stagedManifest).toBe('/Applications/.leetcoder.app.staged.json')
   })
 
   it('uses a user-local AppImage and desktop entry on Linux', () => {
@@ -28,6 +34,15 @@ describe('leetcoder rebuild platform plan', () => {
     expect(plan.legacyLauncher).toBe('/home/tester/.local/bin/leetcoder')
     expect(plan.legacyDesktopEntry).toBe(
       '/home/tester/.local/share/applications/dev.shanepark.leetcoder.desktop',
+    )
+    expect(plan.stagedApp).toBe('/home/tester/.local/lib/leetcoder/.leetcoder.AppImage.staged')
+    expect(plan.stagedManifest).toBe('/home/tester/.local/lib/leetcoder/.leetcoder.AppImage.staged.json')
+  })
+
+  it('hashes the AppImage itself on Linux and the bundle executable on macOS', () => {
+    expect(appBinaryPath('linux', '/apps/.leetcoder.AppImage.staged')).toBe('/apps/.leetcoder.AppImage.staged')
+    expect(appBinaryPath('darwin', '/Applications/.leetcoder.app.staged')).toBe(
+      '/Applications/.leetcoder.app.staged/Contents/MacOS/leetcoder',
     )
   })
 
@@ -63,5 +78,52 @@ describe('leetcoder rebuild safety helpers', () => {
     expect(isLeetcoderOwnedLegacyLauncher('# Launch another app\nexec app')).toBe(false)
     expect(isLeetcoderOwnedLegacyDesktopEntry('[Desktop Entry]\nName=leetcoder Dev\nExec=/tmp/leetcoder')).toBe(true)
     expect(isLeetcoderOwnedLegacyDesktopEntry('[Desktop Entry]\nName=Another app')).toBe(false)
+  })
+})
+
+describe('leetcoder rebuild modes', () => {
+  it('keeps the full flow without arguments and recognizes the staged modes', () => {
+    expect(parseRebuildMode([])).toBe('full')
+    expect(parseRebuildMode(['--stage-only'])).toBe('stage')
+    expect(parseRebuildMode(['--apply-staged'])).toBe('apply')
+  })
+
+  it('rejects unknown or combined arguments', () => {
+    expect(() => parseRebuildMode(['--stage'])).toThrow(/Unsupported rebuild arguments/)
+    expect(() => parseRebuildMode(['--stage-only', '--apply-staged'])).toThrow(/Unsupported rebuild arguments/)
+    expect(() => parseRebuildMode(['toString'])).toThrow(/Unsupported rebuild arguments/)
+  })
+
+  it('requires the expected commit to apply a staged build', () => {
+    expect(requireExpectedCommit(' abc123 \n')).toBe('abc123')
+    expect(() => requireExpectedCommit(undefined)).toThrow(/LEETCODER_EXPECTED_COMMIT is required/)
+    expect(() => requireExpectedCommit('   ')).toThrow(/LEETCODER_EXPECTED_COMMIT is required/)
+  })
+})
+
+describe('leetcoder staged manifest validation', () => {
+  const sha256 = 'a'.repeat(64)
+  const manifest = { commit: 'abc123', sha256, platform: 'linux' }
+  const expected = { expectedCommit: 'abc123', platform: 'linux', sha256 }
+
+  it('accepts the staged build the caller expects', () => {
+    expect(validateStagedManifest(manifest, expected)).toBe(manifest)
+  })
+
+  it('rejects a manifest from another commit or platform', () => {
+    expect(() => validateStagedManifest({ ...manifest, commit: 'def456' }, expected)).toThrow(/different commit/)
+    expect(() => validateStagedManifest({ ...manifest, commit: undefined }, expected)).toThrow(/different commit/)
+    expect(() => validateStagedManifest({ ...manifest, platform: 'darwin' }, expected)).toThrow(/built for darwin/)
+  })
+
+  it('rejects a staged artifact whose checksum differs from the manifest', () => {
+    expect(() => validateStagedManifest(manifest, { ...expected, sha256: 'b'.repeat(64) }))
+      .toThrow(/does not match its manifest/)
+    expect(() => validateStagedManifest({ ...manifest, sha256: 'not-a-hash' }, expected)).toThrow(/invalid checksum/)
+  })
+
+  it('rejects malformed manifests', () => {
+    expect(() => validateStagedManifest(null, expected)).toThrow(/malformed/)
+    expect(() => validateStagedManifest([manifest], expected)).toThrow(/malformed/)
   })
 })

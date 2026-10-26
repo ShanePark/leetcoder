@@ -1,11 +1,18 @@
+import type { UpdateBuild } from './backend'
+import { iconFor, type AppIcon } from './icons'
+import type { UpdatePhase } from './update-controller'
+
+/** Native progress stages: three while building, two while applying. */
 export const UPDATE_PROGRESS_STAGES = [
-  { id: 'validating', label: 'Validate source', detail: 'Checking the latest local commit' },
-  { id: 'building', label: 'Build release', detail: 'Compiling a fresh release build' },
-  { id: 'preparing', label: 'Install update', detail: 'Staging the updated leetcoder app' },
-  { id: 'restarting', label: 'Restart app', detail: 'Launching the updated leetcoder app' },
+  { id: 'validating', phase: 'build', message: 'Checking the latest local commit' },
+  { id: 'building', phase: 'build', message: 'Building the update' },
+  { id: 'staging', phase: 'build', message: 'Preparing the update' },
+  { id: 'preparing', phase: 'apply', message: 'Installing the update' },
+  { id: 'restarting', phase: 'apply', message: 'Restarting leetcoder' },
 ] as const
 
 export type UpdateProgressStage = typeof UPDATE_PROGRESS_STAGES[number]['id']
+export type UpdateProgressPhase = typeof UPDATE_PROGRESS_STAGES[number]['phase']
 
 export interface UpdateProgressEvent {
   stage: UpdateProgressStage
@@ -17,44 +24,83 @@ export interface UpdateProgressEvent {
 
 export interface NormalizedUpdateProgress {
   stage: UpdateProgressStage
+  phase: UpdateProgressPhase
   step: number
   total: number
   message: string
   detail?: string
 }
 
-export interface UpdateProgressView {
-  start: () => void
-  update: (payload: unknown) => void
-  fail: () => void
-  isActive: () => boolean
+/** Label, icon, and busy state shared by the sidebar button and the app menu. */
+export interface UpdateActionPresentation {
+  icon: AppIcon
+  busy: boolean
+  label: string
+  title: string
+  menuLabel: string
+  menuDetail: string
 }
 
-const DEFAULT_TOTAL = UPDATE_PROGRESS_STAGES.length
-const FIRST_STAGE = UPDATE_PROGRESS_STAGES[0]!
+const UPDATE_ACTIONS: Record<Exclude<UpdatePhase, 'hidden'>, UpdateActionPresentation> = {
+  available: {
+    icon: 'download',
+    busy: false,
+    label: 'Update leetcoder',
+    title: 'Update available — build it in the background',
+    menuLabel: 'Update leetcoder',
+    menuDetail: 'Build in background',
+  },
+  building: {
+    icon: 'loader',
+    busy: true,
+    label: 'Building update',
+    title: 'Building the update in the background',
+    menuLabel: 'Building update…',
+    menuDetail: 'In background',
+  },
+  ready: {
+    icon: 'refresh',
+    busy: false,
+    label: 'Restart to update',
+    title: 'Update ready — restart to install the new build',
+    menuLabel: 'Restart to update',
+    menuDetail: 'Install the new build',
+  },
+  applying: {
+    icon: 'loader',
+    busy: true,
+    label: 'Restarting leetcoder',
+    title: 'Installing the update and restarting',
+    menuLabel: 'Restarting leetcoder…',
+    menuDetail: '',
+  },
+}
+
+export function updateActionPresentation(phase: UpdatePhase): UpdateActionPresentation | null {
+  return phase === 'hidden' ? null : UPDATE_ACTIONS[phase]
+}
 
 export function isUpdateProgressStage(value: string): value is UpdateProgressStage {
   return UPDATE_PROGRESS_STAGES.some((stage) => stage.id === value)
 }
 
-export function updateProgressStageIndex(stage: UpdateProgressStage): number {
-  return Math.max(0, UPDATE_PROGRESS_STAGES.findIndex((item) => item.id === stage))
-}
-
-export function normaliseUpdateProgress(payload: unknown): NormalizedUpdateProgress {
+/** Returns null for an unknown stage so it cannot be shown in the wrong phase. */
+export function normaliseUpdateProgress(payload: unknown): NormalizedUpdateProgress | null {
   const value = isRecord(payload) ? payload : {}
-  const stage = typeof value.stage === 'string' && isUpdateProgressStage(value.stage)
-    ? value.stage
-    : FIRST_STAGE.id
-  const total = positiveInteger(value.total, DEFAULT_TOTAL, DEFAULT_TOTAL)
-  const step = clamp(positiveInteger(value.step, 1, 1), 1, total)
+  if (typeof value.stage !== 'string' || !isUpdateProgressStage(value.stage)) return null
+  const stage = UPDATE_PROGRESS_STAGES.find((item) => item.id === value.stage)!
+  const phaseStages = UPDATE_PROGRESS_STAGES.filter((item) => item.phase === stage.phase)
+  const defaultTotal = phaseStages.length
+  const total = positiveInteger(value.total, defaultTotal)
+  const step = clamp(positiveInteger(value.step, phaseStages.indexOf(stage) + 1), 1, total)
   const message = typeof value.message === 'string' && value.message.trim()
     ? value.message.trim()
-    : UPDATE_PROGRESS_STAGES[updateProgressStageIndex(stage)]!.detail
+    : stage.message
   const detail = typeof value.detail === 'string' && value.detail.trim()
     ? value.detail.trim()
     : undefined
-  return detail ? { stage, step, total, message, detail } : { stage, step, total, message }
+  const progress = { stage: stage.id, phase: stage.phase, step, total, message }
+  return detail ? { ...progress, detail } : progress
 }
 
 export function formatUpdateElapsed(seconds: number): string {
@@ -67,111 +113,188 @@ export function formatUpdateElapsed(seconds: number): string {
   return `${hours}h ${minutes % 60}m`
 }
 
-export function renderUpdateProgressOverlay(): string {
-  const stages = UPDATE_PROGRESS_STAGES.map((stage, index) => {
-    const current = index === 0
-    return `<li class="update-progress-stage" data-update-stage="${stage.id}" data-state="${current ? 'current' : 'pending'}"${current ? ' aria-current="step"' : ''} aria-label="${escapeProgressText(`${stage.label}: ${current ? 'in progress' : 'pending'}`)}"><span class="update-progress-stage-mark" aria-hidden="true">${current ? '' : index + 1}</span><span class="update-progress-stage-copy"><strong>${escapeProgressText(stage.label)}</strong><small>${escapeProgressText(stage.detail)}</small></span></li>`
-  }).join('')
+export type UpdateStatusState =
+  | { kind: 'idle' }
+  | { kind: 'building' | 'applying'; startedAt: number; progress: NormalizedUpdateProgress | null }
+  | { kind: 'ready'; commit: string }
+  | { kind: 'failed'; message: string }
 
-  return `<div class="update-progress-backdrop" data-update-progress-overlay role="presentation"><section class="update-progress-dialog" role="dialog" aria-modal="true" aria-busy="true" aria-labelledby="update-progress-title" aria-describedby="update-progress-message" tabindex="-1"><div class="update-progress-intro"><div class="update-progress-spinner" aria-hidden="true"><span></span></div><div class="update-progress-heading"><p class="update-progress-kicker">APPLICATION UPDATE</p><h2 id="update-progress-title">Updating leetcoder</h2><p id="update-progress-message" role="status" aria-live="polite" aria-atomic="true">Checking the latest local commit…</p></div></div><div class="update-progress-summary"><span class="update-progress-step-label" data-update-step>Step 1 of ${DEFAULT_TOTAL}</span><span class="update-progress-elapsed"><span>Elapsed</span><time data-update-elapsed datetime="PT0S">0s</time></span></div><div class="update-progress-track" role="progressbar" aria-label="Update progress" aria-valuemin="1" aria-valuemax="${DEFAULT_TOTAL}" aria-valuenow="1" aria-valuetext="Step 1 of ${DEFAULT_TOTAL} — Validate source"><span class="update-progress-fill" data-update-progress-fill></span><span class="update-progress-shimmer" aria-hidden="true"></span></div><p class="update-progress-build-log" data-update-build-log aria-hidden="true"></p><ol class="update-progress-stages" aria-label="Update steps">${stages}</ol><p class="update-progress-footnote"><span class="update-progress-footnote-dot" aria-hidden="true"></span>Keep this window open while the release build completes.</p></section></div>`
+export interface UpdateStatusModel {
+  visible: boolean
+  tone: 'busy' | 'ready' | 'error'
+  message: string
+  /** Secondary monospace text: the latest build output line or the commit. */
+  detail: string
+  /** Full text for the tooltip when the message or detail is ellipsized. */
+  title: string
+  elapsedSeconds: number | null
+  restart: boolean
+  dismiss: boolean
 }
 
-export function createUpdateProgressView(): UpdateProgressView {
-  let active = false
-  let startedAt = 0
-  let elapsedTimer: ReturnType<typeof setInterval> | null = null
-  let focusReturn: HTMLElement | null = null
+const SHORT_COMMIT_LENGTH = 7
 
-  const stopElapsedTimer = (): void => {
+/** Pure description of the status row so its states can be tested without a DOM. */
+export function describeUpdateStatus(state: UpdateStatusState, now: number): UpdateStatusModel {
+  const base = { visible: true, detail: '', title: '', elapsedSeconds: null, restart: false, dismiss: false }
+  switch (state.kind) {
+    case 'idle':
+      return { ...base, visible: false, tone: 'busy', message: '' }
+    case 'building': {
+      const message = state.progress?.message ?? UPDATE_PROGRESS_STAGES[0].message
+      const detail = state.progress?.stage === 'building' ? state.progress.detail ?? '' : ''
+      return {
+        ...base,
+        tone: 'busy',
+        message,
+        detail,
+        title: detail,
+        elapsedSeconds: elapsedSince(state.startedAt, now),
+      }
+    }
+    case 'applying': {
+      const detail = state.progress?.message ?? UPDATE_PROGRESS_STAGES[3].message
+      return {
+        ...base,
+        tone: 'busy',
+        message: 'Restarting leetcoder…',
+        detail,
+        elapsedSeconds: elapsedSince(state.startedAt, now),
+      }
+    }
+    case 'ready':
+      return {
+        ...base,
+        tone: 'ready',
+        message: 'Update ready',
+        detail: state.commit.slice(0, SHORT_COMMIT_LENGTH),
+        title: `Build ${state.commit}`,
+        restart: true,
+      }
+    case 'failed':
+      return {
+        ...base,
+        tone: 'error',
+        message: `Update failed: ${errorSummary(state.message)}`,
+        title: state.message,
+        dismiss: true,
+      }
+  }
+}
+
+export interface UpdateStatusViewOptions {
+  onRestart: () => void
+  now?: () => number
+}
+
+export interface UpdateStatusView {
+  /** Mirror the controller phase; `hidden`/`available` keep a failure visible until dismissed. */
+  setPhase: (phase: UpdatePhase, build: UpdateBuild | null) => void
+  update: (payload: unknown) => void
+  showFailed: (message: string) => void
+  dispose: () => void
+}
+
+/**
+ * The slim status row at the bottom of the window. It is part of the layout,
+ * so it shrinks the workspace instead of covering it, and it never moves focus.
+ */
+export function createUpdateStatusView(
+  root: HTMLElement,
+  options: UpdateStatusViewOptions,
+): UpdateStatusView {
+  const now = options.now ?? Date.now
+  const row = root.querySelector<HTMLElement>('#update-status')
+  const icon = root.querySelector<HTMLElement>('#update-status-icon')
+  const message = root.querySelector<HTMLElement>('#update-status-message')
+  const detail = root.querySelector<HTMLElement>('#update-status-detail')
+  const elapsed = root.querySelector<HTMLTimeElement>('#update-status-elapsed')
+  const restart = root.querySelector<HTMLButtonElement>('#update-status-restart')
+  const dismiss = root.querySelector<HTMLButtonElement>('#update-status-dismiss')
+  let state: UpdateStatusState = { kind: 'idle' }
+  let elapsedTimer: ReturnType<typeof setInterval> | null = null
+  let renderedTone: UpdateStatusModel['tone'] | null = null
+  let disposed = false
+
+  const handleRestart = (): void => options.onRestart()
+  const handleDismiss = (): void => {
+    if (state.kind === 'failed') setState({ kind: 'idle' })
+  }
+  restart?.addEventListener('click', handleRestart)
+  dismiss?.addEventListener('click', handleDismiss)
+  if (dismiss && !dismiss.firstChild) dismiss.append(iconFor('close', 'button-icon'))
+
+  const render = (): void => {
+    if (!row) return
+    const model = describeUpdateStatus(state, now())
+    row.hidden = !model.visible
+    if (!model.visible) return
+    row.dataset.tone = model.tone
+    if (icon && renderedTone !== model.tone) {
+      renderedTone = model.tone
+      const name: AppIcon = model.tone === 'busy' ? 'loader' : model.tone === 'ready' ? 'check' : 'alert'
+      icon.replaceChildren(iconFor(name, 'update-status-svg'))
+      icon.classList.toggle('is-spinning', model.tone === 'busy')
+    }
+    if (message && message.textContent !== model.message) message.textContent = model.message
+    if (detail) detail.textContent = model.detail
+    row.title = model.title
+    if (elapsed) {
+      elapsed.hidden = model.elapsedSeconds === null
+      if (model.elapsedSeconds !== null) {
+        const formatted = formatUpdateElapsed(model.elapsedSeconds)
+        elapsed.textContent = formatted
+        elapsed.dateTime = `PT${model.elapsedSeconds}S`
+        elapsed.setAttribute('aria-label', `${formatted} elapsed`)
+      }
+    }
+    if (restart) restart.hidden = !model.restart
+    if (dismiss) dismiss.hidden = !model.dismiss
+  }
+
+  const stopTimer = (): void => {
     if (elapsedTimer === null) return
-    window.clearInterval(elapsedTimer)
+    clearInterval(elapsedTimer)
     elapsedTimer = null
   }
 
-  const updateElapsed = (): void => {
-    if (!active) return
-    const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
-    const time = document.querySelector<HTMLTimeElement>('[data-update-elapsed]')
-    if (!time) return
-    const formatted = formatUpdateElapsed(elapsed)
-    time.textContent = formatted
-    time.dateTime = `PT${elapsed}S`
-    time.setAttribute('aria-label', `${formatted} elapsed`)
+  const setState = (next: UpdateStatusState): void => {
+    if (disposed) return
+    state = next
+    const timing = next.kind === 'building' || next.kind === 'applying'
+    if (timing && elapsedTimer === null) elapsedTimer = setInterval(render, 1000)
+    if (!timing) stopTimer()
+    render()
   }
 
-  const restoreInteraction = (): void => {
-    document.querySelector<HTMLElement>('.app-shell')?.removeAttribute('inert')
-    document.querySelector<HTMLElement>('.app-shell')?.removeAttribute('aria-hidden')
-    document.body.classList.remove('is-update-progress')
-    const returnFocus = focusReturn
-    focusReturn = null
-    if (returnFocus?.isConnected) returnFocus.focus()
+  return {
+    setPhase: (phase, build) => {
+      if (phase === 'building' && state.kind !== 'building') {
+        setState({ kind: 'building', startedAt: now(), progress: null })
+      } else if (phase === 'applying' && state.kind !== 'applying') {
+        setState({ kind: 'applying', startedAt: now(), progress: null })
+      } else if (phase === 'ready' && build) {
+        setState({ kind: 'ready', commit: build.commit })
+      } else if ((phase === 'hidden' || phase === 'available') && state.kind !== 'failed') {
+        setState({ kind: 'idle' })
+      }
+    },
+    update: (payload) => {
+      const progress = normaliseUpdateProgress(payload)
+      if (!progress) return
+      const expected = progress.phase === 'build' ? 'building' : 'applying'
+      if (state.kind !== expected) return
+      setState({ ...state, progress })
+    },
+    showFailed: (failure) => setState({ kind: 'failed', message: failure }),
+    dispose: () => {
+      if (disposed) return
+      stopTimer()
+      disposed = true
+      restart?.removeEventListener('click', handleRestart)
+      dismiss?.removeEventListener('click', handleDismiss)
+    },
   }
-
-  const start = (): void => {
-    if (active) return
-    const modalRoot = document.getElementById('modal-root')
-    if (!modalRoot) return
-    const activeElement = document.activeElement
-    focusReturn = activeElement instanceof HTMLElement && activeElement !== document.body ? activeElement : null
-    active = true
-    startedAt = Date.now()
-    modalRoot.innerHTML = renderUpdateProgressOverlay()
-    document.querySelector<HTMLElement>('.app-shell')?.setAttribute('inert', '')
-    document.querySelector<HTMLElement>('.app-shell')?.setAttribute('aria-hidden', 'true')
-    document.body.classList.add('is-update-progress')
-    document.querySelector<HTMLElement>('.update-progress-dialog')?.focus()
-    updateElapsed()
-    elapsedTimer = window.setInterval(updateElapsed, 1000)
-  }
-
-  const update = (payload: unknown): void => {
-    if (!active) return
-    const progress = normaliseUpdateProgress(payload)
-    const dialog = document.querySelector<HTMLElement>('.update-progress-dialog')
-    if (!dialog) return
-    const currentIndex = updateProgressStageIndex(progress.stage)
-    const stage = UPDATE_PROGRESS_STAGES[currentIndex]!
-    const message = dialog.querySelector<HTMLElement>('#update-progress-message')
-    if (message && message.textContent !== progress.message) message.textContent = progress.message
-    const buildLog = dialog.querySelector<HTMLElement>('[data-update-build-log]')
-    if (buildLog) {
-      if (progress.stage === 'building' && progress.detail !== undefined) buildLog.textContent = progress.detail
-      else if (progress.stage !== 'building') buildLog.textContent = ''
-    }
-    const stepLabel = dialog.querySelector<HTMLElement>('[data-update-step]')
-    if (stepLabel) stepLabel.textContent = `Step ${progress.step} of ${progress.total}`
-    const track = dialog.querySelector<HTMLElement>('.update-progress-track')
-    if (track) {
-      const percent = Math.round((progress.step / progress.total) * 100)
-      track.setAttribute('aria-valuemax', String(progress.total))
-      track.setAttribute('aria-valuenow', String(progress.step))
-      track.setAttribute('aria-valuetext', `Step ${progress.step} of ${progress.total} — ${stage.label}`)
-      dialog.querySelector<HTMLElement>('[data-update-progress-fill]')?.style.setProperty('width', `${percent}%`)
-    }
-    dialog.querySelectorAll<HTMLElement>('[data-update-stage]').forEach((item, index) => {
-      const state = index < currentIndex ? 'complete' : index === currentIndex ? 'current' : 'pending'
-      const itemStage = UPDATE_PROGRESS_STAGES[index]
-      if (!itemStage) return
-      item.dataset.state = state
-      item.toggleAttribute('aria-current', state === 'current')
-      if (state === 'current') item.setAttribute('aria-current', 'step')
-      item.setAttribute('aria-label', `${itemStage.label}: ${state === 'complete' ? 'complete' : state === 'current' ? 'in progress' : 'pending'}`)
-      const mark = item.querySelector<HTMLElement>('.update-progress-stage-mark')
-      if (mark) mark.textContent = state === 'complete' ? '✓' : state === 'current' ? '' : String(index + 1)
-    })
-    dialog.dataset.stage = progress.stage
-  }
-
-  const fail = (): void => {
-    if (!active) return
-    active = false
-    stopElapsedTimer()
-    document.getElementById('modal-root')?.replaceChildren()
-    restoreInteraction()
-  }
-
-  return { start, update, fail, isActive: () => active }
 }
 
 /** Lazily subscribe so the Vite browser preview remains independent of Tauri. */
@@ -186,26 +309,25 @@ export async function listenForUpdateProgress(
   }
 }
 
+function elapsedSince(startedAt: number, now: number): number {
+  return Math.max(0, Math.floor((now - startedAt) / 1000))
+}
+
+/** Native errors can carry a build log; the row shows its first line. */
+function errorSummary(message: string): string {
+  return message.split('\n').map((line) => line.trim()).find(Boolean) ?? 'Unknown error'
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function positiveInteger(value: unknown, fallback: number, minimum: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= minimum
-    ? Math.max(minimum, Math.floor(value))
+function positiveInteger(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1
+    ? Math.floor(value)
     : fallback
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
-}
-
-function escapeProgressText(value: string): string {
-  return value.replace(/[&<>'"]/g, (character) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    "'": '&#39;',
-    '"': '&quot;',
-  }[character] ?? character))
 }

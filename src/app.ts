@@ -21,10 +21,17 @@ import {
   shortcutHints,
   shortcutLabel,
 } from './shortcuts'
-import { createUpdateController, UPDATE_CHECK_INTERVAL_MS, type UpdateController } from './update-controller'
 import {
-  createUpdateProgressView,
+  createUpdateController,
+  UPDATE_CHECK_INTERVAL_MS,
+  type UpdateController,
+  type UpdatePhase,
+} from './update-controller'
+import {
+  createUpdateStatusView,
   listenForUpdateProgress,
+  updateActionPresentation,
+  type UpdateStatusView,
 } from './update-progress'
 import { clearGitProgressOverlay } from './app/git-progress'
 import { LiveDiagnosticsController } from './app/live-diagnostics-controller'
@@ -92,14 +99,15 @@ export class LeetcoderApp {
   private readonly backend: BackendClient
   private readonly storage: Storage | undefined
   private readonly requestClose: (() => Promise<void>) | undefined
-  private readonly updateProgressView = createUpdateProgressView()
   private readonly toastController: ToastController
   private readonly repositoryAccess: RepositoryAccessController
   private readonly overlay: OverlayController
   private updateController: UpdateController
+  private readonly updateStatusView: UpdateStatusView
   private updateProgressListenerStop: (() => void) | null = null
   private updateCheckTimer: ReturnType<typeof setInterval> | null = null
   private updatePollingInstalled = false
+  private updateWorkspaceLocked = false
   private readonly state: AppState = {
     repoPath: null,
     projectValid: false,
@@ -284,6 +292,11 @@ export class LeetcoderApp {
       setMessage: (message, tone) => this.setMessage(message, tone),
     }, this.state.git)
     this.renderShell()
+    this.updateStatusView = createUpdateStatusView(this.root, {
+      onRestart: () => {
+        void this.updateController.activate()
+      },
+    })
     this.toastController = new ToastController(this.element<HTMLElement>('#toast-stack'))
     this.overlay = new OverlayController({
       root: this.root,
@@ -339,30 +352,23 @@ export class LeetcoderApp {
     this.updateController = createUpdateController(
       {
         checkForUpdate: () => this.backend.checkForUpdate(),
-        updateAndRestart: () => this.backend.updateAndRestart(),
+        buildUpdate: () => this.backend.buildUpdate(),
+        prepareToClose: () => this.prepareToClose(),
+        applyUpdate: () => this.backend.applyUpdate(),
       },
       {
-        setUpdateAvailable: (available) => {
-          this.overlay.setUpdateAvailable(available)
-          const button = this.root.querySelector<HTMLButtonElement>('#update-button')
-          if (button) button.hidden = !available
+        setPhase: (phase, build) => {
+          this.lockWorkspaceForUpdate(phase === 'applying')
+          this.overlay.setUpdatePhase(phase)
+          this.renderUpdateButton(phase)
+          this.updateStatusView.setPhase(phase, build)
         },
-        setUpdateBusy: (busy) => {
-          this.overlay.setUpdateBusy(busy)
-          const button = this.root.querySelector<HTMLButtonElement>('#update-button')
-          if (button) {
-            button.disabled = busy
-            button.replaceChildren(iconFor(busy ? 'loader' : 'download', 'button-icon'))
-            button.classList.toggle('is-spinning', busy)
-            button.setAttribute('aria-busy', String(busy))
-            button.setAttribute('aria-label', busy ? 'Updating leetcoder' : 'Update leetcoder')
-            button.title = busy ? 'Updating leetcoder — building and restarting' : 'Update available — build and restart'
+        showError: (kind, message) => {
+          if (kind === 'prepare') {
+            this.setMessage(`Could not prepare update: ${message}`, 'error')
+          } else {
+            this.updateStatusView.showFailed(message)
           }
-        },
-        showUpdateStarted: () => this.updateProgressView.start(),
-        showError: (message) => {
-          this.updateProgressView.fail()
-          this.setMessage(`Update failed: ${message}`, 'error')
         },
       },
     )
@@ -539,7 +545,7 @@ export class LeetcoderApp {
 
   async start(): Promise<void> {
     this.updateProgressListenerStop = await listenForUpdateProgress((payload) => {
-      this.updateProgressView.update(payload)
+      this.updateStatusView.update(payload)
     })
     await this.repository.installWatcher()
     // Daily problem loading uses the network and can take considerably longer
@@ -608,7 +614,7 @@ export class LeetcoderApp {
     this.pauseUpdatePolling()
     this.updateProgressListenerStop?.()
     this.updateProgressListenerStop = null
-    this.updateProgressView.fail()
+    this.updateStatusView.dispose()
     this.repositoryAccess.dispose()
     this.toastController.dispose()
     this.overlay.dispose()
@@ -634,12 +640,10 @@ export class LeetcoderApp {
 
   private installStaticIcons(): void {
     this.element<HTMLButtonElement>('#app-menu-button').append(iconFor('menu', 'button-icon'))
-    this.element<HTMLElement>('#update-menu-icon').append(iconFor('download', 'app-menu-action-icon'))
     this.element<HTMLElement>('#settings-menu-icon').append(iconFor('settings', 'app-menu-action-icon'))
     this.element<HTMLElement>('#about-menu-icon').append(iconFor('info', 'app-menu-action-icon'))
     this.element<HTMLElement>('#exit-menu-icon').append(iconFor('power', 'app-menu-action-icon'))
     this.element<HTMLButtonElement>('#choose-repository').prepend(iconFor('folderOpen', 'button-icon'))
-    this.element<HTMLButtonElement>('#update-button').append(iconFor('download', 'button-icon'))
     this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
     this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
     this.element<HTMLElement>('#git-branch-icon').append(iconFor('gitBranch', 'button-icon'))
@@ -933,16 +937,39 @@ export class LeetcoderApp {
 
   private async requestApplicationUpdate(): Promise<void> {
     this.overlay.closeAppMenu(false)
-    if (!this.overlay.isUpdateAvailable || this.overlay.isUpdateBusy) {
-      return
+    await this.updateController.activate()
+  }
+
+  /**
+   * The installer stops this process without a close event, so edits made
+   * after prepareToClose() flushed autosave would be lost. Only an update lock
+   * is released here; the Git progress overlay manages its own.
+   */
+  private lockWorkspaceForUpdate(locked: boolean): void {
+    if (locked === this.updateWorkspaceLocked) return
+    this.updateWorkspaceLocked = locked
+    this.root.querySelector<HTMLElement>('.app-shell')?.toggleAttribute('inert', locked)
+  }
+
+  /**
+   * A running build or restart leaves the button looking active but marks it
+   * aria-disabled; the controller ignores clicks in those phases.
+   */
+  private renderUpdateButton(phase: UpdatePhase): void {
+    const button = this.root.querySelector<HTMLButtonElement>('#update-button')
+    if (!button) return
+    const presentation = updateActionPresentation(phase)
+    button.hidden = presentation === null
+    if (!presentation) return
+    if (button.dataset.icon !== presentation.icon) {
+      button.dataset.icon = presentation.icon
+      button.replaceChildren(iconFor(presentation.icon, 'button-icon'))
     }
-    try {
-      await this.prepareToClose()
-    } catch (error) {
-      this.setMessage(`Could not prepare update: ${errorMessage(error)}`, 'error')
-      return
-    }
-    await this.updateController.updateAndRestart()
+    button.classList.toggle('is-spinning', presentation.busy)
+    button.setAttribute('aria-disabled', String(presentation.busy))
+    button.setAttribute('aria-busy', String(presentation.busy))
+    button.setAttribute('aria-label', presentation.label)
+    button.title = presentation.title
   }
 
   private renderFileHeading(): void {

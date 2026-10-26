@@ -23,7 +23,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
             <button id="choose-repository" class="repo-chip" type="button">
               <span id="repo-path" class="repo-chip-label">Choose repository</span>
             </button>
-            <button id="update-button" class="icon-button update-button" type="button" aria-label="Update leetcoder" title="Update available — build and restart" hidden></button>
+            <button id="update-button" class="icon-button update-button" type="button" aria-label="Update leetcoder" hidden></button>
           </div>
           <div class="sidebar-heading">
             <span class="micro-label">Problems</span>
@@ -156,12 +156,20 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
           </div>
         </section>
       </section>
+      <div id="update-status" class="update-status" hidden>
+        <span id="update-status-icon" class="update-status-icon" aria-hidden="true"></span>
+        <span id="update-status-message" class="update-status-message" role="status" aria-live="polite" aria-atomic="true"></span>
+        <span id="update-status-detail" class="update-status-detail"></span>
+        <time id="update-status-elapsed" class="update-status-elapsed" hidden></time>
+        <button id="update-status-restart" class="primary-button update-status-restart" type="button" aria-label="Restart to update" hidden>Restart</button>
+        <button id="update-status-dismiss" class="icon-button update-status-dismiss" type="button" aria-label="Dismiss update error" title="Dismiss" hidden></button>
+      </div>
       <div id="toast-stack" class="toast-stack" role="status" aria-live="polite"></div>
       <div id="app-menu" class="app-menu" role="menu" aria-label="Application menu" hidden>
         <button id="update-menu-action" class="app-menu-item app-menu-item-update" type="button" role="menuitem" hidden>
           <span id="update-menu-icon" class="app-menu-icon" aria-hidden="true"></span>
-          <span class="app-menu-item-label">Update leetcoder</span>
-          <span class="app-menu-item-detail">Build and restart</span>
+          <span id="update-menu-label" class="app-menu-item-label">Update leetcoder</span>
+          <span id="update-menu-detail" class="app-menu-item-detail">Build in background</span>
         </button>
         <button id="settings-menu-action" class="app-menu-item" type="button" role="menuitem">
           <span id="settings-menu-icon" class="app-menu-icon" aria-hidden="true"></span>

@@ -302,14 +302,12 @@ describe('OverlayController', () => {
     })
 
     controller.setThemeMode('light')
-    controller.setUpdateAvailable(true)
-    controller.setUpdateBusy(true)
+    controller.setUpdatePhase('ready')
 
     expect(storage.getItem('leetcoder.theme-mode')).toBe('light')
     expect(elements.root.ownerDocument.documentElement.dataset.theme).toBe('light')
     expect(vi.mocked(renderAppMenu)).toHaveBeenLastCalledWith(elements.root, expect.objectContaining({
-      updateAvailable: true,
-      updateBusy: true,
+      updatePhase: 'ready',
       settingsShortcutLabel: '⌘,',
     }))
     expect(vi.mocked(renderSettingsDialog)).toHaveBeenCalled()

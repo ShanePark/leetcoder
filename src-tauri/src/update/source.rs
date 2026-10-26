@@ -54,13 +54,18 @@ pub(crate) fn current_status() -> UpdateStatus {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub(super) fn validate_update_source() -> Result<(PathBuf, String), String> {
+pub(super) fn update_source_root() -> Result<PathBuf, String> {
     if !is_supported() {
         return Err(
             "Self-updating is unavailable because the source checkout could not be found.".into(),
         );
     }
-    let source_root = Path::new(EMBEDDED_SOURCE_ROOT).to_path_buf();
+    Ok(Path::new(EMBEDDED_SOURCE_ROOT).to_path_buf())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) fn validate_update_source() -> Result<(PathBuf, String), String> {
+    let source_root = update_source_root()?;
     let expected_commit = git_head(&source_root)?;
     if expected_commit == EMBEDDED_BUILD_COMMIT {
         return Err("No committed source update is available.".into());

@@ -12,7 +12,7 @@ mod security;
 mod update;
 mod watcher;
 
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::{AppHandleExt, Builder as WindowStateBuilder, StateFlags};
 
 /// Starts the desktop application.
@@ -76,8 +76,14 @@ pub fn run() {
             commands::watch_repository,
             commands::unwatch_repository,
             update::check_for_update,
-            update::update_and_restart,
+            update::build_update,
+            update::apply_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running leetcoder");
+        .build(tauri::generate_context!())
+        .expect("error while running leetcoder")
+        .run(|_app, event| {
+            if let RunEvent::Exit = event {
+                update::cancel_running_build();
+            }
+        });
 }
