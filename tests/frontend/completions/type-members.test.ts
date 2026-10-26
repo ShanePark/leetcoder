@@ -437,4 +437,34 @@ describe('metadata-backed Java member completions', () => {
     })
     expect(completed.result?.options.map((option) => option.label)).toEqual(['collect(number, number2, number3)'])
   })
+
+  it('resolves member completions through indexed array access', async () => {
+    const source = `class Solution {
+    String[] names;
+    long dfsIsland(int[][] grid, int i, int j) {
+        if (grid[0].|) return 0;
+    }
+}`
+    const metadata: JavaTypeMembersMetadata = {
+      fingerprint: 'jdk-test',
+      types: [{
+        typeName: 'java.lang.String', available: true, fields: [],
+        methods: [{ name: 'length', returnType: 'int', parameters: [], isStatic: false }],
+      }],
+    }
+    const row = await complete(source, metadata)
+    expect(row.inspect).not.toHaveBeenCalled()
+    expect(row.result?.from).toBe(row.cursor)
+    expect(row.result?.options.map((option) => option.label)).toContain('length')
+
+    const typed = await complete(source.replace('grid[0].|', 'grid[i - 1].le|'), metadata)
+    expect(apply(typed.result!, typed.state, typed.cursor, 'length')).toContain('if (grid[i - 1].length) return 0;')
+
+    const cell = await complete(source.replace('grid[0].|', 'grid[0][1].|'), metadata)
+    expect(cell.result?.options ?? []).toEqual([])
+
+    const name = await complete(source.replace('grid[0].|', 'this.names[j].|'), metadata)
+    expect(name.inspect).toHaveBeenCalledWith(['java.lang.String'])
+    expect(name.result?.options.map((option) => option.label)).toEqual(['length()'])
+  })
 })

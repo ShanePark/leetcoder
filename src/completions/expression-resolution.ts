@@ -1,7 +1,7 @@
 import type { JavaMethodMember, JavaTypeMembers, JavaTypeMembersMetadata } from '../backend'
 import type { JavaSymbol } from './model'
 import { maskJavaCommentsAndLiterals } from './source'
-import { canonicalTypes, resolveJavaReceiverTypes, type JavaReceiverTypeResolution } from './type-resolution'
+import { canonicalTypes, indexedArrayElementType, resolveJavaReceiverTypes, type JavaReceiverTypeResolution } from './type-resolution'
 
 const PRIMITIVES = new Set(['boolean', 'byte', 'char', 'double', 'float', 'int', 'long', 'short', 'void'])
 const EMPTY: JavaReceiverTypeResolution = { kind: 'unresolved', typeNames: [], isStatic: false }
@@ -26,7 +26,8 @@ export function expressionBeforeDot(source: string, position: number): { receive
   while (index >= 0 && /\s/.test(masked[index])) index -= 1
   const end = index + 1
   while (index >= 0) {
-    if (masked[index] === ')' || masked[index] === ']') {
+    // Consume consecutive groups such as `grid[i][j]` or `values()[0]`.
+    while (masked[index] === ')' || masked[index] === ']') {
       index = openingDelimiter(masked, index)
       if (index < 0) return null
       index -= 1
@@ -190,6 +191,7 @@ export async function resolveJavaExpressionReceiver(
       return typeNames.length ? { kind: 'metadata', typeNames, isStatic: false } : EMPTY
     }
     if (/^"/.test(text)) return { kind: 'metadata', typeNames: ['java.lang.String'], isStatic: false }
+    if (indexedArrayElementType(text, position, symbols) !== null) return resolveJavaReceiverTypes(source, text, position, symbols)
     const name = masked.trim().replace(/\s*\.\s*/g, '.')
     if (!/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(name)) return EMPTY
     const symbol = symbolFor(name.replace(/^this\./, ''))

@@ -86,21 +86,34 @@ export function addJavaTypeImports(source: string, typeNames: Iterable<string>):
 }
 
 export function applyJavaType(fullyQualifiedName: string): Completion['apply'] {
+  return applyJavaTypeText(fullyQualifiedName)
+}
+
+/**
+ * Insert `text` (the completion label by default), importing the type when it
+ * has a known package, and leave the cursor `cursorOffset` characters in.
+ */
+export function applyJavaTypeText(
+  fullyQualifiedName: string | undefined,
+  text?: string,
+  cursorOffset?: number,
+): Completion['apply'] {
   return (view: EditorView, completion: Completion, from: number, to: number) => {
     const source = view.state.doc.toString()
-    const typeName = fullyQualifiedName.slice(fullyQualifiedName.lastIndexOf('.') + 1)
+    const insert = text ?? completion.label
+    const typeName = fullyQualifiedName?.slice(fullyQualifiedName.lastIndexOf('.') + 1)
     const maskedSelection = maskJavaCommentsAndLiterals(source).slice(from, to)
     const selectionIsCode = maskedSelection === source.slice(from, to)
-    const insertion = selectionIsCode && !localTypeDeclared(source, typeName)
+    const insertion = fullyQualifiedName && typeName && selectionIsCode && !localTypeDeclared(source, typeName)
       ? importInsertion(source, fullyQualifiedName)
       : null
     const changes = insertion
-      ? [{ from: insertion.from, insert: insertion.insert }, { from, to, insert: completion.label }]
-      : [{ from, to, insert: completion.label }]
+      ? [{ from: insertion.from, insert: insertion.insert }, { from, to, insert }]
+      : [{ from, to, insert }]
     const importOffset = insertion && insertion.from <= from ? insertion.insert.length : 0
     view.dispatch({
       changes,
-      selection: { anchor: from + completion.label.length + importOffset },
+      selection: { anchor: from + (cursorOffset ?? insert.length) + importOffset },
       annotations: pickedCompletion.of(completion),
       scrollIntoView: true,
       userEvent: 'input.complete',

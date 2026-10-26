@@ -75,8 +75,14 @@ function uniqueVariableName(base: string, symbols: JavaSymbol[], position: numbe
   return `${base}${suffix}`
 }
 
+/** `DIRECTIONS` -> `directions`, `MAX_VALUES` -> `maxValues`; other names are unchanged. */
+function constantToCamelCase(name: string): string {
+  if (!/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/.test(name)) return name
+  return name.toLowerCase().replace(/_([a-z0-9])/g, (_, letter: string) => letter.toUpperCase())
+}
+
 function iterVariableName(target: string, elementType: string | undefined, symbols: JavaSymbol[], position: number): string {
-  const targetName = target.split('.').at(-1) ?? target
+  const targetName = constantToCamelCase(target.split('.').at(-1) ?? target)
   const singular = singularIdentifier(targetName)
   const base = singular !== targetName && !JAVA_KEYWORDS.includes(singular)
     ? singular
@@ -386,8 +392,25 @@ function loopBodyOpen(masked: string, open: number): number | null {
   return null
 }
 
+/**
+ * Blank array-initializer bodies (`= {...}`, `new int[][] {...}`) while
+ * preserving offsets, so a declaration such as `int[][] DIRS = {{0, 1}};` is
+ * not split at its braces and its element commas are not read as declarators.
+ */
+function blankArrayInitializers(source: string, masked: string, braces: ReturnType<typeof matchingBraces>): string {
+  let result = source
+  for (let open = masked.indexOf('{'); open >= 0; open = masked.indexOf('{', open + 1)) {
+    const close = braces.openToClose.get(open)
+    if (close === undefined || !/[=\]]\s*$/.test(masked.slice(Math.max(0, open - 200), open))) continue
+    result = result.slice(0, open) + ' '.repeat(close + 1 - open) + result.slice(close + 1)
+    open = close
+  }
+  return result
+}
+
 function extractDeclarations(source: string, masked: string, position: number, braces: ReturnType<typeof matchingBraces>): JavaSymbol[] {
   const result: JavaSymbol[] = []
+  const declarationSource = blankArrayInitializers(source, masked, braces)
   // A declaration starts after a statement/block boundary. Keeping the
   // boundary in the expression avoids treating method calls as declarations.
   const declaration = /(?:^|[;{}])\s*(?:(?:public|private|protected|static|final|volatile|transient|synchronized)\s+)*([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*<[^;{}=]*?>)?\s*(?:\[\s*\])*)\s+([^;{}]+);/gm
@@ -396,7 +419,7 @@ function extractDeclarations(source: string, masked: string, position: number, b
   // first token of a declaration match.
   const reserved = new Set(['return', 'throw', 'new', 'case', 'default', 'if', 'for', 'while', 'switch', 'do', 'else', 'try', 'catch'])
   let match: RegExpExecArray | null
-  while ((match = declaration.exec(source))) {
+  while ((match = declaration.exec(declarationSource))) {
     const typeText = match[1].trim()
     const typeBase = baseType(typeText)
     if (reserved.has(typeBase) || typeBase === 'void') continue

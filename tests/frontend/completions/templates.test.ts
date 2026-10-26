@@ -564,4 +564,49 @@ it('does not expand unknown dotted chains into collection methods', () => {
     expect(options).not.toContain('size()')
     expect(options).not.toContain('println(value)')
   })
+
+it('iterates array-initialized constant fields with a lower-camel singular name', () => {
+    const source = `class Solution {
+    final int[][] WAYS = new int[][] {{0, 1}, {0, -1}, {1, 0 }, {-1, 0}};
+
+    private long dfsIsland(int[][] grid, int i, int j) {
+        long sum = grid[i][j];
+        grid[i][j] = 0;
+        iter|
+        return sum;
+    }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'grid', elementType: 'int[]', variableName: 'row' },
+      { name: 'WAYS', elementType: 'int[]', variableName: 'way' },
+    ])
+    expect(applyCompletion(source, 'iter (WAYS)')).toContain('for (int[] way : WAYS) {')
+
+    // Typing the field over the default target re-infers the loop variable.
+    const result = expandPrintTemplateState(source)
+    expect(result.state.sliceDoc(result.state.selection.main.from, result.state.selection.main.to)).toBe('grid')
+    const updated = result.state.update(result.state.replaceSelection('WAYS')).state
+    expect(updated.doc.toString()).toContain('for (int[] way : WAYS) {')
+    expect(labels(source.replace('iter|', 'WAYS|'))).toContain('WAYS')
+  })
+
+it('collects brace-initialized array declarations and singularizes constant names', () => {
+    const source = `class Solution {
+    static final int[][] DIRECTIONS = {{0, 1}, {1, 0}};
+    private static final int[][] DIRS = new int[][]{{0, 1}, {1, 0}};
+    static final String[] MAX_VALUES = {"a", "b"}, DP = {};
+    void test() {
+        int[] first = {1, 2}, second = {3};
+        iter|
+    }
+}`
+    expect(javaIterableCandidates(source.replace('|', ''), source.indexOf('|'))).toEqual([
+      { name: 'second', elementType: 'int', variableName: 'item' },
+      { name: 'first', elementType: 'int', variableName: 'item' },
+      { name: 'DP', elementType: 'String', variableName: 'string' },
+      { name: 'MAX_VALUES', elementType: 'String', variableName: 'maxValue' },
+      { name: 'DIRS', elementType: 'int[]', variableName: 'dir' },
+      { name: 'DIRECTIONS', elementType: 'int[]', variableName: 'direction' },
+    ])
+  })
 })
