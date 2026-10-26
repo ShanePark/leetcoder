@@ -159,6 +159,10 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
       <div id="update-status" class="update-status" hidden>
         <span id="update-status-icon" class="update-status-icon" aria-hidden="true"></span>
         <span id="update-status-message" class="update-status-message" role="status" aria-live="polite" aria-atomic="true"></span>
+        <span id="update-status-progress" class="update-status-progress" hidden>
+          <span id="update-status-bar" class="update-status-bar" role="progressbar" aria-label="Update build progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="update-status-bar-fill" class="update-status-bar-fill"></span></span>
+          <span id="update-status-estimate" class="update-status-estimate" hidden></span>
+        </span>
         <span id="update-status-detail" class="update-status-detail"></span>
         <time id="update-status-elapsed" class="update-status-elapsed" hidden></time>
         <button id="update-status-restart" class="primary-button update-status-restart" type="button" aria-label="Restart to update" hidden>Restart</button>

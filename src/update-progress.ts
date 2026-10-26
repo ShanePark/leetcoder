@@ -2,17 +2,33 @@ import type { UpdateBuild } from './backend'
 import { iconFor, type AppIcon } from './icons'
 import type { UpdatePhase } from './update-controller'
 
-/** Native progress stages: three while building, two while applying. */
+/**
+ * Native progress stages in the order they run. The build phase has four
+ * steps (validating and frontend share step 1); the apply phase has two.
+ */
 export const UPDATE_PROGRESS_STAGES = [
-  { id: 'validating', phase: 'build', message: 'Checking the latest local commit' },
-  { id: 'building', phase: 'build', message: 'Building the update' },
-  { id: 'staging', phase: 'build', message: 'Preparing the update' },
-  { id: 'preparing', phase: 'apply', message: 'Installing the update' },
-  { id: 'restarting', phase: 'apply', message: 'Restarting leetcoder' },
+  { id: 'validating', phase: 'build', step: 1, message: 'Checking the latest local commit' },
+  { id: 'frontend', phase: 'build', step: 1, message: 'Building the frontend' },
+  { id: 'compiling', phase: 'build', step: 2, message: 'Compiling the app' },
+  { id: 'bundling', phase: 'build', step: 3, message: 'Bundling the app' },
+  { id: 'staging', phase: 'build', step: 4, message: 'Preparing the update' },
+  { id: 'preparing', phase: 'apply', step: 1, message: 'Installing the update' },
+  { id: 'restarting', phase: 'apply', step: 2, message: 'Restarting leetcoder' },
 ] as const
 
 export type UpdateProgressStage = typeof UPDATE_PROGRESS_STAGES[number]['id']
 export type UpdateProgressPhase = typeof UPDATE_PROGRESS_STAGES[number]['phase']
+export type UpdateBuildStage = Extract<typeof UPDATE_PROGRESS_STAGES[number], { phase: 'build' }>['id']
+
+/** Build stage ids in run order. */
+export const UPDATE_BUILD_STAGES = UPDATE_PROGRESS_STAGES
+  .filter((stage) => stage.phase === 'build')
+  .map((stage) => stage.id) as UpdateBuildStage[]
+
+/** Milliseconds each build stage took in the last successful build. */
+export type UpdateStageDurations = Partial<Record<UpdateBuildStage, number>>
+
+export const UPDATE_BUILD_DURATIONS_KEY = 'leetcoder.update-build-durations'
 
 export interface UpdateProgressEvent {
   stage: UpdateProgressStage
@@ -89,10 +105,11 @@ export function normaliseUpdateProgress(payload: unknown): NormalizedUpdateProgr
   const value = isRecord(payload) ? payload : {}
   if (typeof value.stage !== 'string' || !isUpdateProgressStage(value.stage)) return null
   const stage = UPDATE_PROGRESS_STAGES.find((item) => item.id === value.stage)!
-  const phaseStages = UPDATE_PROGRESS_STAGES.filter((item) => item.phase === stage.phase)
-  const defaultTotal = phaseStages.length
+  const defaultTotal = Math.max(...UPDATE_PROGRESS_STAGES
+    .filter((item) => item.phase === stage.phase)
+    .map((item) => item.step))
   const total = positiveInteger(value.total, defaultTotal)
-  const step = clamp(positiveInteger(value.step, phaseStages.indexOf(stage) + 1), 1, total)
+  const step = clamp(positiveInteger(value.step, stage.step), 1, total)
   const message = typeof value.message === 'string' && value.message.trim()
     ? value.message.trim()
     : stage.message
@@ -113,9 +130,140 @@ export function formatUpdateElapsed(seconds: number): string {
   return `${hours}h ${minutes % 60}m`
 }
 
+/** Remaining time as compact text, e.g. `40s` or `1m 5s`; partial seconds round up. */
+export function formatUpdateRemaining(milliseconds: number): string {
+  return formatUpdateElapsed(Math.ceil(Math.max(0, milliseconds) / 1000))
+}
+
+export interface UpdateBuildEstimateInput {
+  stage: UpdateBuildStage
+  step: number
+  total: number
+  /** Milliseconds spent in the current stage so far. */
+  stageElapsed: number
+  history: UpdateStageDurations | null
+  /** Highest fraction already shown in this build; the result never drops below it. */
+  floor?: number
+}
+
+export interface UpdateBuildEstimate {
+  /** Bar fill from 0 to 1. */
+  fraction: number
+  /** Whole percent, or null when there is no usable history. */
+  percent: number | null
+  /**
+   * Estimated milliseconds left, or null without history or when the last
+   * stage overruns. An earlier stage that overruns leaves the later stages'
+   * estimates.
+   */
+  remaining: number | null
+  /** The current stage has taken longer than its estimate. */
+  overrun: boolean
+}
+
+/** Share of the current stage's estimate the bar may fill before the stage ends. */
+const STAGE_FILL_LIMIT = 0.95
+
+/**
+ * Estimates build progress from the previous successful build's stage
+ * durations. Stages before the current one count as done, including any the
+ * native side skipped. Without an estimate for the current stage it falls
+ * back to the completed-step fraction.
+ */
+export function estimateUpdateBuildProgress(input: UpdateBuildEstimateInput): UpdateBuildEstimate {
+  const floor = clamp(input.floor ?? 0, 0, 1)
+  const estimate = (stage: UpdateBuildStage): number => {
+    const value = input.history?.[stage]
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+  }
+  const totalEstimate = UPDATE_BUILD_STAGES.reduce((sum, stage) => sum + estimate(stage), 0)
+  const current = input.history?.[input.stage]
+  if (typeof current !== 'number' || !Number.isFinite(current) || current < 0 || totalEstimate <= 0) {
+    const stepFraction = clamp((input.step - 1) / Math.max(1, input.total), 0, 1)
+    return { fraction: Math.max(floor, stepFraction), percent: null, remaining: null, overrun: false }
+  }
+  const index = UPDATE_BUILD_STAGES.indexOf(input.stage)
+  const before = UPDATE_BUILD_STAGES.slice(0, index).reduce((sum, stage) => sum + estimate(stage), 0)
+  const elapsed = Math.max(0, input.stageElapsed)
+  const progressed = before + Math.min(elapsed, current * STAGE_FILL_LIMIT)
+  const fraction = Math.max(floor, clamp(progressed / totalEstimate, 0, 1))
+  const overrun = elapsed > current
+  const after = totalEstimate - before - current
+  return {
+    fraction,
+    // A running build never reads as finished.
+    percent: Math.min(99, Math.floor(fraction * 100)),
+    remaining: !overrun ? Math.max(0, totalEstimate * (1 - fraction)) : after > 0 ? after : null,
+    overrun,
+  }
+}
+
+/**
+ * Durations of the stages seen in a successful build. A stage ends when the
+ * next seen stage starts; the last one ends when the build became ready.
+ */
+export function measureUpdateBuildStages(
+  stageStarts: UpdateStageDurations,
+  readyAt: number,
+): UpdateStageDurations {
+  const seen = UPDATE_BUILD_STAGES
+    .filter((stage) => typeof stageStarts[stage] === 'number')
+    .sort((left, right) => stageStarts[left]! - stageStarts[right]!)
+  const durations: UpdateStageDurations = {}
+  seen.forEach((stage, index) => {
+    const next = seen[index + 1]
+    const end = next === undefined ? readyAt : stageStarts[next]!
+    durations[stage] = Math.max(0, end - stageStarts[stage]!)
+  })
+  return durations
+}
+
+type DurationStorage = Pick<Storage, 'getItem' | 'setItem'>
+
+/** Returns null when storage is missing, unreadable, or holds no durations. */
+export function readUpdateBuildDurations(storage: DurationStorage | undefined): UpdateStageDurations | null {
+  try {
+    const raw = storage?.getItem(UPDATE_BUILD_DURATIONS_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (!isRecord(parsed)) return null
+    const durations: UpdateStageDurations = {}
+    for (const stage of UPDATE_BUILD_STAGES) {
+      const value = parsed[stage]
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) durations[stage] = value
+    }
+    return Object.keys(durations).length > 0 ? durations : null
+  } catch {
+    return null
+  }
+}
+
+/** Keeps earlier durations for stages this build skipped. */
+export function writeUpdateBuildDurations(
+  storage: DurationStorage | undefined,
+  durations: UpdateStageDurations,
+  previous: UpdateStageDurations | null,
+): void {
+  if (Object.keys(durations).length === 0) return
+  try {
+    storage?.setItem(UPDATE_BUILD_DURATIONS_KEY, JSON.stringify({ ...previous, ...durations }))
+  } catch {
+    // A disabled store only costs the next build its estimate.
+  }
+}
+
+export interface UpdateBuildTiming {
+  /** When each build stage was first seen, by event arrival. */
+  stageStarts: UpdateStageDurations
+  history: UpdateStageDurations | null
+  /** Highest bar fraction shown so far in this build. */
+  floor: number
+}
+
 export type UpdateStatusState =
   | { kind: 'idle' }
-  | { kind: 'building' | 'applying'; startedAt: number; progress: NormalizedUpdateProgress | null }
+  | { kind: 'building'; startedAt: number; progress: NormalizedUpdateProgress | null; timing: UpdateBuildTiming }
+  | { kind: 'applying'; startedAt: number; progress: NormalizedUpdateProgress | null }
   | { kind: 'ready'; commit: string }
   | { kind: 'failed'; message: string }
 
@@ -128,32 +276,52 @@ export interface UpdateStatusModel {
   /** Full text for the tooltip when the message or detail is ellipsized. */
   title: string
   elapsedSeconds: number | null
+  /** Build progress bar; null outside the build phase. */
+  progress: UpdateStatusProgress | null
   restart: boolean
   dismiss: boolean
+}
+
+export interface UpdateStatusProgress {
+  fraction: number
+  /** `68% · about 40s left`, or empty without history. */
+  text: string
+  /** Spoken value for the progress bar. */
+  valueText: string
 }
 
 const SHORT_COMMIT_LENGTH = 7
 
 /** Pure description of the status row so its states can be tested without a DOM. */
 export function describeUpdateStatus(state: UpdateStatusState, now: number): UpdateStatusModel {
-  const base = { visible: true, detail: '', title: '', elapsedSeconds: null, restart: false, dismiss: false }
+  const base = { visible: true, detail: '', title: '', elapsedSeconds: null, progress: null, restart: false, dismiss: false }
   switch (state.kind) {
     case 'idle':
       return { ...base, visible: false, tone: 'busy', message: '' }
     case 'building': {
-      const message = state.progress?.message ?? UPDATE_PROGRESS_STAGES[0].message
-      const detail = state.progress?.stage === 'building' ? state.progress.detail ?? '' : ''
+      const current = buildProgress(state.progress)
+      const detail = state.progress?.detail ?? ''
+      const stageStartedAt = state.timing.stageStarts[current.stage] ?? state.startedAt
+      const estimate = estimateUpdateBuildProgress({
+        stage: current.stage,
+        step: current.step,
+        total: current.total,
+        stageElapsed: now - stageStartedAt,
+        history: state.timing.history,
+        floor: state.timing.floor,
+      })
       return {
         ...base,
         tone: 'busy',
-        message,
+        message: `${current.message} · ${current.step}/${current.total}`,
         detail,
         title: detail,
         elapsedSeconds: elapsedSince(state.startedAt, now),
+        progress: describeEstimate(estimate, current.step, current.total),
       }
     }
     case 'applying': {
-      const detail = state.progress?.message ?? UPDATE_PROGRESS_STAGES[3].message
+      const detail = state.progress?.message ?? stageMessage('preparing')
       return {
         ...base,
         tone: 'busy',
@@ -185,6 +353,8 @@ export function describeUpdateStatus(state: UpdateStatusState, now: number): Upd
 export interface UpdateStatusViewOptions {
   onRestart: () => void
   now?: () => number
+  /** Where previous build durations are kept; defaults to localStorage when available. */
+  storage?: DurationStorage
 }
 
 export interface UpdateStatusView {
@@ -204,9 +374,14 @@ export function createUpdateStatusView(
   options: UpdateStatusViewOptions,
 ): UpdateStatusView {
   const now = options.now ?? Date.now
+  const storage = 'storage' in options ? options.storage : defaultStorage()
   const row = root.querySelector<HTMLElement>('#update-status')
   const icon = root.querySelector<HTMLElement>('#update-status-icon')
   const message = root.querySelector<HTMLElement>('#update-status-message')
+  const progress = root.querySelector<HTMLElement>('#update-status-progress')
+  const bar = root.querySelector<HTMLElement>('#update-status-bar')
+  const barFill = root.querySelector<HTMLElement>('#update-status-bar-fill')
+  const estimate = root.querySelector<HTMLElement>('#update-status-estimate')
   const detail = root.querySelector<HTMLElement>('#update-status-detail')
   const elapsed = root.querySelector<HTMLTimeElement>('#update-status-elapsed')
   const restart = root.querySelector<HTMLButtonElement>('#update-status-restart')
@@ -237,6 +412,19 @@ export function createUpdateStatusView(
       icon.classList.toggle('is-spinning', model.tone === 'busy')
     }
     if (message && message.textContent !== model.message) message.textContent = model.message
+    if (progress) progress.hidden = model.progress === null
+    if (model.progress) {
+      const percent = Math.round(model.progress.fraction * 100)
+      // Later renders start from here so the bar never moves backwards in a build.
+      if (state.kind === 'building') state.timing.floor = model.progress.fraction
+      bar?.setAttribute('aria-valuenow', String(percent))
+      bar?.setAttribute('aria-valuetext', model.progress.valueText)
+      if (barFill) barFill.style.width = `${model.progress.fraction * 100}%`
+      if (estimate) {
+        estimate.textContent = model.progress.text
+        estimate.hidden = !model.progress.text
+      }
+    }
     if (detail) detail.textContent = model.detail
     row.title = model.title
     if (elapsed) {
@@ -270,10 +458,16 @@ export function createUpdateStatusView(
   return {
     setPhase: (phase, build) => {
       if (phase === 'building' && state.kind !== 'building') {
-        setState({ kind: 'building', startedAt: now(), progress: null })
+        const history = readUpdateBuildDurations(storage)
+        setState({ kind: 'building', startedAt: now(), progress: null, timing: { stageStarts: {}, history, floor: 0 } })
       } else if (phase === 'applying' && state.kind !== 'applying') {
         setState({ kind: 'applying', startedAt: now(), progress: null })
       } else if (phase === 'ready' && build) {
+        // Only a build that just succeeded here teaches the next estimate.
+        if (state.kind === 'building') {
+          const { stageStarts, history } = state.timing
+          writeUpdateBuildDurations(storage, measureUpdateBuildStages(stageStarts, now()), history)
+        }
         setState({ kind: 'ready', commit: build.commit })
       } else if ((phase === 'hidden' || phase === 'available') && state.kind !== 'failed') {
         setState({ kind: 'idle' })
@@ -282,9 +476,15 @@ export function createUpdateStatusView(
     update: (payload) => {
       const progress = normaliseUpdateProgress(payload)
       if (!progress) return
-      const expected = progress.phase === 'build' ? 'building' : 'applying'
-      if (state.kind !== expected) return
-      setState({ ...state, progress })
+      if (progress.phase === 'build') {
+        if (state.kind !== 'building') return
+        const stage = progress.stage as UpdateBuildStage
+        const { stageStarts } = state.timing
+        if (stageStarts[stage] === undefined) stageStarts[stage] = now()
+        setState({ ...state, progress })
+      } else if (state.kind === 'applying') {
+        setState({ ...state, progress })
+      }
     },
     showFailed: (failure) => setState({ kind: 'failed', message: failure }),
     dispose: () => {
@@ -306,6 +506,49 @@ export async function listenForUpdateProgress(
     return await listen<UpdateProgressEvent>('update-progress', (event) => handler(event.payload))
   } catch {
     return () => {}
+  }
+}
+
+interface BuildProgress {
+  stage: UpdateBuildStage
+  step: number
+  total: number
+  message: string
+}
+
+/** The current build stage, or the first one before any event arrives. */
+function buildProgress(progress: NormalizedUpdateProgress | null): BuildProgress {
+  if (progress?.phase === 'build') {
+    return { stage: progress.stage as UpdateBuildStage, step: progress.step, total: progress.total, message: progress.message }
+  }
+  const first = UPDATE_PROGRESS_STAGES[0]
+  return { stage: first.id, step: first.step, total: UPDATE_BUILD_TOTAL, message: first.message }
+}
+
+const UPDATE_BUILD_TOTAL = Math.max(...UPDATE_PROGRESS_STAGES
+  .filter((stage) => stage.phase === 'build')
+  .map((stage) => stage.step))
+
+function describeEstimate(estimate: UpdateBuildEstimate, step: number, total: number): UpdateStatusProgress {
+  let text = ''
+  if (estimate.percent !== null) {
+    const left = estimate.remaining === null
+      ? 'almost done'
+      : `about ${formatUpdateRemaining(estimate.remaining)} left`
+    text = `${estimate.percent}% · ${left}`
+  }
+  return { fraction: estimate.fraction, text, valueText: text || `Step ${step} of ${total}` }
+}
+
+function stageMessage(id: UpdateProgressStage): string {
+  return UPDATE_PROGRESS_STAGES.find((stage) => stage.id === id)!.message
+}
+
+function defaultStorage(): DurationStorage | undefined {
+  try {
+    return typeof window === 'undefined' ? undefined : window.localStorage
+  } catch {
+    return undefined
   }
 }
 

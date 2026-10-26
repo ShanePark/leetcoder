@@ -119,6 +119,24 @@ fn truncates_live_build_detail_without_splitting_utf8() {
     assert!(detail.ends_with('…'));
 }
 
+/// The (stage, step, message, detail) an emitted detail event carries.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn detail_event(progress: Option<UpdateProgress>) -> Option<(String, u8, String, String)> {
+    progress.map(|item| {
+        (
+            item.stage,
+            item.step,
+            item.message,
+            item.detail.expect("detail events carry detail"),
+        )
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn expected_detail(stage: UpdateProgress, detail: &str) -> Option<(String, u8, String, String)> {
+    Some((stage.stage, stage.step, stage.message, detail.to_string()))
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn throttles_build_output_while_retaining_the_latest_detail() {
@@ -126,16 +144,47 @@ fn throttles_build_output_while_retaining_the_latest_detail() {
     let mut state = ProgressEmissionState::for_phase(UpdatePhase::Build);
 
     assert_eq!(
-        state.record_detail("first", false, start),
-        Some("first".to_string())
+        detail_event(state.record_detail("first", false, start)),
+        expected_detail(UpdateProgress::frontend(), "first")
     );
-    assert_eq!(state.record_detail("second", false, start), None);
-    assert_eq!(state.record_detail("failed: details", true, start), None);
+    assert!(state.record_detail("second", false, start).is_none());
+    assert!(state
+        .record_detail("failed: details", true, start)
+        .is_none());
     assert_eq!(
-        state.flush(start + UPDATE_DETAIL_EMIT_INTERVAL),
-        Some("failed: details".to_string())
+        detail_event(state.flush(start + UPDATE_DETAIL_EMIT_INTERVAL)),
+        expected_detail(UpdateProgress::frontend(), "failed: details")
     );
     assert_eq!(state.latest_diagnostic.as_deref(), Some("failed: details"));
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn build_output_detail_follows_the_current_build_stage() {
+    let start = Instant::now();
+    let mut state = ProgressEmissionState::for_phase(UpdatePhase::Build);
+    assert_eq!(
+        detail_event(state.record_detail("vite build", false, start)),
+        expected_detail(UpdateProgress::frontend(), "vite build")
+    );
+    assert!(state
+        .record_detail("pending frontend line", false, start)
+        .is_none());
+
+    state.enter_stage(&UpdateProgress::compiling());
+    // The frontend line is stale once compiling starts, and the new stage
+    // reports its first line without waiting for the throttle interval.
+    assert!(state.flush(start).is_none());
+    assert_eq!(
+        detail_event(state.record_detail("Compiling serde", false, start)),
+        expected_detail(UpdateProgress::compiling(), "Compiling serde")
+    );
+
+    state.enter_stage(&UpdateProgress::bundling());
+    assert_eq!(
+        detail_event(state.record_detail("Bundling app", false, start)),
+        expected_detail(UpdateProgress::bundling(), "Bundling app")
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -144,19 +193,18 @@ fn stage_transition_discards_stale_build_detail() {
     let start = Instant::now();
     let mut state = ProgressEmissionState::for_phase(UpdatePhase::Build);
     assert_eq!(
-        state.record_detail("still compiling", false, start),
-        Some("still compiling".to_string())
+        detail_event(state.record_detail("still compiling", false, start)),
+        expected_detail(UpdateProgress::frontend(), "still compiling")
     );
-    assert_eq!(state.record_detail("latest line", false, start), None);
+    assert!(state.record_detail("latest line", false, start).is_none());
 
-    state.finish_building();
+    state.enter_stage(&UpdateProgress::staging());
 
-    assert_eq!(state.flush(start + UPDATE_DETAIL_EMIT_INTERVAL), None);
-    assert_eq!(
-        state.record_detail("installing", true, start + UPDATE_DETAIL_EMIT_INTERVAL),
-        None
-    );
-    assert_eq!(state.latest_diagnostic.as_deref(), Some("installing"));
+    assert!(state.flush(start + UPDATE_DETAIL_EMIT_INTERVAL).is_none());
+    assert!(state
+        .record_detail("staging", true, start + UPDATE_DETAIL_EMIT_INTERVAL * 2)
+        .is_none());
+    assert_eq!(state.latest_diagnostic.as_deref(), Some("staging"));
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -165,9 +213,15 @@ fn apply_phase_records_output_only_as_a_diagnostic() {
     let start = Instant::now();
     let mut state = ProgressEmissionState::for_phase(UpdatePhase::Apply);
 
-    assert_eq!(state.record_detail("stopping old app", false, start), None);
-    assert_eq!(state.record_detail("install failed", true, start), None);
-    assert_eq!(state.flush(start + UPDATE_DETAIL_EMIT_INTERVAL), None);
+    assert!(state
+        .record_detail("stopping old app", false, start)
+        .is_none());
+    assert!(state.record_detail("install failed", true, start).is_none());
+    assert!(state.flush(start + UPDATE_DETAIL_EMIT_INTERVAL).is_none());
+
+    // An apply-phase marker never turns build detail reporting on.
+    state.enter_stage(&UpdateProgress::preparing());
+    assert!(state.record_detail("copying", false, start).is_none());
     assert_eq!(state.latest_diagnostic.as_deref(), Some("install failed"));
 }
 
@@ -175,7 +229,9 @@ fn apply_phase_records_output_only_as_a_diagnostic() {
 fn build_progress_stages_are_ordered_and_complete() {
     let progress = [
         UpdateProgress::validating(),
-        UpdateProgress::building(),
+        UpdateProgress::frontend(),
+        UpdateProgress::compiling(),
+        UpdateProgress::bundling(),
         UpdateProgress::staging(),
     ];
     assert_eq!(
@@ -183,16 +239,29 @@ fn build_progress_stages_are_ordered_and_complete() {
             .iter()
             .map(|item| item.stage.as_str())
             .collect::<Vec<_>>(),
-        ["validating", "building", "staging"]
+        ["validating", "frontend", "compiling", "bundling", "staging"]
     );
     assert_eq!(
         progress.iter().map(|item| item.step).collect::<Vec<_>>(),
-        [1, 2, 3]
+        [1, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        progress
+            .iter()
+            .map(|item| item.message.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Checking the latest local commit",
+            "Building the frontend",
+            "Compiling the app",
+            "Bundling the app",
+            "Preparing the update",
+        ]
     );
     assert!(progress
         .iter()
         .all(|item| item.total == BUILD_PROGRESS_TOTAL));
-    assert_eq!(BUILD_PROGRESS_TOTAL, 3);
+    assert_eq!(BUILD_PROGRESS_TOTAL, 4);
     assert!(progress.iter().all(|item| !item.message.is_empty()));
 }
 
@@ -222,14 +291,24 @@ fn apply_progress_stages_are_ordered_and_complete() {
 fn script_markers_map_to_stages_of_their_own_phase_only() {
     let stage = |phase, marker| stage_progress(phase, marker).map(|item| (item.stage, item.step));
 
+    // `building` is the marker older scripts emit before the frontend build.
     assert_eq!(
         stage(UpdatePhase::Build, "building"),
-        Some(("building".to_string(), 2))
+        Some(("frontend".to_string(), 1))
+    );
+    assert_eq!(
+        stage(UpdatePhase::Build, "compiling"),
+        Some(("compiling".to_string(), 2))
+    );
+    assert_eq!(
+        stage(UpdatePhase::Build, "bundling"),
+        Some(("bundling".to_string(), 3))
     );
     assert_eq!(
         stage(UpdatePhase::Build, "staging"),
-        Some(("staging".to_string(), 3))
+        Some(("staging".to_string(), 4))
     );
+    assert_eq!(stage(UpdatePhase::Build, "frontend"), None);
     assert_eq!(stage(UpdatePhase::Build, "preparing"), None);
     assert_eq!(stage(UpdatePhase::Build, "restarting"), None);
     assert_eq!(
@@ -241,6 +320,8 @@ fn script_markers_map_to_stages_of_their_own_phase_only() {
         Some(("restarting".to_string(), 2))
     );
     assert_eq!(stage(UpdatePhase::Apply, "building"), None);
+    assert_eq!(stage(UpdatePhase::Apply, "compiling"), None);
+    assert_eq!(stage(UpdatePhase::Apply, "bundling"), None);
     assert_eq!(stage(UpdatePhase::Apply, "staging"), None);
     assert_eq!(stage(UpdatePhase::Build, "unknown"), None);
 }

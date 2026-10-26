@@ -53,6 +53,37 @@
   white-space: nowrap;
 }
 
+.update-status-progress {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-status-bar {
+  position: relative;
+  width: 96px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+}
+
+.update-status-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 400ms ease-out;
+}
+
+.update-status-estimate {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* Fills the remaining width, even when empty, so trailing controls stay right. */
 .update-status-detail {
   flex: 1 1 0;
@@ -82,6 +113,26 @@
   flex: none;
   width: 24px;
   height: 24px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-status-bar-fill {
+    transition: none;
+  }
+}
+
+/* Narrow windows drop the log line first, then the estimate text. The detail
+   stays in the layout as the spacer that keeps trailing controls right. */
+@media (max-width: 760px) {
+  .update-status-detail {
+    visibility: hidden;
+  }
+}
+
+@media (max-width: 520px) {
+  .update-status-estimate {
+    display: none;
+  }
 }
 
 /* Lift transient toasts above the row so they never cover its controls. */

@@ -71,6 +71,44 @@ export function isLeetcoderOwnedLegacyDesktopEntry(contents) {
     && /^Name=leetcoder Dev\s*$/m.test(contents)
 }
 
+const BUILD_STAGE_ORDER = ['building', 'compiling', 'bundling']
+// Tool output may be colored even when piped; markers match the plain text.
+const ANSI_ESCAPE = /\u001b\[[0-9;?]*[A-Za-z]/g
+
+/**
+ * Map one line of release-build output to the next build stage marker, or null
+ * when the line does not move the build forward from `currentStage`.
+ */
+export function nextBuildStage(line, currentStage) {
+  const text = String(line).replace(ANSI_ESCAPE, '')
+  let stage = null
+  if (/^\s*Compiling\s/.test(text)) stage = 'compiling'
+  else if (/^\s*(Finished|Bundling)\s/.test(text) || /^\s*Built application at\b/.test(text)) stage = 'bundling'
+  if (stage === null) return null
+  return BUILD_STAGE_ORDER.indexOf(stage) > BUILD_STAGE_ORDER.indexOf(currentStage) ? stage : null
+}
+
+/** Reassemble complete lines from output chunks that may split a line. */
+export function createLineSplitter(onLine) {
+  let pending = ''
+  return {
+    push(chunk) {
+      const lines = (pending + String(chunk)).split(/\r\n|\r|\n/)
+      pending = lines.pop()
+      for (const line of lines) onLine(line)
+    },
+    end() {
+      if (pending) onLine(pending)
+      pending = ''
+    },
+  }
+}
+
+/** The app reads markers line by line, so one must never continue a partial line. */
+export function updateStageLine(stage, atLineStart) {
+  return `${atLineStart ? '' : '\n'}${UPDATE_STAGE_PREFIX}${stage}\n`
+}
+
 const REBUILD_MODES = {
   '--stage-only': 'stage',
   '--apply-staged': 'apply',
@@ -202,32 +240,46 @@ function ignoreBrokenPipe(stream) {
   })
 }
 
+let stdoutAtLineStart = true
+
+function writeStdout(chunk) {
+  if (chunk.length === 0) return
+  process.stdout.write(chunk)
+  stdoutAtLineStart = String(chunk).endsWith('\n')
+}
+
 function emitUpdateStage(stage) {
-  process.stdout.write(`${UPDATE_STAGE_PREFIX}${stage}\n`)
+  writeStdout(updateStageLine(stage, stdoutAtLineStart))
 }
 
 async function appendLog(message) {
   await writeFile(logPath, `${message}\n`, { flag: 'a' })
 }
 
-async function runCommand(command, args, { allowExitCodes = [0], cwd = repositoryRoot } = {}) {
+async function runCommand(command, args, { allowExitCodes = [0], cwd = repositoryRoot, onLine } = {}) {
   await appendLog(`$ ${command} ${args.join(' ')}`)
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
     const logStream = createWriteStream(logPath, { flags: 'a' })
+    const stdoutLines = onLine ? createLineSplitter(onLine) : null
+    const stderrLines = onLine ? createLineSplitter(onLine) : null
     child.stdout.on('data', (chunk) => {
-      process.stdout.write(chunk)
+      writeStdout(chunk)
       logStream.write(chunk)
+      stdoutLines?.push(chunk)
     })
     child.stderr.on('data', (chunk) => {
       process.stderr.write(chunk)
       logStream.write(chunk)
+      stderrLines?.push(chunk)
     })
     child.on('error', (error) => {
       logStream.end()
       reject(error)
     })
     child.on('close', (code) => {
+      stdoutLines?.end()
+      stderrLines?.end()
       logStream.end()
       if (allowExitCodes.includes(code ?? -1)) resolve(code)
       else reject(new Error(`${command} exited with status ${code}`))
@@ -524,8 +576,18 @@ async function installLinux(plan) {
 
 async function buildRelease(plan) {
   await verifyExpectedCommit()
-  emitUpdateStage('building')
-  await runCommand('npm', ['run', 'tauri', '--', 'build', '--bundles', plan.bundleKind])
+  // Older installed apps only understand `building` and `staging`; they
+  // ignore the finer markers emitted while the release build runs.
+  let buildStage = 'building'
+  emitUpdateStage(buildStage)
+  await runCommand('npm', ['run', 'tauri', '--', 'build', '--bundles', plan.bundleKind], {
+    onLine(line) {
+      const next = nextBuildStage(line, buildStage)
+      if (next === null) return
+      buildStage = next
+      emitUpdateStage(next)
+    },
+  })
   await verifyExpectedCommit()
 }
 

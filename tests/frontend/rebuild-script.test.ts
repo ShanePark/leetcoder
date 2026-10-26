@@ -3,15 +3,18 @@ import { describe, expect, it } from 'vitest'
 import {
   appBinaryPath,
   appImageCandidateNames,
+  createLineSplitter,
   isLeetcoderOwnedLegacyDesktopEntry,
   isLeetcoderOwnedLegacyLauncher,
   isRegularNonSymlink,
+  nextBuildStage,
   parseRebuildMode,
   parseUpdateOldPid,
   rebuildPlan,
   requireExpectedCommit,
   selectUniqueAppImageName,
   stopRunningAppStrategy,
+  updateStageLine,
   validateStagedManifest,
 } from '../../scripts/leetcoder-rebuild.mjs'
 
@@ -125,5 +128,43 @@ describe('leetcoder staged manifest validation', () => {
   it('rejects malformed manifests', () => {
     expect(() => validateStagedManifest(null, expected)).toThrow(/malformed/)
     expect(() => validateStagedManifest([manifest], expected)).toThrow(/malformed/)
+  })
+})
+
+describe('leetcoder release build stage markers', () => {
+  it('advances to compiling on the first crate compile line', () => {
+    expect(nextBuildStage('   Compiling leetcoder v0.1.0 (/src-tauri)', 'building')).toBe('compiling')
+    expect(nextBuildStage('\u001b[1m\u001b[32m   Compiling\u001b[0m serde v1.0.0', 'building')).toBe('compiling')
+    expect(nextBuildStage('   Compiling serde v1.0.0', 'compiling')).toBeNull()
+  })
+
+  it('advances to bundling when the compile finishes or bundling begins', () => {
+    expect(nextBuildStage('    Finished `release` profile [optimized] target(s) in 1m 12s', 'compiling')).toBe('bundling')
+    expect(nextBuildStage('       Built application at: /src-tauri/target/release/leetcoder', 'building')).toBe('bundling')
+    expect(nextBuildStage('    Bundling leetcoder_0.1.0_amd64.AppImage (/bundle)', 'compiling')).toBe('bundling')
+  })
+
+  it('never moves backwards or reacts to unrelated output', () => {
+    expect(nextBuildStage('   Compiling late v1.0.0', 'bundling')).toBeNull()
+    expect(nextBuildStage('    Finished 1 bundle at:', 'bundling')).toBeNull()
+    expect(nextBuildStage('     Running beforeBuildCommand `npm run build`', 'building')).toBeNull()
+    expect(nextBuildStage('vite v7.3.6 building client environment for production...', 'building')).toBeNull()
+    expect(nextBuildStage('warning: Compiling is mentioned mid-line', 'building')).toBeNull()
+  })
+
+  it('reassembles lines split across output chunks', () => {
+    const lines: string[] = []
+    const splitter = createLineSplitter((line: string) => lines.push(line))
+    splitter.push('   Comp')
+    splitter.push('iling a v1\r\n    Finished `release`')
+    expect(lines).toEqual(['   Compiling a v1'])
+    splitter.push(' profile\nBundling')
+    splitter.end()
+    expect(lines).toEqual(['   Compiling a v1', '    Finished `release` profile', 'Bundling'])
+  })
+
+  it('starts a marker on its own line after a partial output line', () => {
+    expect(updateStageLine('compiling', true)).toBe('LEETCODER_UPDATE_STAGE:compiling\n')
+    expect(updateStageLine('bundling', false)).toBe('\nLEETCODER_UPDATE_STAGE:bundling\n')
   })
 })

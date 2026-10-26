@@ -104,7 +104,7 @@ pub(crate) async fn build_update(app: tauri::AppHandle) -> Result<UpdateBuild, S
     emit_update_progress(&app, UpdateProgress::validating());
 
     let (source_root, expected_commit) = validate_update_source()?;
-    emit_update_progress(&app, UpdateProgress::building());
+    emit_update_progress(&app, UpdateProgress::frontend());
 
     let progress_app = app.clone();
     let commit = expected_commit.clone();
