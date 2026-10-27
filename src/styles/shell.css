@@ -12,6 +12,29 @@
   background: var(--bg);
 }
 
+/* Without a window manager frame or shadow, the dark backdrop melts into a
+   dark desktop; outline the window edge above everything, click-through. */
+:root[data-window-frame='bordered']::after {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  border: 1px solid var(--border-strong);
+  content: '';
+  pointer-events: none;
+}
+
+.window-controls {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  margin-right: 4px;
+}
+
+.window-control-close:hover:not(:disabled) {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 .app-menu-button {
   flex: none;
 }
@@ -28,6 +51,12 @@
   border-radius: var(--radius-md);
   background: var(--surface-2);
   box-shadow: var(--shadow-menu);
+}
+
+/* Undecorated windows lead the row with three 28px window buttons (2px
+   apart), their 4px margin, and the row's 4px gap. */
+:root[data-window-frame] .app-menu {
+  left: calc(var(--panel-gap) + 13px + 96px);
 }
 
 .app-menu-item {
