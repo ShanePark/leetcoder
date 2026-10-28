@@ -47,26 +47,24 @@ export async function installWindowChrome(
 }
 
 /**
- * Undecorated Linux windows have no title bar row, so the shell's top row
- * stands in for one: the window buttons lead the sidebar's repository row,
- * and that row, the problem header, and the bare gaps around the panels drag
- * the window. Their buttons and inputs stay clickable.
+ * Undecorated Linux windows have no title bar row, so the app header stands
+ * in for one: the window buttons lead it, and the header and the bare gaps
+ * around the panels drag the window. Its buttons and inputs stay clickable.
  */
 function installAppDrawnTitleBar(
   appRoot: HTMLElement,
   nativeWindow: TitleBarWindow,
   requestClose: () => Promise<void>,
 ): void {
-  const repositoryRow = appRoot.querySelector<HTMLElement>('.sidebar-repository')
-  if (!repositoryRow) {
+  const header = appRoot.querySelector<HTMLElement>('.app-header')
+  const start = appRoot.querySelector<HTMLElement>('.app-header-start')
+  if (!header || !start) {
     return
   }
   const controls = appRoot.ownerDocument.createElement('div')
-  repositoryRow.prepend(controls)
+  start.prepend(controls)
   renderWindowControls(controls, nativeWindow, requestClose)
-  for (const selector of ['.sidebar-repository', '#daily-header']) {
-    appRoot.querySelector(selector)?.setAttribute('data-tauri-drag-region', 'deep')
-  }
+  header.setAttribute('data-tauri-drag-region', 'deep')
   for (const selector of ['.app-shell', '.workspace']) {
     appRoot.querySelector(selector)?.setAttribute('data-tauri-drag-region', '')
   }

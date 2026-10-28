@@ -16,15 +16,18 @@ export interface ShellViewOptions {
 export function renderShellView(root: HTMLElement, options: ShellViewOptions): void {
   root.innerHTML = `
     <div class="app-shell">
+      <header class="app-header">
+        <div class="app-header-start">
+          <button id="app-menu-button" class="icon-button app-menu-button" type="button" aria-label="Open application menu" aria-haspopup="menu" aria-expanded="false" title="Application menu"></button>
+          <button id="choose-repository" class="repo-chip" type="button">
+            <span id="repo-path" class="repo-chip-label">Choose repository</span>
+          </button>
+          <button id="update-button" class="icon-button update-button" type="button" aria-label="Update leetcoder" hidden></button>
+        </div>
+        <div id="daily-header" class="daily-header" role="group" aria-label="Today's problem"></div>
+      </header>
       <main class="workspace">
         <aside class="sidebar" aria-label="Problem files">
-          <div class="sidebar-repository">
-            <button id="app-menu-button" class="icon-button app-menu-button" type="button" aria-label="Open application menu" aria-haspopup="menu" aria-expanded="false" title="Application menu"></button>
-            <button id="choose-repository" class="repo-chip" type="button">
-              <span id="repo-path" class="repo-chip-label">Choose repository</span>
-            </button>
-            <button id="update-button" class="icon-button update-button" type="button" aria-label="Update leetcoder" hidden></button>
-          </div>
           <div class="sidebar-heading">
             <span class="micro-label">Problems</span>
             <span id="file-count" class="sidebar-count"></span>
@@ -54,8 +57,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         ><span aria-hidden="true"></span></div>
 
         <section class="editor-column" aria-label="Code editor">
-          <section class="daily-card" aria-label="Today's problem">
-            <div id="daily-header" class="daily-header"></div>
+          <section class="daily-card" aria-label="Problem description">
             <div id="daily-description" class="daily-description" hidden></div>
             <div
               id="daily-description-resize-handle"

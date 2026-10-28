@@ -87,7 +87,7 @@ class FakeDocument {
   }
 }
 
-const SHELL_SELECTORS = ['.sidebar-repository', '#daily-header', '.app-shell', '.workspace']
+const SHELL_SELECTORS = ['.app-header', '.app-header-start', '.app-shell', '.workspace']
 
 function fakeAppRoot(ownerDocument: FakeDocument): FakeElement {
   const appRoot = new FakeElement(ownerDocument)
@@ -166,7 +166,7 @@ describe('window chrome platform', () => {
 })
 
 describe('installWindowChrome', () => {
-  it('leads the top row with window buttons and drags from it only in the Linux desktop runtime', async () => {
+  it('leads the app header with window buttons and drags from it only in the Linux desktop runtime', async () => {
     vi.stubGlobal('navigator', { platform: 'Linux x86_64', userAgent: 'X11; Linux x86_64' })
     const nativeWindow = fakeWindow()
     vi.mocked(getCurrentWindow).mockReturnValue(nativeWindow as never)
@@ -175,11 +175,11 @@ describe('installWindowChrome', () => {
 
     await installWindowChrome(appRoot as unknown as HTMLElement, async () => undefined)
 
-    const repositoryRow = appRoot.elements.get('.sidebar-repository')
-    expect(repositoryRow?.prepended).toHaveLength(1)
-    expect(repositoryRow?.prepended[0]?.className).toBe('window-controls')
-    expect(repositoryRow?.getAttribute('data-tauri-drag-region')).toBe('deep')
-    expect(appRoot.elements.get('#daily-header')?.getAttribute('data-tauri-drag-region')).toBe('deep')
+    const header = appRoot.elements.get('.app-header')
+    const start = appRoot.elements.get('.app-header-start')
+    expect(start?.prepended).toHaveLength(1)
+    expect(start?.prepended[0]?.className).toBe('window-controls')
+    expect(header?.getAttribute('data-tauri-drag-region')).toBe('deep')
     expect(appRoot.elements.get('.app-shell')?.getAttribute('data-tauri-drag-region')).toBe('')
     expect(appRoot.elements.get('.workspace')?.getAttribute('data-tauri-drag-region')).toBe('')
     expect(nativeWindow.setTheme).not.toHaveBeenCalled()
@@ -197,7 +197,7 @@ describe('installWindowChrome', () => {
 
     await installWindowChrome(appRoot as unknown as HTMLElement, async () => undefined)
 
-    expect(appRoot.elements.get('.sidebar-repository')?.prepended).toHaveLength(0)
+    expect(appRoot.elements.get('.app-header-start')?.prepended).toHaveLength(0)
     expect(nativeWindow.setTheme).toHaveBeenCalledWith('dark')
     expect(nativeWindow.setBackgroundColor).toHaveBeenCalledWith('#09090a')
   })
@@ -212,7 +212,7 @@ describe('installWindowChrome', () => {
 
     await installWindowChrome(appRoot as unknown as HTMLElement, async () => undefined)
 
-    expect(appRoot.elements.get('.sidebar-repository')?.prepended).toHaveLength(0)
+    expect(appRoot.elements.get('.app-header-start')?.prepended).toHaveLength(0)
     expect(ownerDocument.created).toHaveLength(0)
   })
 })

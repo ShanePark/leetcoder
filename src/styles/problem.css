@@ -10,6 +10,8 @@
   min-height: 0;
 }
 
+/* Holds only the problem description, so it leaves the column while the
+   description is closed. */
 .daily-card {
   flex: none;
   border: 1px solid var(--border);
@@ -18,18 +20,23 @@
   box-shadow: var(--shadow-panel);
 }
 
-/* One 52px toolbar row: 28px controls centered with 12px vertical padding. */
-.daily-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  min-height: 52px;
-  padding: 12px 14px;
+.daily-card:has(> .daily-description[hidden]) {
+  display: none;
 }
 
-.daily-header .icon-button {
-  border-radius: var(--radius-pill);
+/* The problem identity and its actions fill the app header's middle and
+   end tracks. */
+.daily-header {
+  display: contents;
+}
+
+/* Number, title, and difficulty read as one centered unit; only the title
+   gives up width. */
+.daily-problem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .problem-lookup {
@@ -46,7 +53,7 @@
   height: 28px;
   padding: 0 10px;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   background: var(--surface-2);
   color: var(--text-faint);
   transition: border-color 120ms ease, box-shadow 120ms ease;
@@ -97,7 +104,7 @@
 }
 
 .problem-title {
-  flex: 1 1 140px;
+  flex: 0 1 auto;
   overflow: hidden;
   min-width: 0;
   color: var(--text);
@@ -173,10 +180,10 @@
 
 .daily-actions {
   display: flex;
-  flex: none;
+  justify-self: end;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
+  white-space: nowrap;
 }
 
 .daily-primary {
@@ -225,13 +232,11 @@
   }
 }
 
-/* Same 14px inset as the header so left edges line up; spacing, not a rule,
-   separates it from the toolbar row. */
 .daily-description {
   overflow-y: auto;
   height: var(--daily-description-height, 220px);
   min-height: 0;
-  padding: 0 14px 12px;
+  padding: 8px 14px 12px;
 }
 
 /* Invisible until hovered or dragged, then a 2px accent line like the
