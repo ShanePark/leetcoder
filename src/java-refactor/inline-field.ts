@@ -273,7 +273,7 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   })) return { reason: 'A static import may refer to this field; it cannot be resolved safely.' }
   const declaratorDimensions = children(variable).filter((part) => part.name === 'Dimension')
   const type = (target.type?.trim().replace(/\s+/g, '') ?? '') + '[]'.repeat(declaratorDimensions.length)
-  const arrayType = /^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)\[\]$/.test(type)
+  const arrayType = /^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)(?:\[\])+$/.test(type)
   if ((!arrayType && !/^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)$/.test(type))
     || (arrayType && target.field)) return { reason: CONSTANT_ERROR }
   const initializer = children(variable).find((node) => node.from > target.definition.to && node.name !== 'AssignOp'
@@ -382,33 +382,67 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     const binding = resolve(reference)
     return Boolean(binding && binding !== 'ambiguous' && constantResults.get(binding.definition.from))
   })
+  // Reads of locals, parameters, array elements, and array lengths; evaluating them cannot change program state.
+  const effectFreeRead = (node: Node): boolean => {
+    if (['LineComment', 'BlockComment'].includes(node.name)) return true
+    if (node.name === 'Identifier') {
+      const binding = resolve(node)
+      return Boolean(binding && binding !== 'ambiguous' && !binding.field
+        && binding.definition.from !== target.definition.from && reliable(node))
+    }
+    if (node.name === 'FieldAccess') {
+      const parts = children(node)
+      const member = parts.at(-1)
+      return parts.length === 3 && parts[1].name === '.' && member?.name === 'Identifier'
+        && source.slice(member.from, member.to) === 'length' && effectFreeRead(parts[0])
+    }
+    if (node.name === 'ArithOp' && ['/', '%'].includes(source.slice(node.from, node.to))) return false
+    return (CONSTANT_NODES.has(node.name) || ['ArrayAccess', '[', ']'].includes(node.name)) && children(node).every(effectFreeRead)
+  }
   const canMoveArrayInitializer = (): boolean => {
     if (!arrayType || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1) return false
     const array = initializer.name === 'ArrayInitializer' ? initializer
       : initializer.name === 'ArrayCreationExpression' ? initializer.getChild('ArrayInitializer') : null
-    if (!array) return false
+    let sized = false
     if (initializer.name === 'ArrayCreationExpression') {
       const creationType = children(initializer).find((part) => TYPE_NODES.has(part.name))
       const dimensions = children(initializer).filter((part) => part.name === 'Dimension')
-      if (!creationType || dimensions.length !== 1 || children(dimensions[0]).some((part) => !['[', ']'].includes(part.name))
-        || `${source.slice(creationType.from, creationType.to).replace(/\s+/g, '')}[]`.replace(/^java\.lang\./, '') !== type.replace(/^java\.lang\./, '')) return false
-    }
-    if (!children(array).filter((part) => !['{', '}', ',', 'LineComment', 'BlockComment'].includes(part.name))
+      const sizes = dimensions.map((dimension) => children(dimension)
+        .filter((part) => !['[', ']', 'LineComment', 'BlockComment'].includes(part.name)))
+      const sizedCount = sizes.findIndex((parts) => parts.length === 0)
+      sized = sizedCount !== 0
+      // Sized dimensions come first; an initializer requires every dimension to be empty.
+      if (!creationType || (array ? sized : !sized)
+        || sizes.slice(0, sizedCount < 0 ? sizes.length : sizedCount).some((parts) => parts.length !== 1 || !effectFreeRead(parts[0]))
+        || (sizedCount >= 0 && sizes.slice(sizedCount).some((parts) => parts.length !== 0))
+        || `${source.slice(creationType.from, creationType.to).replace(/\s+/g, '')}${'[]'.repeat(dimensions.length)}`.replace(/^java\.lang\./, '') !== type.replace(/^java\.lang\./, '')) return false
+    } else if (!array) return false
+    if (array && !children(array).filter((part) => !['{', '}', ',', 'LineComment', 'BlockComment'].includes(part.name))
       .every((part) => stableExpression(part, new Set([target.definition.from])))) return false
     const references = nodes.filter((part) => identifierReference(part) && source.slice(part.from, part.to) === name
       && resolve(part) === target)
     if (references.length !== 1) return false
     const reference = references[0]
     let context: Node | null = reference
-    while (context && context.name !== 'ExpressionStatement') {
+    while (context && !['ExpressionStatement', 'ReturnStatement'].includes(context.name)) {
       if (['LambdaExpression', 'ClassBody', 'TernaryExpression', 'AssignmentExpression', 'UpdateExpression'].includes(context.name)
         || (context.name === 'BinaryExpression' && children(context).some((part) => part.name === 'LogicOp'))) return false
       context = context.parent
     }
+    if (!context) return false
+    const statement = context
+    // Sized dimensions read runtime values, so only effect-free reads may run before the moved allocation.
+    // On failure paths the allocation's exception may now follow, for example, an index exception from those reads.
+    if (sized) {
+      for (let current = reference; current.from !== statement.from || current.name !== statement.name; current = current.parent!) {
+        if (!children(current.parent!).filter((part) => part.to <= current.from).every((part) =>
+          ['(', ')', ',', '.', 'return', 'this', 'MethodName'].includes(part.name) || effectFreeRead(part))) return false
+      }
+    }
     const siblings = children(declaration.parent!).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
     // A single unconditional use in the next statement keeps one allocation in the same execution path.
-    return context?.parent?.from === declaration.parent?.from
-      && siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]?.from === context?.from
+    return statement.parent?.from === declaration.parent?.from
+      && siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]?.from === statement.from
   }
   const stableStringLengthReceiver = (): Binding | null => {
     if (target.field || arrayType || initializer.name !== 'MethodInvocation'
