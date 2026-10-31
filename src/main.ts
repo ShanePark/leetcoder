@@ -3,6 +3,7 @@ import './styles.css'
 import type { AppOptions } from './app'
 import { LeetcoderApp } from './app'
 import { createDevMockBackend, createDevMockStorage, isDevMockActive } from './dev-mock'
+import { installWindowChrome } from './window-chrome'
 
 const root = document.querySelector<HTMLElement>('#app')
 if (!root) {
@@ -22,10 +23,11 @@ const app = new LeetcoderApp(root, {
   ...options,
   requestClose: () => requestClose?.() ?? Promise.resolve(),
 })
-void bootstrap(app)
+void bootstrap(app, root)
 
-async function bootstrap(editorApp: LeetcoderApp): Promise<void> {
+async function bootstrap(editorApp: LeetcoderApp, appRoot: HTMLElement): Promise<void> {
   requestClose = await installCloseHandler(editorApp)
+  await installWindowChrome(appRoot, requestClose)
   await editorApp.start()
 }
 

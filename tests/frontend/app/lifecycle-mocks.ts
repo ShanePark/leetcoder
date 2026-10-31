@@ -104,13 +104,14 @@ vi.mock('../../../src/app/project-search-controller', () => ({
 }))
 
 vi.mock('../../../src/update-progress', () => ({
-  createUpdateProgressView: () => ({
-    start: vi.fn(),
+  createUpdateStatusView: () => ({
+    setPhase: vi.fn(),
     update: vi.fn(),
-    fail: vi.fn(),
-    isActive: () => false,
+    showFailed: vi.fn(),
+    dispose: vi.fn(),
   }),
   listenForUpdateProgress: vi.fn(async () => () => {}),
+  updateActionPresentation: () => null,
 }))
 
 vi.mock('../../../src/live-diagnostics', () => ({
@@ -197,13 +198,9 @@ vi.mock('../../../src/app/toast-controller', () => ({
 
 vi.mock('../../../src/app/overlay-controller', () => ({
   OverlayController: class {
-    isUpdateAvailable = false
-    isUpdateBusy = false
-
     constructor(_options: unknown) {}
     render(): void {}
-    setUpdateAvailable(_available: boolean): void {}
-    setUpdateBusy(_busy: boolean): void {}
+    setUpdatePhase(_phase: string): void {}
     openSettingsDialog(_section?: string): void {}
     closeAppMenu(_restoreFocus?: boolean): void {}
     handleEscape(_event: KeyboardEvent): boolean { return false }

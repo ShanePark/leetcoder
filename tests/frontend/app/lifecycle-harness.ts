@@ -305,7 +305,8 @@ export function createBackend(): BackendHarness {
       currentCommit: '',
       latestCommit: '',
     }),
-    updateAndRestart: vi.fn().mockResolvedValue(undefined),
+    buildUpdate: vi.fn().mockResolvedValue({ commit: 'latest' }),
+    applyUpdate: vi.fn().mockResolvedValue(undefined),
   } as unknown as BackendClient
   return { backend, watcher }
 }

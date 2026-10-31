@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createBackendClient,
+  normalizeUpdateBuild,
   normalizeUpdateStatus,
   type Invoke,
   type Listen,
@@ -29,6 +30,12 @@ describe('backend client', () => {
     })
   })
 
+  it('normalizes the staged update build and rejects a missing commit', () => {
+    expect(normalizeUpdateBuild({ commit: 'abc1234' })).toEqual({ commit: 'abc1234' })
+    expect(() => normalizeUpdateBuild({ commit: '' })).toThrow('The update build response was invalid.')
+    expect(() => normalizeUpdateBuild(null)).toThrow('The update build response was invalid.')
+  })
+
   it('invokes the native update commands', async () => {
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
     const invoke: Invoke = async (command, args) => {
@@ -36,15 +43,18 @@ describe('backend client', () => {
       if (command === 'check_for_update') {
         return { supported: true, available: false, currentCommit: 'same', latestCommit: 'same' }
       }
-      if (command === 'update_and_restart') return undefined
+      if (command === 'build_update') return { commit: 'abc1234' }
+      if (command === 'apply_update') return undefined
       throw new Error(`unexpected command ${command}`)
     }
     const backend = createBackendClient(invoke)
     await expect(backend.checkForUpdate()).resolves.toMatchObject({ supported: true })
-    await expect(backend.updateAndRestart()).resolves.toBeUndefined()
+    await expect(backend.buildUpdate()).resolves.toEqual({ commit: 'abc1234' })
+    await expect(backend.applyUpdate()).resolves.toBeUndefined()
     expect(calls).toEqual([
       { command: 'check_for_update', args: undefined },
-      { command: 'update_and_restart', args: undefined },
+      { command: 'build_update', args: undefined },
+      { command: 'apply_update', args: undefined },
     ])
   })
 })

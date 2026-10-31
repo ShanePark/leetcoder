@@ -2,6 +2,7 @@ import type { BackendClient, Invoke, Listen } from './contracts'
 import { BackendError } from './errors'
 import {
   normalizeDailyProblem,
+  normalizeUpdateBuild,
   normalizeUpdateStatus,
   normalizeValidation,
 } from './normalizers/problem'
@@ -226,8 +227,12 @@ export function createBackendClient(
       return normalizeUpdateStatus(response)
     },
 
-    async updateAndRestart() {
-      await invoke<unknown>('update_and_restart')
+    async buildUpdate() {
+      const response = await invoke<unknown>('build_update')
+      return normalizeUpdateBuild(response)
+    },
+    async applyUpdate() {
+      await invoke<unknown>('apply_update')
     },
   }
 }

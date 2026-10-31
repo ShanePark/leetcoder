@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  Copy,
   Download,
   ExternalLink,
   FileCode,
@@ -17,6 +18,7 @@ import {
   LoaderCircle,
   LocateFixed,
   Menu,
+  Minus,
   Monitor,
   Moon,
   Play,
@@ -24,6 +26,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Square,
   Sun,
   Terminal,
   X,
@@ -65,6 +68,9 @@ export const appIcons = {
   settings: Settings,
   sun: Sun,
   terminal: Terminal,
+  windowMaximize: Square,
+  windowMinimize: Minus,
+  windowRestore: Copy,
 } as const
 
 export type AppIcon = keyof typeof appIcons

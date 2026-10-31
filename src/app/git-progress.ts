@@ -53,7 +53,7 @@ export function syncGitProgressOverlay(
   if (!active || !label) {
     if (!existing && !gitProgressOverlayState.has(root)) return
     existing?.remove()
-    restoreGitProgressInteraction(root, modalRoot)
+    restoreGitProgressInteraction(root)
     gitProgressOverlayState.delete(root)
     return
   }
@@ -113,16 +113,13 @@ interface GitProgressOverlayState {
 
 const gitProgressOverlayState = new WeakMap<HTMLElement, GitProgressOverlayState>()
 
-function restoreGitProgressInteraction(root: HTMLElement, modalRoot: HTMLElement): void {
+function restoreGitProgressInteraction(root: HTMLElement): void {
   const appShell = root.ownerDocument.querySelector<HTMLElement>('.app-shell')
-  const updateOverlayActive = Boolean(modalRoot.querySelector('[data-update-progress-overlay]'))
   root.ownerDocument.body.classList.remove('is-git-progress')
-  if (!updateOverlayActive) {
-    appShell?.removeAttribute('inert')
-    appShell?.removeAttribute('aria-hidden')
-  }
+  appShell?.removeAttribute('inert')
+  appShell?.removeAttribute('aria-hidden')
   const returnFocus = gitProgressOverlayState.get(root)?.focusReturn
-  if (!updateOverlayActive && returnFocus?.isConnected) returnFocus.focus()
+  if (returnFocus?.isConnected) returnFocus.focus()
 }
 
 function escapeProgressText(value: string): string {

@@ -74,6 +74,32 @@ function symbolTypeNames(source: string, symbol: JavaSymbol): string[] {
   return [...new Set([...declared, ...concrete].flatMap((typeName) => canonicalTypes(source, typeName)))]
 }
 
+/**
+ * Resolve the static type of an indexed array access such as `grid[0]` or
+ * `this.grid[i][j]` from the array's declared type (`int[][]` -> `int[]` -> `int`).
+ */
+export function indexedArrayElementType(receiver: string, position: number, symbols: JavaSymbol[]): string | null {
+  const name = /^(?:this\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\[/.exec(receiver)
+  if (!name) return null
+  let dimensions = 0
+  let index = name[0].length - 1
+  while (index < receiver.length) {
+    if (receiver[index] !== '[') return null
+    let depth = 0
+    for (; index < receiver.length; index += 1) {
+      if (receiver[index] === '[') depth += 1
+      else if (receiver[index] === ']' && --depth === 0) break
+    }
+    if (depth !== 0) return null
+    dimensions += 1
+    index += 1
+    while (/\s/.test(receiver[index] ?? '')) index += 1
+  }
+  const declared = symbolFor(symbols, name[1], position)?.declaredType
+  if (!declared || !declared.endsWith('[]'.repeat(dimensions))) return null
+  return declared.slice(0, declared.length - 2 * dimensions)
+}
+
 /** Resolve a lightweight receiver into canonical types for metadata inspection. */
 export function resolveJavaReceiverTypes(
   source: string,
@@ -84,6 +110,15 @@ export function resolveJavaReceiverTypes(
 ): JavaReceiverTypeResolution {
   if (assertJ || receiver === 'this') {
     return { kind: 'legacy', typeNames: [], isStatic: false }
+  }
+
+  const indexedType = indexedArrayElementType(receiver, position, symbols)
+  if (indexedType !== null) {
+    if (indexedType.endsWith('[]')) return { kind: 'legacy', typeNames: [], isStatic: false }
+    const typeNames = PRIMITIVE_TYPES.has(baseType(indexedType)) ? [] : canonicalTypes(source, baseType(indexedType))
+    return typeNames.length
+      ? { kind: 'metadata', typeNames, isStatic: false }
+      : { kind: 'unresolved', typeNames: [], isStatic: false }
   }
 
   const symbolName = receiver.startsWith('this.') ? receiver.slice('this.'.length) : receiver

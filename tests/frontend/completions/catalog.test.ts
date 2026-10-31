@@ -389,4 +389,31 @@ it('keeps the completion range for a typed dotted receiver and adds print snippe
     expect(topLevel).toContain('sout')
     expect(topLevel).toContain('serr')
   })
+
+  it('offers array length after an indexed array access and in a closing parenthesis', () => {
+    const source = `class Solution {
+    long dfsIsland(int[][] grid, int i, int j) {
+        int y = i, x = j;
+        if (y < 0 && x == grid.l|) return 0;
+    }
+}`
+    expect(labels(source)).toEqual(['length', 'clone()'])
+    expect(applyCompletion(source, 'length')).toContain('x == grid.length) return 0;')
+
+    const row = source.replace('grid.l|', 'grid[0].|')
+    expect(labels(row)).toEqual(['length', 'clone()'])
+    expect(applyCompletion(row.replace('grid[0].|', 'grid[y][x - 1].|').replace('int[][] grid', 'int[][][] grid'), 'length'))
+      .toContain('x == grid[y][x - 1].length) return 0;')
+    expect(labels(row.replace('grid[0].|', 'grid[0][1].|'))).not.toContain('length')
+  })
+
+  it('ranks array length above clone() in the popup', () => {
+    const source = `class Solution {
+    int width(int[][] grid) {
+        return grid[0].|
+    }
+}`
+    const boosts = new Map(complete(source)?.options.map((option) => [option.label, option.boost ?? 0]))
+    expect(boosts.get('length')!).toBeGreaterThan(boosts.get('clone()')!)
+  })
 })

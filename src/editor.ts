@@ -77,6 +77,7 @@ import {
 } from './editor/method-call-input'
 import { leetcoderHighlight, leetcoderTheme } from './editor/theme'
 import { javaBracketMatching } from './editor/bracket-matching'
+import { insertSingleCompletion, startCompletionOrInsertSingle } from './editor/single-completion'
 import {
   findJavaTestMethodAt,
   findJavaTestMethodMarkers,
@@ -716,6 +717,9 @@ export class JavaEditor {
         // template in the same key press.
         Prec.highest(keymap.of(commandBindings(showIntentionsShortcuts, showIntentions))),
         Prec.highest(keymap.of(commandBindings(finishTemplateShortcuts, finishJavaTemplate, false))),
+        // Autocompletion's own Prec.highest keymap also binds Ctrl-Space to a
+        // plain popup start; this command must run first.
+        Prec.highest(keymap.of(commandBindings(completeShortcuts, startCompletionOrInsertSingle, false))),
         keymap.of([
           ...closeBracketsKeymap,
           { key: 'Backspace', run: smartBackspaceOnBlankLine },
@@ -759,16 +763,15 @@ export class JavaEditor {
           ...commandBindings(projectSearchShortcuts, searchProject),
           ...commandBindings(fileSearchShortcuts, focusFileSearch),
           ...commandBindings(reformatShortcuts, reformatJavaDocument),
-          ...commandBindings(completeShortcuts, startCompletion, false),
         ])),
         EditorView.domEventHandlers({ paste: handleJavaStringPaste }),
         EditorView.clipboardInputFilter.of((text, state) => state.selection.ranges.length === 1
           ? formatJavaDocClipboard(text, state.doc.toString(), state.selection.main.head)
           : text),
         autocompletion({
-          override: [callbacks.requestJavaTypeMembers
+          override: [insertSingleCompletion(callbacks.requestJavaTypeMembers
             ? createJavaMemberCompletionSource(callbacks.requestJavaTypeMembers)
-            : javaCompletions],
+            : javaCompletions)],
           activateOnTyping: true,
           maxRenderedOptions: 24,
         }),

@@ -14,6 +14,7 @@ const bundleRoot = path.join(repositoryRoot, 'src-tauri', 'target', 'release', '
 const logPath = path.join(tmpdir(), 'leetcoder-rebuild.log')
 const UPDATE_STAGE_PREFIX = 'LEETCODER_UPDATE_STAGE:'
 const UPDATE_OLD_PID_ENV = 'LEETCODER_UPDATE_OLD_PID'
+const EXPECTED_COMMIT_ENV = 'LEETCODER_EXPECTED_COMMIT'
 const PROCESS_STOP_TIMEOUT_MS = 10_000
 const PROCESS_STOP_POLL_MS = 50
 
@@ -70,20 +71,114 @@ export function isLeetcoderOwnedLegacyDesktopEntry(contents) {
     && /^Name=leetcoder Dev\s*$/m.test(contents)
 }
 
+const BUILD_STAGE_ORDER = ['building', 'compiling', 'bundling']
+// Tool output may be colored even when piped; markers match the plain text.
+const ANSI_ESCAPE = /\u001b\[[0-9;?]*[A-Za-z]/g
+
+/**
+ * Map one line of release-build output to the next build stage marker, or null
+ * when the line does not move the build forward from `currentStage`.
+ */
+export function nextBuildStage(line, currentStage) {
+  const text = String(line).replace(ANSI_ESCAPE, '')
+  let stage = null
+  if (/^\s*Compiling\s/.test(text)) stage = 'compiling'
+  else if (/^\s*(Finished|Bundling)\s/.test(text) || /^\s*Built application at\b/.test(text)) stage = 'bundling'
+  if (stage === null) return null
+  return BUILD_STAGE_ORDER.indexOf(stage) > BUILD_STAGE_ORDER.indexOf(currentStage) ? stage : null
+}
+
+/** Reassemble complete lines from output chunks that may split a line. */
+export function createLineSplitter(onLine) {
+  let pending = ''
+  return {
+    push(chunk) {
+      const lines = (pending + String(chunk)).split(/\r\n|\r|\n/)
+      pending = lines.pop()
+      for (const line of lines) onLine(line)
+    },
+    end() {
+      if (pending) onLine(pending)
+      pending = ''
+    },
+  }
+}
+
+/** The app reads markers line by line, so one must never continue a partial line. */
+export function updateStageLine(stage, atLineStart) {
+  return `${atLineStart ? '' : '\n'}${UPDATE_STAGE_PREFIX}${stage}\n`
+}
+
+const REBUILD_MODES = {
+  '--stage-only': 'stage',
+  '--apply-staged': 'apply',
+}
+
+/** No argument keeps the original build, install, and relaunch flow. */
+export function parseRebuildMode(args) {
+  if (args.length === 0) return 'full'
+  if (args.length === 1 && Object.hasOwn(REBUILD_MODES, args[0])) return REBUILD_MODES[args[0]]
+  throw new Error(`Unsupported rebuild arguments: ${args.join(' ')}. Use --stage-only or --apply-staged.`)
+}
+
+/**
+ * The staged build sits next to the installed app so the final rename stays on
+ * one filesystem; the leading dot keeps it out of launchers and file browsers.
+ */
+export function stagedUpdatePaths(installedApp) {
+  const stagedApp = path.join(path.dirname(installedApp), `.${path.basename(installedApp)}.staged`)
+  return { stagedApp, stagedManifest: `${stagedApp}.json` }
+}
+
+/** The file whose hash identifies an app: the AppImage itself, or the macOS executable. */
+export function appBinaryPath(platform, appPath) {
+  return platform === 'darwin' ? path.join(appPath, 'Contents', 'MacOS', 'leetcoder') : appPath
+}
+
+export function requireExpectedCommit(value) {
+  const commit = typeof value === 'string' ? value.trim() : ''
+  if (!commit) throw new Error(`${EXPECTED_COMMIT_ENV} is required to apply a staged update.`)
+  return commit
+}
+
+/** Reject a staged build unless it is exactly the build the caller decided to install. */
+export function validateStagedManifest(manifest, { expectedCommit, platform, sha256: actualSha256 }) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('The staged update manifest is malformed.')
+  }
+  if (manifest.platform !== platform) {
+    throw new Error(`The staged update was built for ${String(manifest.platform)}, not ${platform}.`)
+  }
+  if (typeof manifest.commit !== 'string' || manifest.commit !== expectedCommit) {
+    throw new Error('The staged update was built from a different commit. Build the update again.')
+  }
+  if (typeof manifest.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(manifest.sha256)) {
+    throw new Error('The staged update manifest has an invalid checksum.')
+  }
+  if (manifest.sha256 !== actualSha256) {
+    throw new Error('The staged update does not match its manifest. Build the update again.')
+  }
+  return manifest
+}
+
 export function rebuildPlan(platform, userHome = homedir()) {
   if (platform === 'darwin') {
+    const installedApp = '/Applications/leetcoder.app'
     return {
       bundleKind: 'app',
       artifact: path.join(bundleRoot, 'macos', 'leetcoder.app'),
-      installedApp: '/Applications/leetcoder.app',
+      installedApp,
+      ...stagedUpdatePaths(installedApp),
     }
   }
   if (platform === 'linux') {
     const applicationDirectory = path.join(userHome, '.local', 'lib', 'leetcoder')
+    const installedApp = path.join(applicationDirectory, 'leetcoder.AppImage')
     return {
       bundleKind: 'appimage',
       artifactDirectory: path.join(bundleRoot, 'appimage'),
-      installedApp: path.join(applicationDirectory, 'leetcoder.AppImage'),
+      installedApp,
+      ...stagedUpdatePaths(installedApp),
       desktopEntry: path.join(userHome, '.local', 'share', 'applications', 'leetcoder.desktop'),
       installedIcon: path.join(userHome, '.local', 'share', 'icons', 'hicolor', '128x128', 'apps', 'leetcoder.png'),
       // Older launcher favorites use these paths. Keep them pointed at the
@@ -123,7 +218,7 @@ async function commandOutput(command, args, { cwd = repositoryRoot } = {}) {
 }
 
 async function verifyExpectedCommit() {
-  const expected = process.env.LEETCODER_EXPECTED_COMMIT?.trim()
+  const expected = process.env[EXPECTED_COMMIT_ENV]?.trim()
   if (!expected) return
   const actual = await commandOutput('git', ['rev-parse', '--verify', 'HEAD'])
   if (actual !== expected) {
@@ -135,32 +230,56 @@ async function verifyExpectedCommit() {
   }
 }
 
+// The updating app reads these pipes and is stopped mid-install, so later
+// writes must not crash the script before the new build is in place. A stage
+// build keeps the default instead: if the app dies without cancelling it, the
+// first write to the closed pipe ends the orphaned build.
+function ignoreBrokenPipe(stream) {
+  stream.on('error', (error) => {
+    if (error?.code !== 'EPIPE') throw error
+  })
+}
+
+let stdoutAtLineStart = true
+
+function writeStdout(chunk) {
+  if (chunk.length === 0) return
+  process.stdout.write(chunk)
+  stdoutAtLineStart = String(chunk).endsWith('\n')
+}
+
 function emitUpdateStage(stage) {
-  process.stdout.write(`${UPDATE_STAGE_PREFIX}${stage}\n`)
+  writeStdout(updateStageLine(stage, stdoutAtLineStart))
 }
 
 async function appendLog(message) {
   await writeFile(logPath, `${message}\n`, { flag: 'a' })
 }
 
-async function runCommand(command, args, { allowExitCodes = [0], cwd = repositoryRoot } = {}) {
+async function runCommand(command, args, { allowExitCodes = [0], cwd = repositoryRoot, onLine } = {}) {
   await appendLog(`$ ${command} ${args.join(' ')}`)
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
     const logStream = createWriteStream(logPath, { flags: 'a' })
+    const stdoutLines = onLine ? createLineSplitter(onLine) : null
+    const stderrLines = onLine ? createLineSplitter(onLine) : null
     child.stdout.on('data', (chunk) => {
-      process.stdout.write(chunk)
+      writeStdout(chunk)
       logStream.write(chunk)
+      stdoutLines?.push(chunk)
     })
     child.stderr.on('data', (chunk) => {
       process.stderr.write(chunk)
       logStream.write(chunk)
+      stderrLines?.push(chunk)
     })
     child.on('error', (error) => {
       logStream.end()
       reject(error)
     })
     child.on('close', (code) => {
+      stdoutLines?.end()
+      stderrLines?.end()
       logStream.end()
       if (allowExitCodes.includes(code ?? -1)) resolve(code)
       else reject(new Error(`${command} exited with status ${code}`))
@@ -287,23 +406,30 @@ async function rollbackAndRelaunch(transaction, relaunch) {
   if (transaction.hadInstalledApp) await relaunch()
 }
 
-async function installMac(plan) {
-  const artifactBinary = path.join(plan.artifact, 'Contents', 'MacOS', 'leetcoder')
-  await assertBundleDirectory(plan.artifact, 'The built macOS application bundle')
-  await assertBundleDirectory(path.join(plan.artifact, 'Contents'), 'The built macOS Contents directory')
-  await assertBundleDirectory(path.join(plan.artifact, 'Contents', 'MacOS'), 'The built macOS executable directory')
-  await assertRegularArtifact(artifactBinary, 'The built macOS executable')
-  const staged = `${plan.installedApp}.installing-${process.pid}`
-  await rm(staged, { recursive: true, force: true })
-  await cp(plan.artifact, staged, { recursive: true, preserveTimestamps: true })
+async function assertMacBundle(appPath, description) {
+  await assertBundleDirectory(appPath, `${description} application bundle`)
+  await assertBundleDirectory(path.join(appPath, 'Contents'), `${description} Contents directory`)
+  await assertBundleDirectory(path.join(appPath, 'Contents', 'MacOS'), `${description} executable directory`)
+  await assertRegularArtifact(appBinaryPath('darwin', appPath), `${description} executable`)
+}
 
+/** Copy the built bundle to `destination` and return the built executable's hash. */
+async function stageMacArtifact(plan, destination) {
+  await assertMacBundle(plan.artifact, 'The built macOS')
+  await rm(destination, { recursive: true, force: true })
+  await cp(plan.artifact, destination, { recursive: true, preserveTimestamps: true })
+  return sha256(appBinaryPath('darwin', plan.artifact))
+}
+
+/** Stop the running app, swap `staged` into place, and relaunch, rolling back on failure. */
+async function activateMac(plan, staged, expectedSha256) {
   await stopRunningApp()
   const transaction = await atomicReplace(staged, plan.installedApp)
   try {
-    const installedBinary = path.join(plan.installedApp, 'Contents', 'MacOS', 'leetcoder')
+    const installedBinary = appBinaryPath('darwin', plan.installedApp)
     await assertBundleDirectory(plan.installedApp, 'The installed macOS application bundle')
     await assertRegularArtifact(installedBinary, 'The installed macOS executable')
-    if (await sha256(artifactBinary) !== await sha256(installedBinary)) {
+    if (expectedSha256 !== await sha256(installedBinary)) {
       throw new Error('Installed macOS application does not match the freshly built bundle.')
     }
     await relaunchMac(plan.installedApp)
@@ -321,6 +447,12 @@ async function installMac(plan) {
     }
     throw error
   }
+}
+
+async function installMac(plan) {
+  const staged = `${plan.installedApp}.installing-${process.pid}`
+  const artifactSha256 = await stageMacArtifact(plan, staged)
+  await activateMac(plan, staged, artifactSha256)
 }
 
 async function newestAppImage(directory) {
@@ -393,19 +525,23 @@ async function installLinuxLegacyLauncher(plan) {
   return true
 }
 
-async function installLinux(plan) {
+/** Copy the built AppImage to `destination` and return the built AppImage's hash. */
+async function stageLinuxArtifact(plan, destination) {
   const artifact = await newestAppImage(plan.artifactDirectory)
-  await mkdir(path.dirname(plan.installedApp), { recursive: true })
-  const staged = `${plan.installedApp}.installing-${process.pid}`
-  await rm(staged, { recursive: true, force: true })
-  await cp(artifact, staged)
-  await chmod(staged, 0o755)
+  await mkdir(path.dirname(destination), { recursive: true })
+  await rm(destination, { recursive: true, force: true })
+  await cp(artifact, destination)
+  await chmod(destination, 0o755)
+  return sha256(artifact)
+}
 
+/** Stop the running app, swap `staged` into place, and relaunch, rolling back on failure. */
+async function activateLinux(plan, staged, expectedSha256) {
   await stopRunningApp()
   const transaction = await atomicReplace(staged, plan.installedApp)
   try {
     await assertRegularArtifact(plan.installedApp, 'The installed AppImage')
-    if (await sha256(artifact) !== await sha256(plan.installedApp)) {
+    if (expectedSha256 !== await sha256(plan.installedApp)) {
       throw new Error('Installed AppImage does not match the freshly built bundle.')
     }
 
@@ -432,25 +568,145 @@ async function installLinux(plan) {
   }
 }
 
+async function installLinux(plan) {
+  const staged = `${plan.installedApp}.installing-${process.pid}`
+  const artifactSha256 = await stageLinuxArtifact(plan, staged)
+  await activateLinux(plan, staged, artifactSha256)
+}
+
+async function buildRelease(plan) {
+  await verifyExpectedCommit()
+  // Older installed apps only understand `building` and `staging`; they
+  // ignore the finer markers emitted while the release build runs.
+  let buildStage = 'building'
+  emitUpdateStage(buildStage)
+  await runCommand('npm', ['run', 'tauri', '--', 'build', '--bundles', plan.bundleKind], {
+    onLine(line) {
+      const next = nextBuildStage(line, buildStage)
+      if (next === null) return
+      buildStage = next
+      emitUpdateStage(next)
+    },
+  })
+  await verifyExpectedCommit()
+}
+
+async function clearStagedUpdate(plan) {
+  // Remove the manifest first so a half-removed stage can never validate.
+  await rm(plan.stagedManifest, { force: true })
+  await rm(plan.stagedApp, { recursive: true, force: true })
+}
+
 export async function rebuildAndInstall(platform = process.platform) {
   const plan = rebuildPlan(platform)
   await writeFile(logPath, `leetcoder rebuild started on ${platform}\n`)
-  await verifyExpectedCommit()
-  emitUpdateStage('building')
-  await runCommand('npm', ['run', 'tauri', '--', 'build', '--bundles', plan.bundleKind])
-  await verifyExpectedCommit()
+  await buildRelease(plan)
   emitUpdateStage('preparing')
   if (platform === 'darwin') await installMac(plan)
   else await installLinux(plan)
   emitUpdateStage('restarting')
+  // A staged build is older than what was just installed. Failing to remove it
+  // must not report the successful install as failed.
+  try {
+    await clearStagedUpdate(plan)
+  } catch (error) {
+    await appendLog(`Could not remove the stale staged update: ${error instanceof Error ? error.message : String(error)}`)
+  }
   await appendLog('Build, install, and relaunch completed successfully.')
   return { logPath, plan }
 }
 
+/** Build and stage a release for a later --apply-staged run without touching the running app. */
+export async function stageRebuild(platform = process.platform) {
+  const plan = rebuildPlan(platform)
+  await writeFile(logPath, `leetcoder staged rebuild started on ${platform}\n`)
+  const commit = process.env[EXPECTED_COMMIT_ENV]?.trim()
+    || await commandOutput('git', ['rev-parse', '--verify', 'HEAD'])
+  await buildRelease(plan)
+  emitUpdateStage('staging')
+
+  const temporary = `${plan.stagedApp}.installing-${process.pid}`
+  const artifactSha256 = platform === 'darwin'
+    ? await stageMacArtifact(plan, temporary)
+    : await stageLinuxArtifact(plan, temporary)
+  if (await sha256(appBinaryPath(platform, temporary)) !== artifactSha256) {
+    await rm(temporary, { recursive: true, force: true })
+    throw new Error('The staged update does not match the freshly built bundle.')
+  }
+  // The manifest is written last, so it only ever describes a complete stage.
+  await clearStagedUpdate(plan)
+  await rename(temporary, plan.stagedApp)
+  const manifestTemporary = `${plan.stagedManifest}.installing-${process.pid}`
+  await writeFile(manifestTemporary, `${JSON.stringify({ commit, sha256: artifactSha256, platform })}\n`)
+  await rename(manifestTemporary, plan.stagedManifest)
+  await appendLog(`Staged ${commit} at ${plan.stagedApp}`)
+  return { logPath, plan, commit }
+}
+
+async function readStagedManifest(plan) {
+  let text
+  try {
+    text = await readFile(plan.stagedManifest, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error('No staged update build was found. Build the update again.')
+    throw error
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error('The staged update manifest is malformed.')
+  }
+}
+
+/** Install the staged build. The source tree may have moved on since it was built, so git is not consulted. */
+export async function applyStagedRebuild(platform = process.platform) {
+  const plan = rebuildPlan(platform)
+  await writeFile(logPath, `leetcoder staged install started on ${platform}\n`)
+  const expectedCommit = requireExpectedCommit(process.env[EXPECTED_COMMIT_ENV])
+  const manifest = await readStagedManifest(plan)
+  try {
+    if (platform === 'darwin') await assertMacBundle(plan.stagedApp, 'The staged macOS')
+    else await assertRegularArtifact(plan.stagedApp, 'The staged AppImage')
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error('The staged update build is missing. Build the update again.')
+    throw error
+  }
+  const stagedSha256 = await sha256(appBinaryPath(platform, plan.stagedApp))
+  validateStagedManifest(manifest, { expectedCommit, platform, sha256: stagedSha256 })
+
+  emitUpdateStage('preparing')
+  if (platform === 'darwin') await activateMac(plan, plan.stagedApp, stagedSha256)
+  else await activateLinux(plan, plan.stagedApp, stagedSha256)
+  // The new app is already running; a leftover manifest only fails the next
+  // apply's checksum check, so it must not report this install as failed.
+  try {
+    await rm(plan.stagedManifest, { force: true })
+  } catch (error) {
+    await appendLog(`Could not remove the staged update manifest: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  emitUpdateStage('restarting')
+  await appendLog(`Installed staged ${expectedCommit} and relaunched successfully.`)
+  return { logPath, plan }
+}
+
+const MODE_RUNNERS = {
+  full: { run: rebuildAndInstall, done: 'leetcoder was rebuilt, installed, and relaunched.' },
+  stage: { run: stageRebuild, done: 'leetcoder update was built and staged.' },
+  apply: { run: applyStagedRebuild, done: 'leetcoder staged update was installed and relaunched.' },
+}
+
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (invokedDirectly) {
-  rebuildAndInstall().then(({ logPath: completedLog }) => {
-    console.log(`leetcoder was rebuilt, installed, and relaunched. Log: ${completedLog}`)
+  Promise.resolve().then(() => {
+    const mode = parseRebuildMode(process.argv.slice(2))
+    if (mode !== 'stage') {
+      ignoreBrokenPipe(process.stdout)
+      ignoreBrokenPipe(process.stderr)
+    }
+    const runner = MODE_RUNNERS[mode]
+    return runner.run().then((result) => ({ ...result, done: runner.done }))
+  }).then(({ logPath: completedLog, done }) => {
+    console.log(`${done} Log: ${completedLog}`)
   }).catch(async (error) => {
     await appendLog(error instanceof Error ? error.stack ?? error.message : String(error))
     console.error(`leetcoder rebuild failed. Log: ${logPath}`)

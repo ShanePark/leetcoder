@@ -12,18 +12,14 @@ import {
 } from './layout'
 import { shortcutLabel } from '../shortcuts'
 import type { SettingsSection, ShortcutPlatform, ThemeMode } from './types'
-
-export interface OverlayUpdateState {
-  available: boolean
-  busy: boolean
-}
+import type { UpdatePhase } from '../update-controller'
 
 export interface OverlayControllerOptions {
   root: HTMLElement
   storage?: Storage
   /** The platform used for the first shortcut-reference tab and menu label. */
   macPlatform: boolean
-  update?: Partial<OverlayUpdateState>
+  updatePhase?: UpdatePhase
   onRequestUpdate?: () => void | Promise<void>
   onRequestClose?: () => void | Promise<void>
 }
@@ -50,8 +46,7 @@ export class OverlayController {
   private aboutDialogFocusTarget: FocusableElement | null = null
   private shortcutsPlatform: ShortcutPlatform
   private themeMode: ThemeMode
-  private updateAvailable: boolean
-  private updateBusy: boolean
+  private updatePhase: UpdatePhase
 
   constructor(options: OverlayControllerOptions) {
     this.root = options.root
@@ -61,8 +56,7 @@ export class OverlayController {
     this.onRequestClose = options.onRequestClose
     this.shortcutsPlatform = defaultShortcutPlatform(options.macPlatform)
     this.themeMode = readThemeMode(this.storage)
-    this.updateAvailable = options.update?.available ?? false
-    this.updateBusy = options.update?.busy ?? false
+    this.updatePhase = options.updatePhase ?? 'hidden'
     applyTheme(this.themeMode)
     this.bindEvents()
   }
@@ -79,29 +73,12 @@ export class OverlayController {
     return this.aboutDialogOpen
   }
 
-  get isUpdateAvailable(): boolean {
-    return this.updateAvailable
-  }
-
-  get isUpdateBusy(): boolean {
-    return this.updateBusy
-  }
-
-  /** Update the menu's update-action state without exposing its render details. */
-  setUpdateAvailable(available: boolean): void {
-    if (this.disposed || this.updateAvailable === available) {
+  /** Mirror the update phase in the menu without exposing its render details. */
+  setUpdatePhase(phase: UpdatePhase): void {
+    if (this.disposed || this.updatePhase === phase) {
       return
     }
-    this.updateAvailable = available
-    this.renderAppMenu()
-  }
-
-  /** Update the menu's busy state while an application update is running. */
-  setUpdateBusy(busy: boolean): void {
-    if (this.disposed || this.updateBusy === busy) {
-      return
-    }
-    this.updateBusy = busy
+    this.updatePhase = phase
     this.renderAppMenu()
   }
 
@@ -430,8 +407,7 @@ export class OverlayController {
   private renderAppMenu(): void {
     renderAppMenu(this.root, {
       open: this.appMenuOpen,
-      updateAvailable: this.updateAvailable,
-      updateBusy: this.updateBusy,
+      updatePhase: this.updatePhase,
       settingsShortcutLabel: shortcutLabel('open-settings', this.macPlatform),
     })
   }

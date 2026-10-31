@@ -12,22 +12,91 @@
   background: var(--bg);
 }
 
+/* Without a window manager frame or shadow, the dark backdrop melts into a
+   dark desktop; outline the window edge above everything, click-through. */
+:root[data-window-frame='bordered']::after {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  border: 1px solid var(--border-strong);
+  content: '';
+  pointer-events: none;
+}
+
+/* One full-width bar above the panels. It sits on the backdrop rather than
+   in a panel, so it reads as the window's title bar, and its layout never
+   follows the sidebar width. 28px controls center in the 44px row.
+   The equal outer tracks keep the problem centered in the window and leave
+   empty bar on both sides of it to drag; the problem shrinks first. */
+.app-header {
+  display: grid;
+  flex: none;
+  grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr);
+  align-items: center;
+  column-gap: 24px;
+  height: 44px;
+  min-width: 0;
+  padding: 0 6px;
+}
+
+.app-header .icon-button {
+  border-radius: var(--radius-pill);
+}
+
+.app-header-start {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* A short rule between the header's groups instead of full-height borders. */
+.window-controls::after,
+.app-header-start::after {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin: 0 8px;
+  background: var(--border-strong);
+  content: '';
+}
+
+.window-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.window-control-close:hover:not(:disabled) {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 .app-menu-button {
   flex: none;
 }
 
-/* Anchored under the menu button: the shell gap, the sidebar's 1px border and
-   its 12px inner padding, then 4px below the 52px repository row's button. */
+/* Anchored under the menu button: the shell gap and the header's 6px inset,
+   then 4px below the button, which ends 36px into the 44px header. */
 .app-menu {
   position: absolute;
   z-index: 70;
-  top: calc(var(--panel-gap) + 45px);
-  left: calc(var(--panel-gap) + 13px);
+  top: calc(var(--panel-gap) + 40px);
+  left: calc(var(--panel-gap) + 6px);
   min-width: 224px;
   padding: 4px;
   border-radius: var(--radius-md);
   background: var(--surface-2);
   box-shadow: var(--shadow-menu);
+}
+
+/* Undecorated windows lead the header with three 28px window buttons and
+   their rule: 2px gaps, the 1px rule with 8px on each side, then the start
+   group's 4px gap. */
+:root[data-window-frame] .app-menu {
+  left: calc(var(--panel-gap) + 6px + 111px);
 }
 
 .app-menu-item {
@@ -113,6 +182,12 @@
   animation: none;
 }
 
+/* A running build or restart ignores clicks but keeps the button's look. */
+.update-button[aria-disabled='true'],
+.app-menu-item-update[aria-disabled='true'] {
+  cursor: default;
+}
+
 .update-button.is-spinning .button-icon {
   animation: spin 0.9s linear infinite;
 }
@@ -140,6 +215,7 @@
 }
 
 .repo-chip .button-icon {
+  flex: none;
   width: 14px;
   height: 14px;
   color: var(--text-faint);
@@ -164,6 +240,13 @@
 .repo-chip.is-empty:hover:not(:disabled) {
   background: var(--surface-2);
   color: var(--text);
+}
+
+.app-header .repo-chip {
+  flex: 0 1 auto;
+  min-width: 72px;
+  max-width: 240px;
+  border-radius: var(--radius-pill);
 }
 
 .repo-chip-label {

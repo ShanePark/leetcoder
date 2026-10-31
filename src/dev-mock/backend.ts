@@ -9,6 +9,7 @@ import type {
   ProjectSearchMatch,
   ProjectSearchResult,
   ProjectValidation,
+  UpdateBuild,
   UpdateStatus,
 } from '../backend'
 import type { ProblemFilePlan } from '../domain'
@@ -272,7 +273,11 @@ export function createDevMockBackend(): BackendClient & {
       }
     },
 
-    async updateAndRestart(): Promise<void> {
+    async buildUpdate(): Promise<UpdateBuild> {
+      throw new Error('Updates are unavailable in the browser preview.')
+    },
+
+    async applyUpdate(): Promise<void> {
       throw new Error('Updates are unavailable in the browser preview.')
     },
   }

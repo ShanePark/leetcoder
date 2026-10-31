@@ -83,6 +83,68 @@ describe('Inline local array variables', () => {
     expect(planJavaFieldInlining(source, source.indexOf('arr'))).toHaveProperty('reason')
   })
 
+  it('inlines a sized multidimensional array into the next return statement', () => {
+    const source = `class Solution {
+    public int minCost(int[][] grid) {
+        int[][][] dp = new int[grid.length][grid[0].length][1024];
+        return dfs(grid, 0, 0, grid[0][0], dp);
+    }
+}`
+    const result = planJavaFieldInlining(source, source.indexOf('dp'))
+    if ('reason' in result) throw new Error(result.reason)
+    const output = [...result.changes].reverse().reduce((text, change) => text.slice(0, change.from) + change.insert + text.slice(change.to), source)
+    expect(output).toBe(`class Solution {
+    public int minCost(int[][] grid) {
+        return dfs(grid, 0, 0, grid[0][0], new int[grid.length][grid[0].length][1024]);
+    }
+}`)
+  })
+
+  it.each([
+    ['int[] arr={1, 2}; return sum(arr);', 'return sum(new int[] {1, 2});'],
+    ['int arr[][]=new int[n][]; return sum(n, arr);', 'return sum(n, new int[n][]);'],
+    ['int[] arr=new int[-n]; this.use(n, values[0], values.length, arr);', 'this.use(n, values[0], values.length, new int[-n]);'],
+  ])('inlines into the next return or expression statement: %s', (body, expected) => {
+    const source = `class Solution { int f(int n, int[] values){${body}} }`
+    expect(inline(source)).toBe(`class Solution { int f(int n, int[] values){ ${expected}} }`)
+  })
+
+  it('preserves sized array allocation in compiled Java', (context) => {
+    const source = `class Solution {
+      static int use(int first, int[][] values){values[1][2]=first; return values.length*10+values[0].length+values[1][2];}
+      static int f(int[][] grid){int[][] arr=new int[grid.length][grid[0].length]; return use(grid[0][0], arr);}
+      public static void main(String[] args){System.out.print(f(new int[][]{{7, 8, 9}, {1, 2, 3}}));}
+    }`
+    const expected = run(source)
+    if (expected === null) context.skip()
+    expect(expected).toBe('30')
+    expect(run(inline(source))).toBe(expected)
+  })
+
+  it.each([
+    'int[][] arr=new int[n][n]; return use(read(), arr);',
+    'int[][] arr=new int[n][n]; return use(values[read()], arr);',
+    'int[][] arr=new int[n][n]; return use(n++, arr);',
+    'int[][] arr=new int[n][n]; return read().use(arr);',
+    'int[][] arr=new int[n][n]; return new Box(arr);',
+    'int[][] arr=new int[n][read()]; return use(arr);',
+    'int[][] arr=new int[n][n / 2]; return use(arr);',
+    'int[][] arr=new int[n][field]; return use(arr);',
+    'int[][] arr=new int[n][box.size]; return use(arr);',
+    'int[][] arr=new int[n][n]; return use(arr, arr);',
+    'int[][] arr=new int[n][n]; use(arr); return use(arr);',
+    'int[][] arr=new int[n][n]; other(); return use(arr);',
+    'int[][] arr=new int[n][n]; return flag ? use(arr) : 0;',
+    'int[][] arr=new int[n][]; arr[0]=values; return use(arr);',
+    'int[] arr=new int[n][n]; return use(arr);',
+    'int[][] arr=new int[n]; return use(arr);',
+    'int[][] arr=new int[][n]; return use(arr);',
+    'Integer[][] arr=new Integer[n][n]; return use(arr);',
+  ])('rejects sized arrays with effects, unstable dimensions, or other uses: %s', (body) => {
+    const source = `class Solution { int field; int f(boolean flag, int n, int[] values, Box box){${body}} }`
+    expect(planJavaFieldInlining(source, source.indexOf('arr'))).toHaveProperty('reason')
+  })
+
   it('keeps array fields unsupported', () => {
     const source = 'class Solution { int[] arr={1}; void f(){use(arr);} }'
     expect(planJavaFieldInlining(source, source.indexOf('arr'))).toHaveProperty('reason')

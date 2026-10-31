@@ -1,4 +1,7 @@
 import { SHORTCUT_SECTIONS, formatShortcut, platformBindings } from '../shortcuts'
+import { iconFor } from '../icons'
+import { updateActionPresentation } from '../update-progress'
+import type { UpdatePhase } from '../update-controller'
 import type {
   FileContextMenuState,
   GitChangedFile,
@@ -19,8 +22,7 @@ const GIT_CONTEXT_MENU_HEIGHT = 76
 
 export interface AppMenuRenderOptions {
   open: boolean
-  updateAvailable: boolean
-  updateBusy: boolean
+  updatePhase: UpdatePhase
   settingsShortcutLabel: string
 }
 
@@ -75,13 +77,34 @@ export function renderAppMenu(root: HTMLElement, options: AppMenuRenderOptions):
   }
   menu.hidden = !options.open
   button.setAttribute('aria-expanded', String(options.open))
-  update.hidden = !options.updateAvailable
-  update.disabled = options.updateBusy
-  update.setAttribute('aria-busy', String(options.updateBusy))
+  renderUpdateMenuItem(root, update, options.updatePhase)
   if (settings && settingsShortcut) {
     settingsShortcut.textContent = options.settingsShortcutLabel
     settings.title = `Open Settings (${options.settingsShortcutLabel})`
     settings.setAttribute('aria-label', `Settings (${options.settingsShortcutLabel})`)
+  }
+}
+
+/**
+ * Mirror the update phase in the menu item. A running build or restart keeps
+ * the item enabled-looking but inert through aria-disabled; the controller
+ * ignores activation in those phases.
+ */
+function renderUpdateMenuItem(root: HTMLElement, update: HTMLButtonElement, phase: UpdatePhase): void {
+  const presentation = updateActionPresentation(phase)
+  update.hidden = presentation === null
+  if (!presentation) return
+  update.setAttribute('aria-disabled', String(presentation.busy))
+  update.setAttribute('aria-busy', String(presentation.busy))
+  const label = root.querySelector<HTMLElement>('#update-menu-label')
+  const detail = root.querySelector<HTMLElement>('#update-menu-detail')
+  const icon = root.querySelector<HTMLElement>('#update-menu-icon')
+  if (label) label.textContent = presentation.menuLabel
+  if (detail) detail.textContent = presentation.menuDetail
+  if (icon && icon.dataset.icon !== presentation.icon) {
+    icon.dataset.icon = presentation.icon
+    icon.replaceChildren(iconFor(presentation.icon, 'app-menu-action-icon'))
+    icon.classList.toggle('is-spinning', presentation.busy)
   }
 }
 

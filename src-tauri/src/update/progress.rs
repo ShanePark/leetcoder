@@ -10,10 +10,20 @@ use std::{
 use tauri::Emitter;
 
 const UPDATE_PROGRESS_EVENT: &str = "update-progress";
-pub(super) const UPDATE_PROGRESS_TOTAL: u8 = 4;
+pub(super) const BUILD_PROGRESS_TOTAL: u8 = 4;
+pub(super) const APPLY_PROGRESS_TOTAL: u8 = 2;
 const UPDATE_STAGE_PREFIX: &str = "LEETCODER_UPDATE_STAGE:";
 pub(super) const UPDATE_DETAIL_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const UPDATE_DETAIL_MAX_CHARS: usize = 240;
+
+/// The two independently reported halves of an update: building and staging
+/// the release in the background, then installing it and restarting.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UpdatePhase {
+    Build,
+    Apply,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,36 +38,89 @@ pub(crate) struct UpdateProgress {
 
 impl UpdateProgress {
     pub(super) fn validating() -> Self {
-        Self::new("validating", 1, "Checking the latest local commit")
+        Self::new(
+            "validating",
+            1,
+            BUILD_PROGRESS_TOTAL,
+            "Checking the latest local commit",
+        )
     }
 
-    pub(super) fn building() -> Self {
-        Self::new("building", 2, "Building a fresh release")
+    /// Validation and the frontend build share step 1: validation is quick,
+    /// and the frontend build starts right after it.
+    pub(super) fn frontend() -> Self {
+        Self::new("frontend", 1, BUILD_PROGRESS_TOTAL, "Building the frontend")
+    }
+
+    pub(super) fn compiling() -> Self {
+        Self::new("compiling", 2, BUILD_PROGRESS_TOTAL, "Compiling the app")
+    }
+
+    pub(super) fn bundling() -> Self {
+        Self::new("bundling", 3, BUILD_PROGRESS_TOTAL, "Bundling the app")
+    }
+
+    pub(super) fn staging() -> Self {
+        Self::new("staging", 4, BUILD_PROGRESS_TOTAL, "Preparing the update")
     }
 
     pub(super) fn preparing() -> Self {
-        Self::new("preparing", 3, "Installing the updated application")
+        Self::new(
+            "preparing",
+            1,
+            APPLY_PROGRESS_TOTAL,
+            "Installing the update",
+        )
     }
 
     pub(super) fn restarting() -> Self {
-        Self::new("restarting", 4, "Restarting leetcoder")
+        Self::new(
+            "restarting",
+            2,
+            APPLY_PROGRESS_TOTAL,
+            "Restarting leetcoder",
+        )
     }
 
-    fn building_with_detail(detail: String) -> Self {
+    /// Live build output is only reported while the release build runs.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn reports_build_output(&self) -> bool {
+        matches!(self.stage.as_str(), "frontend" | "compiling" | "bundling")
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn with_detail(&self, detail: String) -> Self {
         Self {
             detail: Some(detail),
-            ..Self::building()
+            ..self.clone()
         }
     }
 
-    fn new(stage: &str, step: u8, message: &str) -> Self {
+    fn new(stage: &str, step: u8, total: u8, message: &str) -> Self {
         Self {
             stage: stage.into(),
             step,
-            total: UPDATE_PROGRESS_TOTAL,
+            total,
             message: message.into(),
             detail: None,
         }
+    }
+}
+
+/// Maps a script stage marker to the progress it reports in `phase`. Markers
+/// that belong to the other phase, or are unknown, are ignored. The script
+/// still emits `building` before the frontend build because older installed
+/// apps only understand `building` and `staging`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) fn stage_progress(phase: UpdatePhase, stage: &str) -> Option<UpdateProgress> {
+    match (phase, stage) {
+        (UpdatePhase::Build, "building") => Some(UpdateProgress::frontend()),
+        (UpdatePhase::Build, "compiling") => Some(UpdateProgress::compiling()),
+        (UpdatePhase::Build, "bundling") => Some(UpdateProgress::bundling()),
+        (UpdatePhase::Build, "staging") => Some(UpdateProgress::staging()),
+        (UpdatePhase::Apply, "preparing") => Some(UpdateProgress::preparing()),
+        (UpdatePhase::Apply, "restarting") => Some(UpdateProgress::restarting()),
+        _ => None,
     }
 }
 
@@ -73,16 +136,18 @@ pub(super) fn emit_update_progress(app: &tauri::AppHandle, progress: UpdateProgr
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) struct UpdateProgressReporter {
     app: tauri::AppHandle,
+    phase: UpdatePhase,
     state: Mutex<ProgressEmissionState>,
     emission_lock: Mutex<()>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl UpdateProgressReporter {
-    pub(super) fn new(app: tauri::AppHandle) -> Self {
+    pub(super) fn new(app: tauri::AppHandle, phase: UpdatePhase) -> Self {
         Self {
             app,
-            state: Mutex::new(ProgressEmissionState::new()),
+            phase,
+            state: Mutex::new(ProgressEmissionState::for_phase(phase)),
             emission_lock: Mutex::new(()),
         }
     }
@@ -92,15 +157,15 @@ impl UpdateProgressReporter {
             .emission_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let detail = {
+        let progress = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.record_detail(value, diagnostic, Instant::now())
         };
-        if let Some(detail) = detail {
-            emit_update_progress(&self.app, UpdateProgress::building_with_detail(detail));
+        if let Some(progress) = progress {
+            emit_update_progress(&self.app, progress);
         }
     }
 
@@ -114,21 +179,11 @@ impl UpdateProgressReporter {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match stage {
-                "building" => {
-                    state.start_building();
-                    Some(UpdateProgress::building())
-                }
-                "preparing" => {
-                    state.finish_building();
-                    Some(UpdateProgress::preparing())
-                }
-                "restarting" => {
-                    state.finish_building();
-                    Some(UpdateProgress::restarting())
-                }
-                _ => None,
+            let progress = stage_progress(self.phase, stage);
+            if let Some(progress) = progress.as_ref() {
+                state.enter_stage(progress);
             }
+            progress
         };
         if let Some(progress) = progress {
             emit_update_progress(&self.app, progress);
@@ -140,15 +195,15 @@ impl UpdateProgressReporter {
             .emission_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let detail = {
+        let progress = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.flush(Instant::now())
         };
-        if let Some(detail) = detail {
-            emit_update_progress(&self.app, UpdateProgress::building_with_detail(detail));
+        if let Some(progress) = progress {
+            emit_update_progress(&self.app, progress);
         }
     }
 
@@ -171,14 +226,18 @@ pub(super) struct ProgressEmissionState {
     pending_detail: Option<String>,
     latest_detail: Option<String>,
     pub(super) latest_diagnostic: Option<String>,
-    building: bool,
+    /// The build stage that live output detail is reported under, if any.
+    detail_stage: Option<UpdateProgress>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl ProgressEmissionState {
-    pub(super) fn new() -> Self {
+    /// Build output detail is only reported during the release build; the
+    /// build phase starts in the frontend stage because it is announced
+    /// before the script runs.
+    pub(super) fn for_phase(phase: UpdatePhase) -> Self {
         Self {
-            building: true,
+            detail_stage: (phase == UpdatePhase::Build).then(UpdateProgress::frontend),
             ..Self::default()
         }
     }
@@ -188,7 +247,7 @@ impl ProgressEmissionState {
         value: &str,
         diagnostic: bool,
         now: Instant,
-    ) -> Option<String> {
+    ) -> Option<UpdateProgress> {
         let detail = truncate_detail(value);
         if detail.is_empty() {
             return None;
@@ -198,9 +257,10 @@ impl ProgressEmissionState {
         if diagnostic {
             self.latest_diagnostic = Some(detail.clone());
         }
-        if duplicate || !self.building {
+        if duplicate {
             return None;
         }
+        let stage = self.detail_stage.as_ref()?;
 
         self.pending_detail = Some(detail);
         let should_emit = self
@@ -209,33 +269,34 @@ impl ProgressEmissionState {
             .unwrap_or(true);
         if should_emit {
             self.last_emitted_at = Some(now);
-            self.pending_detail.take()
+            self.pending_detail
+                .take()
+                .map(|detail| stage.with_detail(detail))
         } else {
             None
         }
     }
 
-    fn start_building(&mut self) {
-        self.building = true;
-        self.last_emitted_at = None;
+    /// Switches detail reporting to `progress`. Pending detail from the
+    /// previous stage is discarded so it is never shown under the new one.
+    pub(super) fn enter_stage(&mut self, progress: &UpdateProgress) {
         self.pending_detail = None;
+        if progress.reports_build_output() {
+            self.detail_stage = Some(progress.clone());
+            self.last_emitted_at = None;
+        } else {
+            self.detail_stage = None;
+        }
     }
 
-    pub(super) fn finish_building(&mut self) {
-        self.building = false;
-        self.pending_detail = None;
-    }
-
-    pub(super) fn flush(&mut self, now: Instant) -> Option<String> {
-        if !self.building {
+    pub(super) fn flush(&mut self, now: Instant) -> Option<UpdateProgress> {
+        let Some(stage) = self.detail_stage.as_ref() else {
             self.pending_detail = None;
             return None;
-        }
-        let detail = self.pending_detail.take();
-        if detail.is_some() {
-            self.last_emitted_at = Some(now);
-        }
-        detail
+        };
+        let detail = self.pending_detail.take()?;
+        self.last_emitted_at = Some(now);
+        Some(stage.with_detail(detail))
     }
 }
 

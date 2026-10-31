@@ -166,7 +166,7 @@ describe('file explorer actions', () => {
 
   it('keeps the open description within bounds while preserving editor space', () => {
     expect(clampDailyDescriptionHeight(40, 800)).toBe(120)
-    expect(clampDailyDescriptionHeight(1000, 800)).toBe(534)
+    expect(clampDailyDescriptionHeight(1000, 700)).toBe(486)
     expect(clampDailyDescriptionHeight(400, 900)).toBe(400)
     expect(clampDailyDescriptionHeight(Number.NaN, 900)).toBe(220)
     expect(clampDailyDescriptionHeight(500, 300)).toBe(120)

@@ -12,11 +12,13 @@ import {
 } from './completions/model'
 import {
   analyzeJavaSource,
+  baseType,
   maskJavaCommentsAndLiterals,
 } from './completions/source'
-import { resolveJavaReceiverTypes } from './completions/type-resolution'
+import { indexedArrayElementType, resolveJavaReceiverTypes } from './completions/type-resolution'
 import { expressionBeforeDot, resolveJavaExpressionReceiver } from './completions/expression-resolution'
 import { collectParameterName, isCollectorPrefix, javaCollectorCompletions } from './completions/collectors'
+import { constructorContextFrom, javaConstructorCompletions } from './completions/constructors'
 import {
   JAVA_COMPLETIONS,
   CATALOG,
@@ -184,7 +186,8 @@ function methodOptions(resolution: ReceiverResolution, assertJ = false, psLibrar
   }
   if (resolution.array) {
     return [
-      { label: 'length', type: 'field' as const, detail: 'array length', apply: 'length' },
+      // The popup sorts equal matches alphabetically, which would put clone() first.
+      { label: 'length', type: 'field' as const, detail: 'array length', apply: 'length', boost: 1 },
       ...completionOptions(ARRAY_METHODS),
     ]
   }
@@ -255,6 +258,18 @@ function receiverResolution(receiver: string, position: number, symbols: JavaSym
   }
   if (receiver === 'System.in') {
     return { bases: ['InputStream'], static: false, unknown: false, primitive: false, array: false, thisReceiver: false }
+  }
+  const indexedType = indexedArrayElementType(receiver, position, symbols)
+  if (indexedType !== null) {
+    const base = baseType(indexedType)
+    return {
+      bases: indexedType.endsWith('[]') ? ['array'] : TYPE_GROUPS[base] ?? [base],
+      static: false,
+      unknown: false,
+      primitive: !indexedType.endsWith('[]') && PRIMITIVE_BASES.has(base),
+      array: indexedType.endsWith('[]'),
+      thisReceiver: false,
+    }
   }
   const symbolName = receiver.startsWith('this.') ? receiver.slice('this.'.length) : receiver
   const symbol = symbolFor(symbols, symbolName, position)
@@ -401,6 +416,16 @@ export function javaCompletions(context: CompletionContext): CompletionResult | 
     return {
       from: dot.from,
       options: methodOptions(resolution, dot.assertJ, psLibrary),
+      validFor: javaCompletionValidFor,
+    }
+  }
+  // Typing the space after `new` opens the constructor list without an
+  // explicit request, so this precedes the empty-prefix check below.
+  const constructorFrom = constructorContextFrom(analysis.maskedSource, source, position)
+  if (constructorFrom !== null) {
+    return {
+      from: constructorFrom,
+      options: javaConstructorCompletions(analysis.maskedSource, constructorFrom, symbols),
       validFor: javaCompletionValidFor,
     }
   }

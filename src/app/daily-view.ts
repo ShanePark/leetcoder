@@ -92,7 +92,10 @@ export function createDailyProblemView(
     const lookupSelectionEnd = focusedLookup ? activeElement.selectionEnd : null
 
     elements.header.innerHTML = ''
-    elements.header.append(renderProblemLookup(model, {
+    const identity = document.createElement('div')
+    identity.className = 'daily-problem'
+    elements.header.append(identity)
+    identity.append(renderProblemLookup(model, {
       onLookupInput: (value) => currentCallbacks.onLookupInput(value),
       onLookupSubmit: (value) => currentCallbacks.onLookupSubmit(value),
     }))
@@ -112,16 +115,16 @@ export function createDailyProblemView(
       elements.resizeHandle.hidden = true
       currentCallbacks.onApplyDescriptionHeight()
       if (model.dailyLoading) {
-        elements.header.append(renderDailySkeleton())
+        identity.append(renderDailySkeleton())
       } else if (model.dailyError) {
-        elements.header.append(renderDailyError(model, {
+        identity.append(renderDailyError(model, {
           onRetry: () => currentCallbacks.onRetry(),
         }))
       } else {
         const waiting = document.createElement('span')
         waiting.className = 'daily-waiting'
         waiting.textContent = 'Waiting for today’s problem…'
-        elements.header.append(waiting)
+        identity.append(waiting)
       }
       return
     }
@@ -204,7 +207,8 @@ export function createDailyProblemView(
       primary.addEventListener('click', () => currentCallbacks.onCreateFile())
     }
     actions.append(primary)
-    elements.header.append(title, difficulty, today, actions)
+    identity.append(title, difficulty, today)
+    elements.header.append(actions)
 
     if (hasContent && model.dailyDescriptionOpen) {
       elements.description.hidden = false
