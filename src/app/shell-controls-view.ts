@@ -2,6 +2,7 @@ import { aiButtonPresentation } from './ai-controller'
 import type { AppState } from './types'
 import { gitFileName, hasPendingGitWork } from './git-helpers'
 import { updateGitCommitControls as updateGitCommitControlsView } from './git-view'
+import type { AiTestStub } from '../editor'
 import { iconFor } from '../icons'
 import { shortcutLabel } from '../shortcuts'
 
@@ -12,6 +13,7 @@ interface ShellControlsViewOptions {
   macPlatform: () => boolean
   invalidatePendingNavigation: () => void
   aiRequestPath: () => string | null
+  aiTestStub: () => AiTestStub
 }
 
 /** Update shell controls directly without rebuilding focused editor or Git inputs. */
@@ -100,11 +102,14 @@ export class ShellControlsView {
       this.state.selectedPath,
       this.options.aiRequestPath(),
       this.state.busy,
+      this.state.dailyProblem,
+      this.options.aiTestStub(),
     )
     if (button.dataset.icon !== presentation.icon) {
       button.dataset.icon = presentation.icon
       button.replaceChildren(iconFor(presentation.icon, presentation.busy ? 'button-icon is-spinning' : 'button-icon'))
     }
+    button.hidden = presentation.hidden
     button.disabled = presentation.disabled
     button.setAttribute('aria-busy', String(presentation.busy))
     button.setAttribute('aria-label', presentation.label)

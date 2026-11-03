@@ -81,7 +81,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
                 <span id="selected-file" class="selected-file"></span>
                 <span id="save-status" class="save-status" aria-live="polite"></span>
               </div>
-              <button id="ai-generate-tests" class="icon-button ai-generate-button" type="button" aria-label="Generate tests with AI" aria-busy="false" disabled></button>
+              <button id="ai-generate-tests" class="icon-button ai-generate-button" type="button" aria-label="Generate tests with AI" aria-busy="false" hidden disabled></button>
             </div>
             <div class="editor-host" id="editor-host" aria-label="Java source editor">
               <div id="editor" class="editor"></div>

@@ -415,7 +415,10 @@ export class LeetcoderApp {
       storage: this.storage,
       // JavaEditor may emit a bootstrap change while it is being constructed;
       // the document controller is wired immediately afterwards.
-      onChange: (source) => this.documentController?.onEditorChange(source),
+      onChange: (source) => {
+        this.documentController?.onEditorChange(source)
+        this.controlsView?.updateAiButton()
+      },
       onSave: () => {
         void this.saveCurrentFile()
         return true
@@ -575,6 +578,7 @@ export class LeetcoderApp {
       macPlatform: currentIsMacPlatform,
       invalidatePendingNavigation: () => this.documentController.invalidatePendingNavigation(),
       aiRequestPath: () => this.aiController.requestPath,
+      aiTestStub: () => this.editor.aiTestStub(),
     })
     this.bindEvents()
     this.renderAll()

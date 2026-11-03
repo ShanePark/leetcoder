@@ -194,9 +194,11 @@ export type { AiTestRejectionReason, AiTestResult } from './editor/ai-tests'
 export type { EditorIssue } from './editor/gutters'
 export { buildTestRunMarkers } from './editor/gutters'
 
+export type AiTestStub = BareJavaTestLookup['status']
+
 /** What AI test generation reads from the current document. */
 export interface AiTestContext {
-  stub: BareJavaTestLookup['status']
+  stub: AiTestStub
   methodHeaders: string[]
 }
 
@@ -891,6 +893,11 @@ export class JavaEditor {
       annotations: Transaction.addToHistory.of(false),
     })
     this.foldImports()
+  }
+
+  /** Cheap enough to read on every edit, unlike the full context. */
+  aiTestStub(): AiTestStub {
+    return findBareJavaTest(this.getValue()).status
   }
 
   aiTestContext(): AiTestContext {

@@ -6,7 +6,7 @@ import {
   type PsLibraryMetadata,
 } from '../backend'
 import { declaresJavaSolutionConstructor, extractJavaMethodSignature } from '../domain'
-import type { AiTestContext, AiTestRejectionReason, AiTestResult } from '../editor'
+import type { AiTestContext, AiTestRejectionReason, AiTestResult, AiTestStub } from '../editor'
 import type { AppIcon } from '../icons'
 import { normalizeProblemNumber } from './layout'
 import { sourceBasename } from './path-helpers'
@@ -49,6 +49,7 @@ export interface AiController {
 export interface AiButtonPresentation {
   icon: AppIcon
   busy: boolean
+  hidden: boolean
   disabled: boolean
   label: string
   title: string
@@ -80,10 +81,22 @@ export function aiProblemNumber(path: string | null): string | null {
   return match ? normalizeProblemNumber(match[1]) : null
 }
 
+/** Whether a click could send a request: the file's problem is loaded with its description and test() is empty. */
+function canFill(path: string | null, problem: DailyProblem | null, stub: AiTestStub): boolean {
+  const problemNumber = aiProblemNumber(path)
+  return problemNumber !== null
+    && stub === 'bare'
+    && problem !== null
+    && normalizeProblemNumber(problem.frontendId) === problemNumber
+    && Boolean(problem.content?.trim())
+}
+
 export function aiButtonPresentation(
   path: string | null,
   requestPath: string | null,
   appBusy: boolean,
+  problem: DailyProblem | null,
+  stub: AiTestStub,
 ): AiButtonPresentation {
   const label = 'Generate tests with AI'
   const idle = { icon: 'sparkles', busy: false, label } as const
@@ -91,25 +104,22 @@ export function aiButtonPresentation(
     return {
       icon: 'loader',
       busy: true,
+      hidden: false,
       disabled: true,
       label: 'Generating tests with AI',
       title: `Generating tests for ${sourceBasename(requestPath)}…`,
     }
   }
-  if (path === null) {
-    return { ...idle, disabled: true, title: 'Open a Java problem file to generate tests' }
-  }
-  const name = sourceBasename(path)
-  if (!/\.java$/i.test(name)) {
-    return { ...idle, disabled: true, title: `AI tests work only with Java files, and ${name} is not one` }
-  }
-  if (aiProblemNumber(path) === null) {
-    return { ...idle, disabled: true, title: `AI tests need a file named Q<number>, and ${name} is not` }
+  if (path === null || !canFill(path, problem, stub)) {
+    return { ...idle, hidden: true, disabled: true, title: label }
   }
   return {
     ...idle,
+    hidden: false,
     disabled: appBusy,
-    title: appBusy ? 'Available when the current operation finishes' : `Generate tests for ${name} with AI`,
+    title: appBusy
+      ? 'Available when the current operation finishes'
+      : `Generate tests for ${sourceBasename(path)} with AI`,
   }
 }
 
@@ -135,7 +145,9 @@ export function aiFillMayTakeFocus(root: HTMLElement, button: Element): boolean 
  * Run one test generation for the open file. The flag is set before anything
  * asynchronous, so a repeated click cannot pay for a second call. A file switch
  * is caught here and an edit by `applyStatements`, which re-checks the stub
- * against the document as it is when the result arrives.
+ * against the document as it is when the result arrives. The button is hidden
+ * unless a call could apply, but the document and the loaded problem can still
+ * change while the key status is read, so `run` checks them again.
  */
 export function createAiController(api: AiControllerApi, ui: AiControllerUi): AiController {
   let requestPath: string | null = null

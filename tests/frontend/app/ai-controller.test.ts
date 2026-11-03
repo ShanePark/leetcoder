@@ -410,7 +410,6 @@ describe('AI test generation button', () => {
       expect(button().attributes.get('aria-busy')).toBe('false')
     })
     expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
-    expect(button().disabled).toBe(false)
     expect(button().dataset.icon).toBe('sparkles')
   })
 
@@ -440,7 +439,7 @@ describe('AI test generation button', () => {
     expect(editor().source).toBe(otherStub)
     expect(lastToast()?.message).toContain('Q1TwoSum.java is no longer the active file, so the result was discarded')
     expect(lastToast()?.message).toContain('still charged')
-    expect(button().title).toContain('Q9Palindrome.java')
+    expect(button().hidden).toBe(true)
   })
 
   it('sends nothing when the file changes during the key status check', async () => {
@@ -728,26 +727,83 @@ describe('AI test generation button', () => {
     expect(backend.aiGenerateTests).not.toHaveBeenCalled()
   })
 
-  it('stays disabled with a reason until a Q-numbered Java file is open', async () => {
-    const backend = configuredBackend()
-    const scratch: ProblemFileEntry = { path: 'src/main/java/Scratch.java', name: 'Scratch.java', packageSegment: 'other' }
-    vi.mocked(backend.listProblemFiles).mockResolvedValue([file, scratch])
-    await openApp(backend)
+  describe('visibility', () => {
+    it('stays hidden until the open file is the loaded problem', async () => {
+      const backend = configuredBackend()
+      const scratch: ProblemFileEntry = { path: 'src/main/java/Scratch.java', name: 'Scratch.java', packageSegment: 'other' }
+      const kotlin: ProblemFileEntry = { path: 'src/main/java/Q1TwoSum.kt', name: 'Q1TwoSum.kt', packageSegment: 'other' }
+      vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile, scratch, kotlin])
+      await openApp(backend)
+      expect(button().hidden).toBe(true)
 
-    expect(button().disabled).toBe(true)
-    expect(button().title).toContain('Open a Java problem file')
+      for (const other of [scratch, kotlin, otherFile]) {
+        await selectFile(other)
+        expect(button().hidden).toBe(true)
+      }
 
-    await selectFile(scratch)
-    expect(button().disabled).toBe(true)
-    expect(button().title).toContain('Scratch.java')
+      await selectFile(file)
+      expect(button().hidden).toBe(false)
+      expect(button().disabled).toBe(false)
+      expect(button().title).toBe('Generate tests for Q1TwoSum.java with AI')
+    })
 
-    button().dispatch('click')
-    await Promise.resolve()
-    expect(backend.aiStatus).not.toHaveBeenCalled()
+    it('stays hidden when the loaded problem has no description', async () => {
+      const backend = configuredBackend()
+      vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded({ ...problemOne, content: '  ' }))
+      await openStub(backend)
 
-    await selectFile(file)
-    expect(button().disabled).toBe(false)
-    expect(button().title).toBe('Generate tests for Q1TwoSum.java with AI')
+      expect(button().hidden).toBe(true)
+    })
+
+    it('stays hidden when test() is filled or missing', async () => {
+      for (const source of [filledSource, noTestSource]) {
+        const backend = configuredBackend()
+        await openStub(backend, source)
+        expect(button().hidden).toBe(true)
+        await app?.destroy()
+      }
+    })
+
+    it('follows edits to test()', async () => {
+      await openStub(configuredBackend())
+      expect(button().hidden).toBe(false)
+
+      editor().emitChange(filledSource)
+      expect(button().hidden).toBe(true)
+
+      editor().emitChange(stubSource)
+      expect(button().hidden).toBe(false)
+    })
+
+    it('hides once a fill succeeds', async () => {
+      await openStub(configuredBackend())
+
+      await clickAndSettle()
+
+      expect(editor().source).not.toBe(stubSource)
+      expect(button().hidden).toBe(true)
+    })
+
+    it('keeps showing progress after switching away from the requested file', async () => {
+      const backend = configuredBackend()
+      const generation = deferred<AiGenerateResult>()
+      vi.mocked(backend.aiGenerateTests).mockReturnValue(generation.promise)
+      vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
+      await openStub(backend)
+      button().dispatch('click')
+      await vi.waitFor(() => {
+        expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+      })
+
+      await selectFile(otherFile)
+      expect(button().hidden).toBe(false)
+      expect(button().attributes.get('aria-busy')).toBe('true')
+
+      generation.resolve(okResult)
+      await vi.waitFor(() => {
+        expect(button().hidden).toBe(true)
+      })
+    })
   })
 
   it('drops a result that arrives after the app is destroyed', async () => {
@@ -783,16 +839,19 @@ describe('AI controller helpers', () => {
 
   it('never names a shortcut in the button title', () => {
     for (const presentation of [
-      aiButtonPresentation('src/Q1TwoSum.java', null, false),
-      aiButtonPresentation('src/Q1TwoSum.java', 'src/Q1TwoSum.java', false),
-      aiButtonPresentation('src/Q1TwoSum.java', null, true),
-      aiButtonPresentation('src/Q1TwoSum.kt', null, false),
-      aiButtonPresentation(null, null, false),
+      aiButtonPresentation('src/Q1TwoSum.java', null, false, problemOne, 'bare'),
+      aiButtonPresentation('src/Q1TwoSum.java', 'src/Q1TwoSum.java', false, problemOne, 'bare'),
+      aiButtonPresentation('src/Q1TwoSum.java', null, true, problemOne, 'bare'),
+      aiButtonPresentation('src/Q1TwoSum.kt', null, false, problemOne, 'bare'),
+      aiButtonPresentation(null, null, false, problemOne, 'bare'),
     ]) {
       expect(presentation.title).not.toMatch(/Alt\+|Ctrl\+|⌘/)
     }
-    expect(aiButtonPresentation('src/Q1TwoSum.java', null, true).disabled).toBe(true)
-    expect(aiButtonPresentation('src/Q1TwoSum.kt', null, false).disabled).toBe(true)
+    expect(aiButtonPresentation('src/Q1TwoSum.java', null, true, problemOne, 'bare')).toMatchObject({
+      hidden: false,
+      disabled: true,
+    })
+    expect(aiButtonPresentation('src/Q1TwoSum.kt', null, false, problemOne, 'bare').hidden).toBe(true)
   })
 
   it('formats no signatures without library metadata', () => {

@@ -73,6 +73,10 @@ vi.mock('../../../src/editor', async () => {
       this.source = source
     }
 
+    aiTestStub(): string {
+      return findBareJavaTest(this.source).status
+    }
+
     aiTestContext(): { stub: string; methodHeaders: string[] } {
       return {
         stub: findBareJavaTest(this.source).status,
