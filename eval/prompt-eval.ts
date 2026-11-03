@@ -354,9 +354,11 @@ function printTable(reports: readonly CaseReport[], dry: boolean): void {
     report.result,
     dry ? (report.requestChars > 0 ? String(report.requestChars) : '-') : report.coverage,
     report.usage ? `${report.usage.inputTokens}/${report.usage.outputTokens}` : '-',
+    report.usage ? String(report.usage.cacheWriteTokens) : '-',
+    report.usage ? String(report.usage.cacheReadTokens) : '-',
     report.usage?.costUsd != null ? `$${report.usage.costUsd.toFixed(4)}` : '-',
   ])
-  const header = ['case', 'result', dry ? 'request chars' : 'coverage', 'tokens in/out', 'cost']
+  const header = ['case', 'result', dry ? 'request chars' : 'coverage', 'tokens in/out', 'cache write', 'cache read', 'cost']
   const widths = header.map((title, column) => Math.max(title.length, ...rows.map((row) => row[column].length)))
   const line = (cells: readonly string[]): string =>
     cells.map((cell, column) => cell.padEnd(widths[column])).join('  ').trimEnd()
@@ -370,9 +372,12 @@ function printTable(reports: readonly CaseReport[], dry: boolean): void {
   const totalCost = reports.reduce((total, report) => total + (report.usage?.costUsd ?? 0), 0)
   const totalIn = reports.reduce((total, report) => total + (report.usage?.inputTokens ?? 0), 0)
   const totalOut = reports.reduce((total, report) => total + (report.usage?.outputTokens ?? 0), 0)
+  const totalWrite = reports.reduce((total, report) => total + (report.usage?.cacheWriteTokens ?? 0), 0)
+  const totalRead = reports.reduce((total, report) => total + (report.usage?.cacheReadTokens ?? 0), 0)
   console.log(
     `\nTotal: ${passed} passed, ${failed} failed, ${excluded} excluded; `
-    + `tokens ${totalIn}/${totalOut}; $${totalCost.toFixed(4)}`,
+    + `tokens ${totalIn}/${totalOut}; cache write ${totalWrite}, read ${totalRead}; `
+    + `prompt ${totalIn + totalWrite + totalRead}; $${totalCost.toFixed(4)}`,
   )
 }
 
