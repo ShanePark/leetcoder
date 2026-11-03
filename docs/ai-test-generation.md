@@ -463,8 +463,10 @@ a pass means the app would succeed. It is separate from `npm test`, which stays 
 
 **A real run spends money.** Each case is one real call through the app's
 `generate_tests`, with the app's key, model catalog, and prices, and it writes to the
-usage ledger on purpose. Calls are sequential with no retries. A served model that
-differs from the requested one stops the run.
+usage ledger on purpose. There are no retries. Calls run one at a time until one gets
+a response, since a prompt cache entry is only readable once a response has begun, then
+at most 5 at a time. A served model that differs from the requested one starts no
+further call, and the calls in flight finish.
 
 ```bash
 EVAL_DRY=1 npm run eval:prompt
@@ -485,7 +487,7 @@ Each case stops at its first failed stage:
 | Outcome | The reply is `ok`, not refused, truncated, or an error. |
 | Validate | `applyAiTestStatements` accepts the statements over the reference file with `test()` reset to the stub. |
 | Compile and run | The result compiles and `test` passes. A case with `expectEmpty` instead passes only with no statements, and skips validate and run. |
-| Coverage | A warning only: the calls or instances against the problem's `Example N` headings, like `3/3`. |
+| Coverage | A warning only: the calls or instances against the problem's `Example N` headings, like `3/3`. The Total line counts the cases that fall short, since a case can pass while dropping an example. |
 
 The run fails only on a tool error or a wrong model, and a tool error found before the
 calls means no call is made. A fixture that does not parse, or has no content, is a
@@ -527,7 +529,9 @@ To add a case:
 ### Running
 
 The reference file goes in a throwaway Gradle project under the OS temp directory,
-with `--offline`, in `src/test/java`. The `ps` repository supplies only the Gradle build
+with `--offline`, in `src/test/java`. Baselines and scoring run concurrently through up
+to 4 such projects (`MAX_GRADLE_PROJECTS`), one run per project at a time, so a compile
+error stays in its own project. The `ps` repository supplies only the Gradle build
 files and the library metadata, and it is never written to. `eval_prepare` does run the
 app's Ps library inspection there, which only touches Gradle's ignored directories.
 

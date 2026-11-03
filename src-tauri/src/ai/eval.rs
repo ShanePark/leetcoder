@@ -7,12 +7,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread;
 
 use super::{generate_tests, ledger, AiGenerateRequest, AiPaths, API_BASE_URL};
 use crate::leetcode::parse_problem_detail;
 use crate::models::DailyProblem;
 
 const APP_IDENTIFIER: &str = "com.shane.leetcoder";
+const MAX_CONCURRENT_CALLS: usize = 5;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,19 +182,59 @@ fn eval_generate() {
     };
     let cases: Vec<GenerateCase> = read_input(&input_path);
     let paths = app_paths();
-    let mut results = Vec::new();
-
-    for case in &cases {
-        let result = generate_case(&paths, case);
-        let stop = result.wrong_model;
-        results.push(result);
+    write_json(&output_path, &Vec::<CaseResult>::new());
+    run_calls(
+        &cases,
+        |case| generate_case(&paths, case),
         // Rewritten after each call so a crash keeps what was already paid for.
-        write_json(&output_path, &results);
-        if stop {
+        |results| write_json(&output_path, &results),
+    );
+}
+
+/// A prompt cache entry is only readable once a response has begun, so concurrent
+/// first calls would each pay to write it. Calls stay one at a time until one gets a
+/// response. A wrong model starts no further call, and the ones in flight finish.
+fn run_calls<C: Sync>(
+    cases: &[C],
+    generate: impl Fn(&C) -> CaseResult + Sync,
+    save: impl Fn(Vec<&CaseResult>) + Sync,
+) {
+    let results = Mutex::new(cases.iter().map(|_| None).collect::<Vec<_>>());
+    let stop = AtomicBool::new(false);
+    let call = |index: usize| {
+        let result = generate(&cases[index]);
+        let responded = result.usage.is_some();
+        if result.wrong_model {
+            stop.store(true, Ordering::SeqCst);
+        }
+        let mut results = results.lock().expect("no call panicked while saving");
+        results[index] = Some(result);
+        save(results.iter().flatten().collect());
+        responded
+    };
+
+    let mut first_concurrent = 0;
+    while first_concurrent < cases.len() && !stop.load(Ordering::SeqCst) {
+        first_concurrent += 1;
+        if call(first_concurrent - 1) {
             break;
         }
     }
-    write_json(&output_path, &results);
+
+    let next = AtomicUsize::new(first_concurrent);
+    thread::scope(|scope| {
+        for _ in 0..MAX_CONCURRENT_CALLS {
+            scope.spawn(|| {
+                while !stop.load(Ordering::SeqCst) {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    if index >= cases.len() {
+                        break;
+                    }
+                    call(index);
+                }
+            });
+        }
+    });
 }
 
 fn generate_case(paths: &AiPaths, case: &GenerateCase) -> CaseResult {
@@ -201,9 +245,16 @@ fn generate_case(paths: &AiPaths, case: &GenerateCase) -> CaseResult {
         .as_deref()
         .filter(|model| !model.is_empty())
         .expect("every eval request names its model");
-    let before = ledger_len(paths);
-    let reply = tauri::async_runtime::block_on(generate_tests(API_BASE_URL, paths, &case.request));
-    let usage = last_usage(paths, before);
+    // Records from concurrent calls interleave in the app's ledger, so each call
+    // writes to its own to tie the usage to this case, then moves the record over.
+    let call_data = tempfile::tempdir().expect("create a ledger directory for the call");
+    let call_paths = AiPaths {
+        data: call_data.path().to_path_buf(),
+        ..paths.clone()
+    };
+    let reply =
+        tauri::async_runtime::block_on(generate_tests(API_BASE_URL, &call_paths, &case.request));
+    let usage = move_usage(call_data.path(), &paths.data);
     match reply {
         Ok(reply) => CaseResult {
             id: case.id.clone(),
@@ -228,16 +279,13 @@ fn same_model(served: &str, requested: &str) -> bool {
     served == requested || served.starts_with(&format!("{requested}-"))
 }
 
-fn ledger_len(paths: &AiPaths) -> usize {
-    ledger::read(&paths.data).map_or(0, |(records, _)| records.len())
-}
-
-fn last_usage(paths: &AiPaths, before: usize) -> Option<CaseUsage> {
-    let (records, _) = ledger::read(&paths.data).ok()?;
-    if records.len() <= before {
-        return None;
-    }
+fn move_usage(call_data: &Path, app_data: &Path) -> Option<CaseUsage> {
+    let (records, _) = ledger::read(call_data).ok()?;
     let record = records.last()?;
+    // A paid-for result outweighs a missing ledger line, as in the app.
+    if let Err(error) = ledger::append(app_data, record) {
+        eprintln!("Could not record AI usage: {error}");
+    }
     Some(CaseUsage {
         input_tokens: record.input_tokens,
         output_tokens: record.output_tokens,
@@ -248,4 +296,120 @@ fn last_usage(paths: &AiPaths, before: usize) -> Option<CaseUsage> {
             .as_ref()
             .and_then(|prices| ledger::cost_usd(record, prices)),
     })
+}
+
+/// Records each call's start and end, for checking how calls overlap.
+#[derive(Default)]
+struct CallLog {
+    events: Mutex<Vec<(usize, bool)>>,
+}
+
+impl CallLog {
+    fn call(&self, case: usize, result: CaseResult) -> CaseResult {
+        self.events.lock().unwrap().push((case, true));
+        thread::sleep(std::time::Duration::from_millis(20));
+        self.events.lock().unwrap().push((case, false));
+        result
+    }
+
+    fn events(&self) -> Vec<(usize, bool)> {
+        self.events.lock().unwrap().clone()
+    }
+
+    fn peak(&self) -> usize {
+        let mut running = 0usize;
+        let mut peak = 0;
+        for (_, started) in self.events() {
+            running = if started { running + 1 } else { running - 1 };
+            peak = peak.max(running);
+        }
+        peak
+    }
+}
+
+fn answered(case: usize) -> CaseResult {
+    CaseResult {
+        id: case.to_string(),
+        usage: Some(CaseUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+        }),
+        ..CaseResult::default()
+    }
+}
+
+#[test]
+fn run_calls_finishes_the_first_call_before_the_rest_and_keeps_case_order() {
+    let cases: Vec<usize> = (0..18).collect();
+    let log = CallLog::default();
+    let saved = Mutex::new(Vec::new());
+    run_calls(
+        &cases,
+        |case| log.call(*case, answered(*case)),
+        |results| {
+            *saved.lock().unwrap() = results.iter().map(|result| result.id.clone()).collect();
+        },
+    );
+
+    assert_eq!(log.events()[..2], [(0, true), (0, false)]);
+    assert!(log.peak() > 1 && log.peak() <= MAX_CONCURRENT_CALLS);
+    let expected: Vec<String> = cases.iter().map(ToString::to_string).collect();
+    assert_eq!(*saved.lock().unwrap(), expected);
+}
+
+#[test]
+fn run_calls_stays_sequential_until_a_call_gets_a_response() {
+    let cases: Vec<usize> = (0..8).collect();
+    let log = CallLog::default();
+    run_calls(
+        &cases,
+        |case| {
+            log.call(
+                *case,
+                if *case < 2 {
+                    CaseResult::default()
+                } else {
+                    answered(*case)
+                },
+            )
+        },
+        |_| {},
+    );
+
+    assert_eq!(
+        log.events()[..6],
+        [
+            (0, true),
+            (0, false),
+            (1, true),
+            (1, false),
+            (2, true),
+            (2, false)
+        ]
+    );
+    assert_eq!(log.events().len(), 16);
+}
+
+#[test]
+fn run_calls_starts_nothing_after_a_wrong_model() {
+    let cases: Vec<usize> = (0..18).collect();
+    let log = CallLog::default();
+    run_calls(
+        &cases,
+        |case| {
+            log.call(
+                *case,
+                CaseResult {
+                    wrong_model: true,
+                    ..answered(*case)
+                },
+            )
+        },
+        |_| {},
+    );
+
+    assert_eq!(log.events(), [(0, true), (0, false)]);
 }

@@ -34,6 +34,9 @@ const PROBLEMS_DIR = join(REPO_ROOT, 'eval/problems')
 const CARGO_TARGET_DIR = join(tmpdir(), 'leetcoder-prompt-eval-cargo')
 const GRADLE_TIMEOUT_MS = 5 * 60 * 1000
 const CARGO_TIMEOUT_MS = 2 * 60 * 60 * 1000
+// One daemon and one test JVM each. This machine runs under load and tests here have
+// timed out under load, so raise this with care.
+const MAX_GRADLE_PROJECTS = 4
 const TRIVIAL_STATEMENT = 'assertThat(1).isEqualTo(1);'
 
 interface ProcessResult {
@@ -91,6 +94,7 @@ interface PreparedCase {
   evalCase: EvalCase
   problem: FixtureProblem
   request: GenerateRequest
+  report: CaseReport
 }
 
 interface CaseReport {
@@ -187,8 +191,7 @@ function assertNativeStep(step: string, result: ProcessResult): void {
 }
 
 /** A fresh project holding the ps build and only one Java file, so the ps repo stays untouched. */
-async function createProject(root: string, psRepo: string): Promise<string> {
-  const project = join(root, 'project')
+async function createProject(project: string, psRepo: string): Promise<string> {
   await mkdir(project)
   await copyFile(join(psRepo, 'build.gradle'), join(project, 'build.gradle'))
   await copyFile(join(psRepo, 'settings.gradle'), join(project, 'settings.gradle'))
@@ -230,6 +233,35 @@ async function runTest(project: string, javaHome: string, fqcn: string, source: 
     output: `${result.stdout}\n${result.stderr}`,
     junitXml,
   })
+}
+
+/**
+ * Runs `work` over `items`, with each project holding one item at a time so a compile
+ * error stays in its own project. Results keep the order of `items`. A rejection waits
+ * for the running items, because the caller removes the projects next.
+ */
+async function mapInProjects<T, R>(
+  items: readonly T[],
+  projects: readonly string[],
+  work: (item: T, project: string) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const settled = await Promise.allSettled(projects.map(async (project) => {
+    while (next < items.length) {
+      const index = next++
+      try {
+        results[index] = await work(items[index], project)
+      } catch (error) {
+        next = items.length
+        throw error
+      }
+    }
+  }))
+  for (const outcome of settled) {
+    if (outcome.status === 'rejected') throw outcome.reason
+  }
+  return results
 }
 
 /** Builds the request as `src/app/ai-controller.ts` does, over the source a new file would have. */
@@ -369,13 +401,14 @@ function printTable(reports: readonly CaseReport[], dry: boolean): void {
   const passed = reports.filter((report) => report.passed === true).length
   const failed = reports.filter((report) => report.passed === false).length
   const excluded = reports.filter((report) => report.passed === null).length
+  const short = reports.filter((report) => report.coverage.endsWith(' short')).length
   const totalCost = reports.reduce((total, report) => total + (report.usage?.costUsd ?? 0), 0)
   const totalIn = reports.reduce((total, report) => total + (report.usage?.inputTokens ?? 0), 0)
   const totalOut = reports.reduce((total, report) => total + (report.usage?.outputTokens ?? 0), 0)
   const totalWrite = reports.reduce((total, report) => total + (report.usage?.cacheWriteTokens ?? 0), 0)
   const totalRead = reports.reduce((total, report) => total + (report.usage?.cacheReadTokens ?? 0), 0)
   console.log(
-    `\nTotal: ${passed} passed, ${failed} failed, ${excluded} excluded; `
+    `\nTotal: ${passed} passed, ${failed} failed, ${excluded} excluded, ${short} short on coverage; `
     + `tokens ${totalIn}/${totalOut}; cache write ${totalWrite}, read ${totalRead}; `
     + `prompt ${totalIn + totalWrite + totalRead}; $${totalCost.toFixed(4)}`,
   )
@@ -420,8 +453,11 @@ it('scores the test generation prompt', async () => {
       await readFile(join(CACHE_DIR, 'ps-metadata.json'), 'utf8'),
     ) as PsLibraryMetadata
 
-    const project = await createProject(root, psRepo)
-    const prepared = new Map<string, PreparedCase>()
+    const projects = await Promise.all(
+      Array.from({ length: Math.min(MAX_GRADLE_PROJECTS, cases.length) }, (_, index) =>
+        createProject(join(root, `project-${index}`), psRepo)),
+    )
+    const candidates: PreparedCase[] = []
     for (const evalCase of cases) {
       const report = blankReport(evalCase)
       reports.push(report)
@@ -433,70 +469,75 @@ it('scores the test generation prompt', async () => {
       }
       const request = buildRequest(problem, metadata, evalCase.fqcn, model)
       report.requestChars = JSON.stringify(request).length
-
-      // Free, and before any call, so a broken case is never charged.
-      const baseline = await runTest(project, native.javaHome, evalCase.fqcn, evalCase.source)
-      if (baseline.kind !== 'pass') {
-        report.result = `excluded: baseline ${baseline.kind}`
-        report.details = baseline.details
-        if (baseline.kind === 'tool') {
-          toolErrors.push(`${evalCase.name} baseline: ${baseline.details.join(' ')}`)
-        }
-        continue
-      }
-      report.result = 'baseline ok'
-      console.log(`${evalCase.name}: baseline passed`)
-      prepared.set(evalCase.name, { evalCase, problem, request })
+      candidates.push({ evalCase, problem, request, report })
     }
 
+    // Free, and before any call, so a broken case is never charged.
+    const baselines = await mapInProjects(candidates, projects, async ({ evalCase }, project) => {
+      const baseline = await runTest(project, native.javaHome, evalCase.fqcn, evalCase.source)
+      if (baseline.kind === 'pass') console.log(`${evalCase.name}: baseline passed`)
+      return baseline
+    })
+    // Folded here so the case order, not the finishing order, sets the call order.
+    const prepared = candidates.filter(({ evalCase, report }, index) => {
+      const baseline = baselines[index]
+      if (baseline.kind === 'pass') {
+        report.result = 'baseline ok'
+        return true
+      }
+      report.result = `excluded: baseline ${baseline.kind}`
+      report.details = baseline.details
+      if (baseline.kind === 'tool') {
+        toolErrors.push(`${evalCase.name} baseline: ${baseline.details.join(' ')}`)
+      }
+      return false
+    })
+
     if (dry) {
-      for (const report of reports) {
-        const current = prepared.get(report.name)
-        if (!current) continue
-        const spliced = spliceStatements(current.evalCase.source, [TRIVIAL_STATEMENT], metadata)
+      const errors = await mapInProjects(prepared, projects, async ({ evalCase, report }, project) => {
+        const spliced = spliceStatements(evalCase.source, [TRIVIAL_STATEMENT], metadata)
         if (!spliced.ok) {
           report.result = `splice rejected: ${spliced.reason}`
           report.passed = false
-          toolErrors.push(`${report.name} splice: ${spliced.reason}`)
-          continue
+          return [`${report.name} splice: ${spliced.reason}`]
         }
-        const verdict = await runTest(project, native.javaHome, current.evalCase.fqcn, spliced.source)
+        const verdict = await runTest(project, native.javaHome, evalCase.fqcn, spliced.source)
         report.passed = verdict.kind === 'pass'
         report.result = verdict.kind === 'pass' ? 'baseline+splice+gradle ok' : `trivial ${verdict.kind}`
-        if (verdict.kind !== 'pass') {
-          report.details = verdict.details
-          toolErrors.push(`${report.name} trivial run: ${verdict.details.join(' ')}`)
-        }
         console.log(`${report.name}: ${report.result}`)
-      }
+        if (verdict.kind === 'pass') return []
+        report.details = verdict.details
+        return [`${report.name} trivial run: ${verdict.details.join(' ')}`]
+      })
+      toolErrors.push(...errors.flat())
     } else if (toolErrors.length === 0) {
       const generateInput = join(root, 'generate-input.json')
       // Kept in the ignored output directory, since these calls are paid for.
       const generateOutput = join(OUT_DIR, `${runName}.generate.json`)
       await writeFile(generateInput, JSON.stringify(
-        [...prepared.values()].map(({ evalCase, request }) => ({ id: evalCase.name, request })),
+        prepared.map(({ evalCase, request }) => ({ id: evalCase.name, request })),
       ))
-      console.log(`Generating ${prepared.size} cases with ${model}...`)
+      console.log(`Generating ${prepared.length} cases with ${model}...`)
       const generated = await runNativeStep('eval_generate', generateInput, generateOutput)
       if (generated.exitCode !== 0) {
         toolErrors.push(`eval_generate failed:\n${`${generated.stdout}\n${generated.stderr}`.slice(-2000)}`)
       }
       const results = JSON.parse(await readFile(generateOutput, 'utf8').catch(() => '[]')) as GenerateResult[]
       const byId = new Map(results.map((result) => [result.id, result]))
-      for (const report of reports) {
-        const current = prepared.get(report.name)
-        if (!current) continue
+      const errors = await mapInProjects(prepared, projects, async (current, project) => {
+        const { report } = current
         const result = byId.get(report.name)
         if (!result) {
           report.result = 'not called'
-          continue
+          return []
         }
         await scoreGenerated(current, result, report, project, native.javaHome, metadata)
         console.log(`${report.name}: ${report.result}`)
-        if (result.wrongModel) {
-          toolErrors.push(`${report.name}: wrong model, ${report.details.join(' ')} The run stopped.`)
-        }
-      }
+        return result.wrongModel
+          ? [`${report.name}: wrong model, ${report.details.join(' ')} The run stopped.`]
+          : []
+      })
+      toolErrors.push(...errors.flat())
     }
   } finally {
     await rm(root, { recursive: true, force: true })
