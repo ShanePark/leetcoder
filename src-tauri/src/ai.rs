@@ -14,6 +14,8 @@ mod prices;
 mod prompt;
 
 #[cfg(test)]
+mod eval;
+#[cfg(test)]
 mod tests;
 
 use claude::{ApiError, MessageUsage, ReplyOutcome};

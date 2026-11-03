@@ -450,6 +450,60 @@ Checks: `npm run typecheck`, `npm test`, `npm run build`, Rust format, test, and
 check with a temporary `CARGO_TARGET_DIR`, then `npm run rebuild`. A real API call
 needs the owner's key and is the only way to confirm the end-to-end flow.
 
+## Prompt eval
+
+`npm run eval:prompt` scores the prompt against about a dozen varied real problems
+from the owner's `ps` repository. It reuses the app's own code, so a pass means the
+app would succeed. It is separate from `npm test`, which stays free.
+
+**A real run spends money.** Each case is one real call through the app's
+`generate_tests`, with the app's key, model catalog, and prices, and it writes to the
+usage ledger on purpose. Calls are sequential with no retries. A served model that
+differs from the requested one stops the run.
+
+```bash
+EVAL_DRY=1 npm run eval:prompt
+EVAL_MODEL=<model id> npm run eval:prompt
+EVAL_MODEL=<model id> EVAL_CASES=146,133 npm run eval:prompt
+```
+
+`EVAL_DRY=1` makes no model call and never loads the key. It fetches the problems,
+checks the baselines, builds every request and prints its size, then splices one
+trivial statement into each case and runs it. `EVAL_PS_REPO` overrides the default
+`../ps`. The dry run counts as real LeetCode traffic, so the policy in `AGENTS.md`
+applies. Only uncached problems are fetched, 10 seconds apart, and the fetch stops
+at its first failure, with no retry. The baseline and splice checks still
+run without the problem text, but the run fails and a real run makes no call.
+
+Each case stops at its first failed stage:
+
+| Stage | Passes when |
+| --- | --- |
+| Baseline | The solved file passes its own `test` method, before any call. A failure excludes the case and costs nothing. |
+| Outcome | The reply is `ok`, not refused, truncated, or an error. |
+| Validate | `applyAiTestStatements` accepts the statements over the solved file with `test()` reset to the stub. |
+| Compile and run | The result compiles and `test` passes. A case with `expectEmpty` instead passes only with no statements, and skips validate and run. |
+| Coverage | A warning only: the calls or instances against the problem's `Example N` headings, like `3/3`. |
+
+The run fails only on a tool error or a wrong model. Model failures are data: the
+table prints them, and the details go to `eval/.out/<model>-<timestamp>.json`.
+
+The solved file goes in a throwaway Gradle project under the OS temp directory,
+with `--offline`, in `src/test/java`. The `ps` repository keeps its tests in the main
+source set, which the plain `test` task does not run, and it is never written to.
+`eval_fetch` does run the app's Ps library inspection there, which only touches
+Gradle's ignored directories.
+
+Problem text stays in the ignored `eval/.cache/`, because this repository is public.
+`eval/cases.ts` holds only numbers, paths, and labels. Delete `eval/.cache/` to fetch
+the problems and Ps signatures again. The native steps are ignored tests in
+`src-tauri/src/ai/eval.rs`, which do nothing unless the driver sets their input and
+output paths. They build in their own target directory, which can be removed with:
+
+```bash
+rm -rf "${TMPDIR:-/tmp}/leetcoder-prompt-eval-cargo"
+```
+
 ## Review log
 
 2026-11-03, four independent reviews against the first draft.

@@ -9,3 +9,7 @@ src-tauri/gen/
 .env
 .env.*
 !.env.example
+
+# Prompt eval problem text and results
+eval/.cache/
+eval/.out/

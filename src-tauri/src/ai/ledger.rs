@@ -115,7 +115,7 @@ fn class_cost(tokens: u64, price: Option<f64>) -> Option<f64> {
 
 /// The ledger is a user-writable file, so a stored price can be anything. A cost
 /// that is not a finite, non-negative amount counts as unpriced.
-fn cost_usd(record: &UsageRecord, prices: &Prices) -> Option<f64> {
+pub(super) fn cost_usd(record: &UsageRecord, prices: &Prices) -> Option<f64> {
     let cost = class_cost(record.input_tokens, Some(prices.input))?
         + class_cost(record.output_tokens, Some(prices.output))?
         + class_cost(record.cache_read_tokens, prices.cache_read)?
