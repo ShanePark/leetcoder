@@ -4,25 +4,35 @@
 //! `cargo test -- --ignored` can never spend money by accident.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{generate_tests, ledger, AiGenerateRequest, AiPaths, API_BASE_URL};
+use crate::leetcode::parse_problem_detail;
+use crate::models::DailyProblem;
 
 const APP_IDENTIFIER: &str = "com.shane.leetcoder";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FetchInput {
-    numbers: Vec<String>,
+struct PrepareInput {
+    fixtures: Vec<Fixture>,
     ps_repo: String,
     cache_dir: PathBuf,
 }
 
+#[derive(Deserialize)]
+struct Fixture {
+    name: String,
+    path: PathBuf,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct FetchOutput {
+struct PrepareOutput {
     java_home: PathBuf,
+    problems: BTreeMap<String, DailyProblem>,
     errors: Vec<String>,
 }
 
@@ -106,15 +116,26 @@ fn platform_dirs(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
     )
 }
 
-/// Free: inspects the Ps library once and finds a JDK. It sends no LeetCode request.
+/// Free: parses the fixtures as the app parses a real response, inspects the Ps
+/// library once, and finds a JDK. It sends no LeetCode request.
 #[test]
 #[ignore = "run by the prompt eval driver"]
-fn eval_fetch() {
+fn eval_prepare() {
     let Some((input_path, output_path)) = io_paths() else {
         return;
     };
-    let input: FetchInput = read_input(&input_path);
+    let input: PrepareInput = read_input(&input_path);
     let mut errors = Vec::new();
+
+    let mut problems = BTreeMap::new();
+    for fixture in &input.fixtures {
+        match parse_fixture(&fixture.path) {
+            Ok(problem) => {
+                problems.insert(fixture.name.clone(), problem);
+            }
+            Err(error) => errors.push(format!("{}: {error}", fixture.name)),
+        }
+    }
 
     let metadata_path = input.cache_dir.join("ps-metadata.json");
     if !metadata_path.exists() {
@@ -129,7 +150,23 @@ fn eval_fetch() {
     let java_home = crate::runner::discover_compatible_java()
         .expect("find a JDK compatible with the Gradle wrapper")
         .home;
-    write_json(&output_path, &FetchOutput { java_home, errors });
+    write_json(
+        &output_path,
+        &PrepareOutput {
+            java_home,
+            problems,
+            errors,
+        },
+    );
+}
+
+fn parse_fixture(path: &Path) -> Result<DailyProblem, String> {
+    let body = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let problem = parse_problem_detail(&body)?;
+    if problem.content.is_none() {
+        return Err("The fixture has no content.".to_string());
+    }
+    Ok(problem)
 }
 
 /// Paid: one real call per case through the app's own path, with no retries.

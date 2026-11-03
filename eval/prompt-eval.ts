@@ -1,9 +1,9 @@
-// Scores the test-generation prompt against real problems, reusing the app's own
+// Scores the test-generation prompt against invented problems, reusing the app's own
 // code so a pass means the app would succeed. See docs/ai-test-generation.md.
 import { java } from '@codemirror/lang-java'
 import { EditorState } from '@codemirror/state'
 import { spawn } from 'node:child_process'
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { expect, it } from 'vitest'
@@ -18,7 +18,6 @@ import {
 import { applyAiTestStatements, listJavaMethodHeaders } from '../src/editor/ai-tests'
 import { javaAutoImports } from '../src/editor/auto-import'
 import { mutableEditorView } from '../tests/frontend/editor/helpers'
-import { EVAL_CASES, type EvalCase } from './cases'
 import {
   classifyGradleRun,
   countExamples,
@@ -31,6 +30,7 @@ import {
 const REPO_ROOT = resolve(import.meta.dirname, '..')
 const CACHE_DIR = join(REPO_ROOT, 'eval/.cache')
 const OUT_DIR = join(REPO_ROOT, 'eval/.out')
+const PROBLEMS_DIR = join(REPO_ROOT, 'eval/problems')
 const CARGO_TARGET_DIR = join(tmpdir(), 'leetcoder-prompt-eval-cargo')
 const GRADLE_TIMEOUT_MS = 5 * 60 * 1000
 const CARGO_TIMEOUT_MS = 2 * 60 * 60 * 1000
@@ -43,10 +43,28 @@ interface ProcessResult {
   stderr: string
 }
 
+interface EvalCase {
+  name: string
+  /** The reference solution, whose `test` method asserts every example. */
+  source: string
+  fqcn: string
+  /** The model should return no statements, because no call can be written. */
+  expectEmpty: boolean
+}
+
+/** `eval_prepare` refuses a fixture with no content. */
+type FixtureProblem = DailyProblem & { content: string }
+
+interface PrepareOutput {
+  javaHome: string
+  problems: Record<string, FixtureProblem>
+  errors: string[]
+}
+
 interface GenerateRequest {
   selectedModelId: string | null
   problemTitle: string
-  problemContent: string | null
+  problemContent: string
   entryPoint: string | null
   javaSnippet: string | null
   methodHeaders: string[]
@@ -71,17 +89,12 @@ interface GenerateResult {
 
 interface PreparedCase {
   evalCase: EvalCase
-  source: string
-  fqcn: string
-  /** Null while the problem cannot be fetched. The free stages still run, and no call is made. */
-  problem: DailyProblem | null
-  request: GenerateRequest | null
+  problem: FixtureProblem
+  request: GenerateRequest
 }
 
 interface CaseReport {
-  number: string
-  category: string
-  psFile: string
+  name: string
   result: string
   passed: boolean | null
   details: string[]
@@ -90,6 +103,33 @@ interface CaseReport {
   statements: string[]
   usage: GenerateResult['usage']
   servedModel: string | null
+}
+
+/** Every directory under `eval/problems/` is a case: its name, fixture, and reference file. */
+async function discoverCases(): Promise<EvalCase[]> {
+  const entries = await readdir(PROBLEMS_DIR, { withFileTypes: true })
+  const names = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()
+  return Promise.all(names.map(readCase))
+}
+
+async function readCase(name: string): Promise<EvalCase> {
+  const directory = join(PROBLEMS_DIR, name)
+  const files = await readdir(directory)
+  const javaFiles = files.filter((file) => file.endsWith('.java'))
+  if (javaFiles.length !== 1) {
+    throw new Error(`${name}: expected one Java file, found ${javaFiles.length}.`)
+  }
+  const sourcePath = join(directory, javaFiles[0])
+  const source = await readFile(sourcePath, 'utf8')
+  const meta = files.includes('meta.json')
+    ? JSON.parse(await readFile(join(directory, 'meta.json'), 'utf8')) as { expectEmpty?: boolean }
+    : {}
+  return {
+    name,
+    source,
+    fqcn: fullyQualifiedClassName(source, sourcePath),
+    expectEmpty: meta.expectEmpty === true,
+  }
 }
 
 function run(
@@ -194,7 +234,7 @@ async function runTest(project: string, javaHome: string, fqcn: string, source: 
 
 /** Builds the request as `src/app/ai-controller.ts` does, over the source a new file would have. */
 function buildRequest(
-  problem: DailyProblem,
+  problem: FixtureProblem,
   metadata: PsLibraryMetadata,
   fqcn: string,
   selectedModelId: string | null,
@@ -207,7 +247,7 @@ function buildRequest(
   return {
     selectedModelId,
     problemTitle: problem.title,
-    problemContent: problem.content ?? null,
+    problemContent: problem.content,
     entryPoint: designProblem ? null : signature,
     javaSnippet,
     methodHeaders: listJavaMethodHeaders(newFile),
@@ -232,9 +272,7 @@ function spliceStatements(
 
 function blankReport(evalCase: EvalCase): CaseReport {
   return {
-    number: evalCase.number,
-    category: evalCase.category,
-    psFile: evalCase.psFile,
+    name: evalCase.name,
     result: '',
     passed: null,
     details: [],
@@ -247,8 +285,8 @@ function blankReport(evalCase: EvalCase): CaseReport {
 }
 
 function coverageOf(prepared: PreparedCase, statements: readonly string[]): string {
-  const examples = countExamples(prepared.problem?.content ?? '')
-  const scenarios = countScenarios(statements, prepared.request?.entryPoint ?? null, prepared.request?.javaSnippet ?? null)
+  const examples = countExamples(prepared.problem.content)
+  const scenarios = countScenarios(statements, prepared.request.entryPoint, prepared.request.javaSnippet)
   return `${scenarios}/${examples}${scenarios < examples ? ' short' : ''}`
 }
 
@@ -296,12 +334,12 @@ async function scoreGenerated(
   }
 
   report.coverage = coverageOf(prepared, generated.statements)
-  const spliced = spliceStatements(prepared.source, generated.statements, metadata)
+  const spliced = spliceStatements(prepared.evalCase.source, generated.statements, metadata)
   if (!spliced.ok) {
     fail(`rejected: ${spliced.reason}`)
     return
   }
-  const verdict = await runTest(project, javaHome, prepared.fqcn, spliced.source)
+  const verdict = await runTest(project, javaHome, prepared.evalCase.fqcn, spliced.source)
   if (verdict.kind === 'pass') {
     report.result = 'pass'
     report.passed = true
@@ -312,20 +350,19 @@ async function scoreGenerated(
 
 function printTable(reports: readonly CaseReport[], dry: boolean): void {
   const rows = reports.map((report) => [
-    `Q${report.number}`,
-    report.category,
+    report.name,
     report.result,
     dry ? (report.requestChars > 0 ? String(report.requestChars) : '-') : report.coverage,
     report.usage ? `${report.usage.inputTokens}/${report.usage.outputTokens}` : '-',
     report.usage?.costUsd != null ? `$${report.usage.costUsd.toFixed(4)}` : '-',
   ])
-  const header = ['case', 'category', 'result', dry ? 'request chars' : 'coverage', 'tokens in/out', 'cost']
+  const header = ['case', 'result', dry ? 'request chars' : 'coverage', 'tokens in/out', 'cost']
   const widths = header.map((title, column) => Math.max(title.length, ...rows.map((row) => row[column].length)))
   const line = (cells: readonly string[]): string =>
     cells.map((cell, column) => cell.padEnd(widths[column])).join('  ').trimEnd()
   console.log(['', line(header), line(widths.map((width) => '-'.repeat(width))), ...rows.map(line)].join('\n'))
   for (const report of reports.filter((candidate) => candidate.details.length > 0)) {
-    console.log(`\nQ${report.number} ${report.result}:\n  ${report.details.join('\n  ')}`)
+    console.log(`\n${report.name} ${report.result}:\n  ${report.details.join('\n  ')}`)
   }
   const passed = reports.filter((report) => report.passed === true).length
   const failed = reports.filter((report) => report.passed === false).length
@@ -345,8 +382,9 @@ it('scores the test generation prompt', async () => {
   if (!dry && !model) {
     throw new Error('Set EVAL_MODEL, or EVAL_DRY=1 for a run without model calls.')
   }
-  const wanted = process.env.EVAL_CASES?.split(',').map((number) => number.trim()).filter(Boolean)
-  const cases = wanted ? EVAL_CASES.filter((evalCase) => wanted.includes(evalCase.number)) : EVAL_CASES
+  const wanted = process.env.EVAL_CASES?.split(',').map((name) => name.trim()).filter(Boolean)
+  const allCases = await discoverCases()
+  const cases = wanted ? allCases.filter((evalCase) => wanted.includes(evalCase.name)) : allCases
   if (cases.length === 0) {
     throw new Error(`No case matches EVAL_CASES=${process.env.EVAL_CASES ?? ''}.`)
   }
@@ -359,17 +397,20 @@ it('scores the test generation prompt', async () => {
   const toolErrors: string[] = []
   const reports: CaseReport[] = []
   try {
-    console.log('Fetching problems and building the native steps...')
-    const fetchInput = join(root, 'fetch-input.json')
-    const fetchOutput = join(root, 'fetch-output.json')
-    await writeFile(fetchInput, JSON.stringify({
-      numbers: cases.map((evalCase) => evalCase.number),
+    console.log('Parsing fixtures and building the native steps...')
+    const prepareInput = join(root, 'prepare-input.json')
+    const prepareOutput = join(root, 'prepare-output.json')
+    await writeFile(prepareInput, JSON.stringify({
+      fixtures: cases.map((evalCase) => ({
+        name: evalCase.name,
+        path: join(PROBLEMS_DIR, evalCase.name, 'problem.json'),
+      })),
       psRepo,
       cacheDir: CACHE_DIR,
     }))
-    assertNativeStep('eval_fetch', await runNativeStep('eval_fetch', fetchInput, fetchOutput))
-    const fetched = JSON.parse(await readFile(fetchOutput, 'utf8')) as { javaHome: string; errors: string[] }
-    toolErrors.push(...fetched.errors)
+    assertNativeStep('eval_prepare', await runNativeStep('eval_prepare', prepareInput, prepareOutput))
+    const native = JSON.parse(await readFile(prepareOutput, 'utf8')) as PrepareOutput
+    toolErrors.push(...native.errors)
     const metadata = JSON.parse(
       await readFile(join(CACHE_DIR, 'ps-metadata.json'), 'utf8'),
     ) as PsLibraryMetadata
@@ -379,66 +420,56 @@ it('scores the test generation prompt', async () => {
     for (const evalCase of cases) {
       const report = blankReport(evalCase)
       reports.push(report)
-      const problemPath = join(CACHE_DIR, 'problems', `${evalCase.number}.json`)
-      const problem = JSON.parse(await readFile(problemPath, 'utf8').catch(() => 'null')) as DailyProblem | null
-      const shown = await run('git', ['-C', psRepo, 'show', `HEAD:${evalCase.psFile}`], { timeoutMs: 60_000 })
-      if (shown.exitCode !== 0) {
-        report.result = 'excluded: setup'
-        report.details = [shown.stderr.trim()]
-        toolErrors.push(`Q${evalCase.number}: ${report.details[0]}`)
+      const problem = native.problems[evalCase.name]
+      if (!problem) {
+        // The native step already reported why, as a tool error.
+        report.result = 'excluded: fixture'
         continue
       }
-      const fqcn = fullyQualifiedClassName(shown.stdout, evalCase.psFile)
-      const request = problem?.content ? buildRequest(problem, metadata, fqcn, model) : null
-      if (request) {
-        report.requestChars = JSON.stringify(request).length
-      } else {
-        report.details = ['The problem has no cached content.']
-        // A failed fetch is already reported once, not once per case.
-        if (fetched.errors.length === 0) toolErrors.push(`Q${evalCase.number}: ${report.details[0]}`)
-      }
+      const request = buildRequest(problem, metadata, evalCase.fqcn, model)
+      report.requestChars = JSON.stringify(request).length
 
       // Free, and before any call, so a broken case is never charged.
-      const baseline = await runTest(project, fetched.javaHome, fqcn, shown.stdout)
+      const baseline = await runTest(project, native.javaHome, evalCase.fqcn, evalCase.source)
       if (baseline.kind !== 'pass') {
         report.result = `excluded: baseline ${baseline.kind}`
         report.details = baseline.details
         if (baseline.kind === 'tool') {
-          toolErrors.push(`Q${evalCase.number} baseline: ${baseline.details.join(' ')}`)
+          toolErrors.push(`${evalCase.name} baseline: ${baseline.details.join(' ')}`)
         }
         continue
       }
       report.result = 'baseline ok'
-      console.log(`Q${evalCase.number}: baseline passed`)
-      prepared.set(evalCase.number, { evalCase, problem, source: shown.stdout, fqcn, request })
+      console.log(`${evalCase.name}: baseline passed`)
+      prepared.set(evalCase.name, { evalCase, problem, request })
     }
 
     if (dry) {
       for (const report of reports) {
-        const current = prepared.get(report.number)
+        const current = prepared.get(report.name)
         if (!current) continue
-        const spliced = spliceStatements(current.source, [TRIVIAL_STATEMENT], metadata)
+        const spliced = spliceStatements(current.evalCase.source, [TRIVIAL_STATEMENT], metadata)
         if (!spliced.ok) {
           report.result = `splice rejected: ${spliced.reason}`
           report.passed = false
-          toolErrors.push(`Q${report.number} splice: ${spliced.reason}`)
+          toolErrors.push(`${report.name} splice: ${spliced.reason}`)
           continue
         }
-        const verdict = await runTest(project, fetched.javaHome, current.fqcn, spliced.source)
+        const verdict = await runTest(project, native.javaHome, current.evalCase.fqcn, spliced.source)
         report.passed = verdict.kind === 'pass'
         report.result = verdict.kind === 'pass' ? 'baseline+splice+gradle ok' : `trivial ${verdict.kind}`
         if (verdict.kind !== 'pass') {
           report.details = verdict.details
-          toolErrors.push(`Q${report.number} trivial run: ${verdict.details.join(' ')}`)
+          toolErrors.push(`${report.name} trivial run: ${verdict.details.join(' ')}`)
         }
-        console.log(`Q${report.number}: ${report.result}`)
+        console.log(`${report.name}: ${report.result}`)
       }
     } else if (toolErrors.length === 0) {
       const generateInput = join(root, 'generate-input.json')
       // Kept in the ignored output directory, since these calls are paid for.
       const generateOutput = join(OUT_DIR, `${runName}.generate.json`)
       await writeFile(generateInput, JSON.stringify(
-        [...prepared.values()].map(({ evalCase, request }) => ({ id: evalCase.number, request })),
+        [...prepared.values()].map(({ evalCase, request }) => ({ id: evalCase.name, request })),
       ))
       console.log(`Generating ${prepared.size} cases with ${model}...`)
       const generated = await runNativeStep('eval_generate', generateInput, generateOutput)
@@ -448,17 +479,17 @@ it('scores the test generation prompt', async () => {
       const results = JSON.parse(await readFile(generateOutput, 'utf8').catch(() => '[]')) as GenerateResult[]
       const byId = new Map(results.map((result) => [result.id, result]))
       for (const report of reports) {
-        const current = prepared.get(report.number)
+        const current = prepared.get(report.name)
         if (!current) continue
-        const result = byId.get(report.number)
+        const result = byId.get(report.name)
         if (!result) {
           report.result = 'not called'
           continue
         }
-        await scoreGenerated(current, result, report, project, fetched.javaHome, metadata)
-        console.log(`Q${report.number}: ${report.result}`)
+        await scoreGenerated(current, result, report, project, native.javaHome, metadata)
+        console.log(`${report.name}: ${report.result}`)
         if (result.wrongModel) {
-          toolErrors.push(`Q${report.number}: wrong model, ${report.details.join(' ')} The run stopped.`)
+          toolErrors.push(`${report.name}: wrong model, ${report.details.join(' ')} The run stopped.`)
         }
       }
     }

@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90013",
+      "title": "Locate the Lone Deposit",
+      "titleSlug": "locate-the-lone-deposit",
+      "difficulty": "Medium",
+      "content": "<p><em>(This problem is an <strong>interactive problem</strong>.)</em></p>\n\n<p>A bank keeps a sealed ledger, an array of non-negative integers in which exactly one entry is non-zero. You cannot read the ledger directly. You may only use the <code>SealedLedger</code> interface, which the judge implements:</p>\n\n<ul>\n\t<li><code>SealedLedger.size()</code> returns the number of entries.</li>\n\t<li><code>SealedLedger.rangeSum(from, to)</code> returns the sum of the entries from index <code>from</code> to index <code>to</code>, both inclusive.</li>\n</ul>\n\n<p>Return <em>the index of the non-zero entry</em>. Submissions making more than <code>40</code> calls to <code>rangeSum</code> will be judged <em>Wrong Answer</em>.</p>\n\n<p>The examples show the sealed array for clarity. Your code receives only the interface.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> ledger = [0,0,7,0]\n<strong>Output:</strong> 2\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> ledger = [5]\n<strong>Output:</strong> 0\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> ledger = [0,3,0,0,0,0]\n<strong>Output:</strong> 1\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= ledger.length &lt;= 10<sup>6</sup></code></li>\n\t<li><code>0 &lt;= ledger[i] &lt;= 10<sup>9</sup></code></li>\n\t<li>Exactly one entry of <code>ledger</code> is non-zero.</li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "/**\n * // This is the SealedLedger's API interface.\n * // You should not implement it, or speculate about its implementation\n * interface SealedLedger {\n *     public int size();\n *     public long rangeSum(int from, int to);\n * }\n */\n\nclass Solution {\n    public int locateDeposit(SealedLedger ledger) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

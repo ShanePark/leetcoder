@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90010",
+      "title": "Busiest Hub in the Network",
+      "titleSlug": "busiest-hub-in-the-network",
+      "difficulty": "Medium",
+      "content": "<p>You are given a reference to a node in a connected undirected network. Each node holds a value and a list of the nodes it links to.</p>\n\n<p>Return <em>the node with the most links</em>. If several nodes tie, return the one with the smallest value.</p>\n\n<p><strong>Test case format:</strong></p>\n\n<p>For simplicity, each node&#39;s value equals its index, starting from 1. The network is shown in the examples as an adjacency list, where <code>adjList[i]</code> holds the values of the nodes linked to node <code>i + 1</code>. The given node is always the one with value <code>1</code>. The output is the value of the returned node.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> adjList = [[2,3,4],[1],[1],[1]]\n<strong>Output:</strong> 1\n<strong>Explanation:</strong> Node 1 has three links and the others have one each.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> adjList = [[2],[1,3],[2,4,5],[3],[3]]\n<strong>Output:</strong> 3\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> adjList = [[2],[1]]\n<strong>Output:</strong> 1\n<strong>Explanation:</strong> Both nodes have one link, so the smaller value wins.\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li>The number of nodes is in the range <code>[2, 100]</code>.</li>\n\t<li><code>Node.val</code> is unique for each node.</li>\n\t<li>There are no repeated links and no self-links.</li>\n\t<li>Every node can be reached from the given node.</li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "/*\n// Definition for a Node.\nclass Node {\n    public int val;\n    public List<Node> links;\n    public Node() {\n        val = 0;\n        links = new ArrayList<Node>();\n    }\n    public Node(int _val) {\n        val = _val;\n        links = new ArrayList<Node>();\n    }\n    public Node(int _val, ArrayList<Node> _links) {\n        val = _val;\n        links = _links;\n    }\n}\n*/\n\nclass Solution {\n    public Node busiestHub(Node start) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

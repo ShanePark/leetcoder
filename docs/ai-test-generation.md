@@ -454,9 +454,9 @@ needs the owner's key and is the only way to confirm the end-to-end flow.
 
 ## Prompt eval
 
-`npm run eval:prompt` scores the prompt against about a dozen varied real problems
-from the owner's `ps` repository. It reuses the app's own code, so a pass means the
-app would succeed. It is separate from `npm test`, which stays free.
+`npm run eval:prompt` scores the prompt against about a dozen invented problems, one
+per problem shape, committed under `eval/problems/`. It reuses the app's own code, so
+a pass means the app would succeed. It is separate from `npm test`, which stays free.
 
 **A real run spends money.** Each case is one real call through the app's
 `generate_tests`, with the app's key, model catalog, and prices, and it writes to the
@@ -466,41 +466,72 @@ differs from the requested one stops the run.
 ```bash
 EVAL_DRY=1 npm run eval:prompt
 EVAL_MODEL=<model id> npm run eval:prompt
-EVAL_MODEL=<model id> EVAL_CASES=146,133 npm run eval:prompt
+EVAL_MODEL=<model id> EVAL_CASES=design-coat-check,node-graph-busiest-hub npm run eval:prompt
 ```
 
 `EVAL_DRY=1` makes no model call and never loads the key. It checks the baselines,
 builds every request and prints its size, then splices one trivial statement into
-each case and runs it. `EVAL_PS_REPO` overrides the default `../ps`. The eval sends
-no LeetCode request and reads problem text only from `eval/.cache/problems/`. The
-baseline and splice checks still run without the problem text, but the run fails
-and a real run makes no call.
+each case and runs it. `EVAL_CASES` takes case names. `EVAL_PS_REPO` overrides the
+default `../ps`. Nothing in the eval sends a LeetCode request.
 
 Each case stops at its first failed stage:
 
 | Stage | Passes when |
 | --- | --- |
-| Baseline | The solved file passes its own `test` method, before any call. A failure excludes the case and costs nothing. |
+| Baseline | The reference file passes its own `test` method, before any call. A failure excludes the case and costs nothing. |
 | Outcome | The reply is `ok`, not refused, truncated, or an error. |
-| Validate | `applyAiTestStatements` accepts the statements over the solved file with `test()` reset to the stub. |
+| Validate | `applyAiTestStatements` accepts the statements over the reference file with `test()` reset to the stub. |
 | Compile and run | The result compiles and `test` passes. A case with `expectEmpty` instead passes only with no statements, and skips validate and run. |
 | Coverage | A warning only: the calls or instances against the problem's `Example N` headings, like `3/3`. |
 
-The run fails only on a tool error or a wrong model. Model failures are data: the
-table prints them, and the details go to `eval/.out/<model>-<timestamp>.json`.
+The run fails only on a tool error or a wrong model, and a tool error found before the
+calls means no call is made. A fixture that does not parse, or has no content, is a
+tool error. Model failures are data: the table prints them, and the details go to
+`eval/.out/<model>-<timestamp>.json`.
 
-The solved file goes in a throwaway Gradle project under the OS temp directory,
-with `--offline`, in `src/test/java`. The `ps` repository keeps its tests in the main
-source set, which the plain `test` task does not run, and it is never written to.
-`eval_fetch` does run the app's Ps library inspection there, which only touches
-Gradle's ignored directories.
+### Cases
 
-Problem text stays in the ignored `eval/.cache/`, because this repository is public.
-`eval/cases.ts` holds only numbers, paths, and labels. Delete
-`eval/.cache/ps-metadata.json` to inspect the Ps signatures again. Nothing fetches
-the cached problems, so deleting them loses them. The native steps are ignored tests in
-`src-tauri/src/ai/eval.rs`, which do nothing unless the driver sets their input and
-output paths. They build in their own target directory, which can be removed with:
+Each directory under `eval/problems/` is a case, and its name is the case's name:
+
+- `problem.json` is LeetCode's detail response, with `content` as HTML in the usual
+  form. `eval_prepare` parses it with `parse_problem_detail`, so the eval's input takes
+  the same path as real data.
+- One reference Java file, `Q<number><Name>.java` with a `package` line, holds a correct
+  solution and a filled `test()` that asserts every example. It plays the part of a
+  solved file: the baseline runs it first, so an example that disagrees with the
+  solution is caught before any money is spent.
+- `meta.json`, only for a case that expects no statements: `{"expectEmpty": true}`.
+
+Every problem is invented: the title, story, signature, and examples look like a
+LeetCode problem but are not one, and only the response form is kept. The point is
+whether the prompt writes proper tests for such a problem, which takes no real problem
+text and no request. Real problem text must never be added, because this repository
+is public.
+
+To add a case:
+
+1. Pick a shape the cases do not cover yet, and write a new problem for it. Avoid real
+   titles and slugs.
+2. Take the next unused `questionFrontendId` from 90001 up, outside the real range.
+3. Write `problem.json`, with two or three examples small enough to compute by hand.
+   Use `Example N:` headings, since coverage counts them.
+4. Write the reference file with the class name the app would give it, and assert every
+   example in `test()`. If the examples need an API the platform provides, add a
+   stand-in to the reference file and set `expectEmpty`.
+5. Run `EVAL_DRY=1 EVAL_CASES=<name> npm run eval:prompt`. It must reach
+   `baseline+splice+gradle ok`.
+
+### Running
+
+The reference file goes in a throwaway Gradle project under the OS temp directory,
+with `--offline`, in `src/test/java`. The `ps` repository supplies only the Gradle build
+files and the library metadata, and it is never written to. `eval_prepare` does run the
+app's Ps library inspection there, which only touches Gradle's ignored directories.
+
+Delete `eval/.cache/ps-metadata.json` to inspect the Ps signatures again. The native
+steps are ignored tests in `src-tauri/src/ai/eval.rs`, which do nothing unless the
+driver sets their input and output paths. They build in their own target directory,
+which can be removed with:
 
 ```bash
 rm -rf "${TMPDIR:-/tmp}/leetcoder-prompt-eval-cargo"

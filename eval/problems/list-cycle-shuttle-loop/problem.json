@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90008",
+      "title": "Stops on the Shuttle Loop",
+      "titleSlug": "stops-on-the-shuttle-loop",
+      "difficulty": "Easy",
+      "content": "<p>A shuttle route is a singly linked list of stops. Some routes end at the last stop, and others send the shuttle from the last stop back to an earlier one, so it goes round that part of the route forever.</p>\n\n<p>In the examples, <code>pos</code> is the index of the stop that the last stop&#39;s <code>next</code> pointer connects to, or <code>-1</code> if the route ends. <code>pos</code> is <strong>not passed as a parameter</strong>.</p>\n\n<p>Given the <code>head</code> of the route, return <em>the number of stops in the loop</em>, or <code>0</code> if the route has no loop.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> head = [4,8,15,16,23], pos = 2\n<strong>Output:</strong> 3\n<strong>Explanation:</strong> The stops at indices 2, 3, and 4 form the loop.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> head = [1,2], pos = 0\n<strong>Output:</strong> 2\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> head = [9], pos = -1\n<strong>Output:</strong> 0\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li>The number of stops is in the range <code>[1, 10<sup>4</sup>]</code>.</li>\n\t<li><code>-10<sup>5</sup> &lt;= Node.val &lt;= 10<sup>5</sup></code></li>\n\t<li><code>pos</code> is <code>-1</code> or a valid index in the list.</li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "/**\n * Definition for singly-linked list.\n * public class ListNode {\n *     int val;\n *     ListNode next;\n *     ListNode() {}\n *     ListNode(int val) { this.val = val; }\n *     ListNode(int val, ListNode next) { this.val = val; this.next = next; }\n * }\n */\nclass Solution {\n    public int loopStops(ListNode head) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

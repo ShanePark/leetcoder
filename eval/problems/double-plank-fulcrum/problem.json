@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90001",
+      "title": "Fulcrum of the Plank",
+      "titleSlug": "fulcrum-of-the-plank",
+      "difficulty": "Easy",
+      "content": "<p>A weightless plank lies along a number line. You are given two integer arrays <code>positions</code> and <code>weights</code> of the same length, where a load of <code>weights[i]</code> kilograms rests at coordinate <code>positions[i]</code>.</p>\n\n<p>Return <em>the coordinate at which a fulcrum keeps the plank level</em>, which is the sum of <code>positions[i] * weights[i]</code> divided by the sum of <code>weights[i]</code>. Answers within <code>10<sup>-5</sup></code> of the actual answer will be accepted.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> positions = [0,4], weights = [3,1]\n<strong>Output:</strong> 1.00000\n<strong>Explanation:</strong> The weighted sum is 0 * 3 + 4 * 1 = 4 and the total weight is 4, so the fulcrum sits at 4 / 4 = 1.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> positions = [1,2,6], weights = [2,2,1]\n<strong>Output:</strong> 2.40000\n<strong>Explanation:</strong> The weighted sum is 2 + 4 + 6 = 12 and the total weight is 5.\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> positions = [-2,3,7], weights = [1,1,2]\n<strong>Output:</strong> 3.75000\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= positions.length == weights.length &lt;= 10<sup>4</sup></code></li>\n\t<li><code>-10<sup>4</sup> &lt;= positions[i] &lt;= 10<sup>4</sup></code></li>\n\t<li><code>1 &lt;= weights[i] &lt;= 100</code></li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class Solution {\n    public double fulcrumPosition(int[] positions, int[] weights) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90004",
+      "title": "Stackable Crate Pairs",
+      "titleSlug": "stackable-crate-pairs",
+      "difficulty": "Medium",
+      "content": "<p>You are given an array <code>sizes</code> of <strong>distinct</strong> positive integers, one per crate. A crate of size <code>a</code> can carry a crate of size <code>b</code> when <code>a &lt; b</code> and <code>b</code> is a multiple of <code>a</code>.</p>\n\n<p>Return <em>every pair </em><code>[a, b]</code><em> that can be stacked this way</em>. Return the pairs in <strong>any order</strong>, with the smaller size first inside each pair.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> sizes = [2,3,6]\n<strong>Output:</strong> [[3,6],[2,6]]\n<strong>Explanation:</strong> 6 is a multiple of both 2 and 3, and 3 is not a multiple of 2.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> sizes = [5,7]\n<strong>Output:</strong> []\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> sizes = [8,1,4]\n<strong>Output:</strong> [[4,8],[1,8],[1,4]]\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= sizes.length &lt;= 500</code></li>\n\t<li><code>1 &lt;= sizes[i] &lt;= 10<sup>6</sup></code></li>\n\t<li>All the values of <code>sizes</code> are <strong>unique</strong>.</li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class Solution {\n    public List<List<Integer>> stackablePairs(int[] sizes) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}
