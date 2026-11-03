@@ -29,7 +29,7 @@ code, and OAuth scaffolding.
 | --- | --- | --- |
 | D1 | Store the API key in a file with mode 0600 in the app config directory. | No new dependency and no keychain prompts after rebuilds. Accepted risk: the file is not encrypted, so other processes of the same user and backups can read it. |
 | D2 | Usage comes from an in-app ledger only, with a link to the Console for billed totals and balance. | Usage and cost APIs need an admin credential and are unavailable to individual accounts. |
-| D3 | The newest model of each line is selectable in settings. With no explicit choice the app uses the newest Sonnet, currently Sonnet 5.5, and follows new releases. An explicit choice stays pinned, even after a newer version leaves it out of the picker. | Requested by the owner, who first asked for every model and narrowed this after seeing the 13-entry list. |
+| D3 | The newest model of each line is selectable in settings. With no explicit choice the app uses the newest Haiku, currently Haiku 5.5, and follows new releases. An explicit choice stays pinned, even after a newer version leaves it out of the picker. | Requested by the owner, who first asked for every model and narrowed this after seeing the 13-entry list, then moved the default from Sonnet to Haiku because this task needs little inference. |
 | D4 | The button only fills a bare stub. Anything else gets a message and no API call. | Cannot destroy written tests or spend money by accident. Undo restores the stub, so regenerating still works. |
 | D5 | The button follows the open file, not the displayed problem. | The header can show problem A while file B is open. |
 | D6 | No model IDs or prices are hardcoded in the app. | Both change over time. Requested by the owner. |
@@ -126,7 +126,7 @@ so `models.rs` and `commands.rs` stay untouched and `lib.rs` needs one block.
 | Usage ledger | Native | `ai-usage.jsonl` in the data directory |
 | Model and price caches | Native | `ai-models-anthropic.json` and `ai-prices.json` in the cache directory |
 | Selected model | Frontend | `localStorage` through the injected `storage`, provider-scoped key, passed as an argument |
-| Default and pin resolution | Native | One pure function returning the served model and a fell-back flag; the Sonnet-line rule stays in `claude.rs` |
+| Default and pin resolution | Native | One pure function returning the served model and a fell-back flag; the default-line rule stays in `claude.rs` |
 | In-progress state | Frontend controller | Not `state.busy` |
 
 - `src-tauri/src/ai.rs` plus `ai/claude.rs`, `ai/prices.rs`, `ai/ledger.rs`,
@@ -356,11 +356,11 @@ List models that support structured output, marking deprecated ones. The picker
 offers only the newest model of each `line`, preferring active ones, because the
 catalog keeps every older version of a line. An older model stays offered while it
 is the pin, and a model with a null `line` is always offered. The default
-is the newest active `sonnet` model, excluding entries with a null `line` or null
+is the newest active `haiku` model, excluding entries with a null `line` or null
 `capabilities`, breaking `created_at` ties (it may be epoch) by list order. If a
 pinned model leaves a complete list, use the default and show a notice. On 400,
 403, or 404 for a model, refresh once and report the model by name; never switch to
-another line automatically. If no Sonnet exists, ask the user to choose.
+another line automatically. If no Haiku exists, ask the user to choose.
 
 ### Usage ledger
 
@@ -403,7 +403,7 @@ another line automatically. If no Sonnet exists, ask the user to choose.
   back.
 - All whitespace in a pasted key is removed, since keys never contain any.
 - A link beside the key label opens the provider's key page.
-- First model option: "Default (newest Sonnet)", naming the model it resolves to.
+- First model option: "Default (newest Haiku)", naming the model it resolves to.
 - Usage has Day and Week tabs with 14 and 8 local-time buckets, and weeks
   start on Monday. The tab's request replaces the shown data only when it responds.
   A headline shows the selected bucket's cost and counts, a bar chart of cost per

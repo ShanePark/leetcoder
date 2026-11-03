@@ -51,7 +51,7 @@ export interface LlmModelOption {
   label: string
 }
 
-const DEFAULT_MODEL_LABEL = 'Default (newest Sonnet)'
+const DEFAULT_MODEL_LABEL = 'Default (newest Haiku)'
 
 function requiredElement<T extends HTMLElement>(root: HTMLElement, selector: string): T {
   const match = root.querySelector<T>(selector)
@@ -166,7 +166,7 @@ function llmModelNotes(model: LlmModelsViewModel): LlmMessage[] {
       text: `${selectedModelId} is no longer in the model list. The default is used until you choose another model.`,
     })
   } else if (selectedModelId === null && list.defaultModelId === null) {
-    notes.push({ tone: 'warning', text: 'No Sonnet model is available. Choose a model to generate tests.' })
+    notes.push({ tone: 'warning', text: 'No Haiku model is available. Choose a model to generate tests.' })
   }
   return notes
 }

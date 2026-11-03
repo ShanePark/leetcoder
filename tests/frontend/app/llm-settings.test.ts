@@ -200,10 +200,10 @@ function usageOf(totals: AiUsageTotals): AiUsageSummary {
 const modelList: AiModelList = {
   models: [
     { id: 'model-opus', displayName: 'Opus Name', deprecated: false, superseded: false },
-    { id: 'model-sonnet', displayName: 'Sonnet Name', deprecated: false, superseded: false },
+    { id: 'model-haiku', displayName: 'Haiku Name', deprecated: false, superseded: false },
     { id: 'model-old', displayName: 'Old Name', deprecated: true, superseded: false },
   ],
-  defaultModelId: 'model-sonnet',
+  defaultModelId: 'model-haiku',
   fetchedAt: Date.UTC(2026, 10, 3, 12),
   error: null,
 }
@@ -661,7 +661,7 @@ describe('LLM key removal', () => {
     expect(el('#llm-clear-key').hidden).toBe(true)
     expect(el('#llm-model-select').disabled).toBe(true)
     expect(el('#llm-model-notes').text()).toContain('Add a key to load models.')
-    expect(optionLabels(harness)).toEqual(['Default (newest Sonnet)', 'model-opus'])
+    expect(optionLabels(harness)).toEqual(['Default (newest Haiku)', 'model-opus'])
     expect(storage.getItem(LLM_MODEL_STORAGE_KEY)).toBe('model-opus')
     expect(el('#llm-key-entry').hidden).toBe(false)
     expect(harness.root.ownerDocument.activeElement).toBe(harness.input)
@@ -757,7 +757,7 @@ describe('LLM stale responses and re-renders', () => {
     list.resolve(modelList)
     await settle()
 
-    expect(optionLabels(harness)).toEqual(['Default (newest Sonnet)'])
+    expect(optionLabels(harness)).toEqual(['Default (newest Haiku)'])
     expect(harness.el('#llm-model-notes').text()).toContain('Add a key to load models.')
   })
 
@@ -910,9 +910,9 @@ describe('LLM model selection', () => {
     const harness = await activated(configuredBackend())
 
     expect(optionLabels(harness)).toEqual([
-      'Default (newest Sonnet): Sonnet Name',
+      'Default (newest Haiku): Haiku Name',
       'Opus Name',
-      'Sonnet Name',
+      'Haiku Name',
       'Old Name (deprecated)',
     ])
     expect(harness.el('#llm-model-select').value).toBe('')
@@ -990,7 +990,7 @@ describe('LLM model selection', () => {
     })
     const harness = await activated(backend, storage)
 
-    expect(optionLabels(harness)).toEqual(['Default (newest Sonnet)', 'model-opus'])
+    expect(optionLabels(harness)).toEqual(['Default (newest Haiku)', 'model-opus'])
     expect(harness.el('#llm-model-select').value).toBe('model-opus')
     expect(harness.el('#llm-model-notes').text()).toBe('Could not load the model list: provider unavailable')
     expect(harness.el('#llm-refresh-models').textContent).toBe('Retry')
@@ -1032,8 +1032,8 @@ describe('LLM model selection', () => {
     backend.aiListModels.mockResolvedValue({ ...modelList, defaultModelId: null })
     const harness = await activated(backend)
 
-    expect(optionLabels(harness)[0]).toBe('Default (newest Sonnet)')
-    expect(harness.el('#llm-model-notes').text()).toBe('No Sonnet model is available. Choose a model to generate tests.')
+    expect(optionLabels(harness)[0]).toBe('Default (newest Haiku)')
+    expect(harness.el('#llm-model-notes').text()).toBe('No Haiku model is available. Choose a model to generate tests.')
   })
 
   it('does not rebuild unchanged options, which would close an open dropdown', async () => {
@@ -1182,7 +1182,7 @@ describe('LLM usage', () => {
   const today = new Date(2026, 9, 28).getTime()
   const yesterday = new Date(2026, 9, 27).getTime()
   const totals = (values: Partial<AiUsageTotals>): AiUsageTotals => ({ ...emptyTotals, ...values })
-  const sonnet = totals({ requests: 1, inputTokens: 100, outputTokens: 10, costUsd: 0.5 })
+  const haiku = totals({ requests: 1, inputTokens: 100, outputTokens: 10, costUsd: 0.5 })
   const opus = totals({ requests: 2, inputTokens: 5663, outputTokens: 224, costUsd: 1.5 })
 
   /** Yesterday used one model, today two, and earlier days nothing. */
@@ -1193,7 +1193,7 @@ describe('LLM usage', () => {
           return {
             startMs,
             totals: totals({ requests: 3, inputTokens: 5763, outputTokens: 234, costUsd: 2 }),
-            perModel: [{ model: 'model-sonnet', totals: sonnet }, { model: 'model-opus', totals: opus }],
+            perModel: [{ model: 'model-haiku', totals: haiku }, { model: 'model-opus', totals: opus }],
           }
         }
         if (startMs === yesterday) {
@@ -1355,12 +1355,12 @@ describe('LLM usage', () => {
     const list = deferred<AiModelList>()
     backend.aiListModels.mockReturnValueOnce(list.promise)
     const harness = await withDayUsage(backend)
-    expect(modelRows(harness)).toEqual(['model-opus 2 requests $1.50', 'model-sonnet 1 request $0.5000'])
+    expect(modelRows(harness)).toEqual(['model-opus 2 requests $1.50', 'model-haiku 1 request $0.5000'])
 
     list.resolve(modelList)
     await settle()
 
-    expect(modelRows(harness)).toEqual(['Opus Name 2 requests $1.50', 'Sonnet Name 1 request $0.5000'])
+    expect(modelRows(harness)).toEqual(['Opus Name 2 requests $1.50', 'Haiku Name 1 request $0.5000'])
     const shares = part(harness, 'llm-usage-models').children
       .map((row) => row.children[1].children[0].style.width)
     expect(shares).toEqual(['75%', '25%'])

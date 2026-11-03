@@ -153,9 +153,9 @@ fn models_page(models: &[Value], has_more: bool, last_id: Option<&str>) -> Strin
     )
 }
 
-fn sonnet_catalog() -> String {
+fn haiku_catalog() -> String {
     models_page(
-        &[api_model("model-a", Some("sonnet"), "2026-09-01T00:00:00Z")],
+        &[api_model("model-a", Some("haiku"), "2026-09-01T00:00:00Z")],
         false,
         Some("model-a"),
     )
@@ -437,7 +437,7 @@ fn catalog_paginates_to_the_end_with_the_key_on_every_page() {
     let (_root, paths) = keyed_fixture();
     let (base_url, server) = serve(vec![
         models_page(
-            &[api_model("model-a", Some("sonnet"), "2026-09-01T00:00:00Z")],
+            &[api_model("model-a", Some("haiku"), "2026-09-01T00:00:00Z")],
             true,
             Some("model-a"),
         ),
@@ -467,18 +467,18 @@ fn catalog_paginates_to_the_end_with_the_key_on_every_page() {
 #[test]
 fn only_structured_output_models_are_listed_and_deprecated_ones_are_marked() {
     let (_root, paths) = keyed_fixture();
-    let mut unsupported = api_model("model-plain", Some("sonnet"), "2026-10-01T00:00:00Z");
+    let mut unsupported = api_model("model-plain", Some("haiku"), "2026-10-01T00:00:00Z");
     unsupported["capabilities"]["structured_outputs"]["supported"] = json!(false);
-    let mut no_capabilities = api_model("model-null", Some("sonnet"), "2026-10-02T00:00:00Z");
+    let mut no_capabilities = api_model("model-null", Some("haiku"), "2026-10-02T00:00:00Z");
     no_capabilities["capabilities"] = Value::Null;
-    let mut deprecated = api_model("model-old", Some("sonnet"), "2026-10-03T00:00:00Z");
+    let mut deprecated = api_model("model-old", Some("haiku"), "2026-10-03T00:00:00Z");
     deprecated["lifecycle"] = json!("deprecated");
     let (base_url, server) = serve(vec![models_page(
         &[
             unsupported,
             no_capabilities,
             deprecated,
-            api_model("model-a", Some("sonnet"), "2026-09-01T00:00:00Z"),
+            api_model("model-a", Some("haiku"), "2026-09-01T00:00:00Z"),
         ],
         false,
         None,
@@ -501,7 +501,7 @@ fn failed_empty_and_truncated_refreshes_keep_the_cache() {
         &paths,
         vec![catalog_model(
             "model-kept",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -512,7 +512,7 @@ fn failed_empty_and_truncated_refreshes_keep_the_cache() {
             models_page(
                 &[api_model(
                     "model-new",
-                    Some("sonnet"),
+                    Some("haiku"),
                     "2026-10-01T00:00:00Z",
                 )],
                 true,
@@ -523,7 +523,7 @@ fn failed_empty_and_truncated_refreshes_keep_the_cache() {
         vec![models_page(
             &[api_model(
                 "model-new",
-                Some("sonnet"),
+                Some("haiku"),
                 "2026-10-01T00:00:00Z",
             )],
             true,
@@ -547,7 +547,7 @@ fn listing_without_refresh_uses_the_cache_and_makes_no_request() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -559,7 +559,7 @@ fn listing_without_refresh_uses_the_cache_and_makes_no_request() {
 
 #[test]
 fn only_the_newest_model_of_each_line_is_not_superseded() {
-    let mut deprecated = catalog_model("haiku-deprecated", Some("haiku"), "2026-09-01T00:00:00Z");
+    let mut deprecated = catalog_model("sonnet-deprecated", Some("sonnet"), "2026-09-01T00:00:00Z");
     deprecated.lifecycle = "deprecated".to_string();
     let mut only_deprecated =
         catalog_model("mini-deprecated", Some("mini"), "2026-09-01T00:00:00Z");
@@ -569,14 +569,14 @@ fn only_the_newest_model_of_each_line_is_not_superseded() {
     let mut unlisted = catalog_model("opus-unlisted", Some("opus"), "2026-11-01T00:00:00Z");
     unlisted.capabilities = None;
     let models = vec![
-        catalog_model("sonnet-old", Some("sonnet"), "2026-06-01T00:00:00Z"),
-        catalog_model("sonnet-new", Some("sonnet"), "2026-09-01T00:00:00Z"),
+        catalog_model("haiku-old", Some("haiku"), "2026-06-01T00:00:00Z"),
+        catalog_model("haiku-new", Some("haiku"), "2026-09-01T00:00:00Z"),
         catalog_model("opus-new", Some("opus"), "2026-08-01T00:00:00Z"),
         catalog_model("opus-old", Some("opus"), "2026-02-01T00:00:00Z"),
         retired,
         unlisted,
         deprecated,
-        catalog_model("haiku-active", Some("haiku"), "2026-01-01T00:00:00Z"),
+        catalog_model("sonnet-active", Some("sonnet"), "2026-01-01T00:00:00Z"),
         only_deprecated,
         catalog_model("no-line-a", None, "2026-01-01T00:00:00Z"),
         catalog_model("no-line-b", None, "2026-02-01T00:00:00Z"),
@@ -590,12 +590,12 @@ fn only_the_newest_model_of_each_line_is_not_superseded() {
     assert_eq!(
         superseded,
         [
-            ("sonnet-old", true),
-            ("sonnet-new", false),
+            ("haiku-old", true),
+            ("haiku-new", false),
             ("opus-new", false),
             ("opus-old", true),
-            ("haiku-deprecated", true),
-            ("haiku-active", false),
+            ("sonnet-deprecated", true),
+            ("sonnet-active", false),
             ("mini-deprecated", false),
             ("no-line-a", false),
             ("no-line-b", false),
@@ -604,21 +604,21 @@ fn only_the_newest_model_of_each_line_is_not_superseded() {
     );
     // A pin on an older version keeps working after it leaves the picker.
     assert_eq!(
-        claude::resolve_model(Some(&models), Some("sonnet-old")),
+        claude::resolve_model(Some(&models), Some("haiku-old")),
         Some(ResolvedModel {
-            served: "sonnet-old".to_string(),
+            served: "haiku-old".to_string(),
             fell_back: false,
         })
     );
 }
 
 #[test]
-fn default_is_the_newest_active_sonnet_with_ties_by_list_order() {
-    let mut retired = catalog_model("retired", Some("sonnet"), "2026-12-01T00:00:00Z");
+fn default_is_the_newest_active_haiku_with_ties_by_list_order() {
+    let mut retired = catalog_model("retired", Some("haiku"), "2026-12-01T00:00:00Z");
     retired.lifecycle = "retired".to_string();
-    let mut deprecated = catalog_model("deprecated", Some("sonnet"), "2026-11-01T00:00:00Z");
+    let mut deprecated = catalog_model("deprecated", Some("haiku"), "2026-11-01T00:00:00Z");
     deprecated.lifecycle = "deprecated".to_string();
-    let mut no_capabilities = catalog_model("no-caps", Some("sonnet"), "2026-11-01T00:00:00Z");
+    let mut no_capabilities = catalog_model("no-caps", Some("haiku"), "2026-11-01T00:00:00Z");
     no_capabilities.capabilities = None;
     let models = vec![
         retired,
@@ -626,14 +626,14 @@ fn default_is_the_newest_active_sonnet_with_ties_by_list_order() {
         no_capabilities,
         catalog_model("no-line", None, "2026-11-01T00:00:00Z"),
         catalog_model("opus", Some("opus"), "2026-11-01T00:00:00Z"),
-        catalog_model("older", Some("sonnet"), "2026-01-01T00:00:00Z"),
-        catalog_model("newest", Some("sonnet"), "2026-09-01T00:00:00Z"),
+        catalog_model("older", Some("haiku"), "2026-01-01T00:00:00Z"),
+        catalog_model("newest", Some("haiku"), "2026-09-01T00:00:00Z"),
     ];
     assert_eq!(claude::default_model(&models).unwrap().id, "newest");
 
     let epoch_ties = vec![
-        catalog_model("first", Some("sonnet"), "1970-01-01T00:00:00Z"),
-        catalog_model("second", Some("sonnet"), "1970-01-01T00:00:00Z"),
+        catalog_model("first", Some("haiku"), "1970-01-01T00:00:00Z"),
+        catalog_model("second", Some("haiku"), "1970-01-01T00:00:00Z"),
     ];
     assert_eq!(claude::default_model(&epoch_ties).unwrap().id, "first");
     assert!(claude::default_model(&[catalog_model("opus", Some("opus"), "2026")]).is_none());
@@ -642,7 +642,7 @@ fn default_is_the_newest_active_sonnet_with_ties_by_list_order() {
 #[test]
 fn resolver_keeps_pins_falls_back_only_on_a_known_list_and_reports_it() {
     let models = vec![
-        catalog_model("sonnet", Some("sonnet"), "2026-09-01T00:00:00Z"),
+        catalog_model("haiku", Some("haiku"), "2026-09-01T00:00:00Z"),
         catalog_model("opus", Some("opus"), "2026-09-01T00:00:00Z"),
     ];
     let resolved = |served: &str, fell_back| {
@@ -657,11 +657,11 @@ fn resolver_keeps_pins_falls_back_only_on_a_known_list_and_reports_it() {
     );
     assert_eq!(
         claude::resolve_model(Some(&models), None),
-        resolved("sonnet", false)
+        resolved("haiku", false)
     );
     assert_eq!(
         claude::resolve_model(Some(&models), Some("gone")),
-        resolved("sonnet", true)
+        resolved("haiku", true)
     );
     assert_eq!(
         claude::resolve_model(None, Some("opus")),
@@ -691,7 +691,7 @@ fn a_rejected_key_is_not_saved() {
 #[test]
 fn a_verified_key_is_saved_and_fills_the_catalog() {
     let (_root, paths) = fixture();
-    let (base_url, server) = serve(vec![sonnet_catalog()]);
+    let (base_url, server) = serve(vec![haiku_catalog()]);
     let result = block_on(save_key(&base_url, &paths, SECRET)).unwrap();
     server.join().unwrap();
     assert!(result.verified);
@@ -716,7 +716,7 @@ fn request_carries_the_documented_headers_limits_and_schema() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -773,7 +773,7 @@ fn request_carries_the_documented_headers_limits_and_schema() {
 #[test]
 fn effort_is_omitted_when_the_model_does_not_support_it() {
     let (_root, paths) = keyed_fixture();
-    let mut model = catalog_model("model-a", Some("sonnet"), "2026-09-01T00:00:00Z");
+    let mut model = catalog_model("model-a", Some("haiku"), "2026-09-01T00:00:00Z");
     model.capabilities = Some(Capabilities {
         structured_outputs: true,
         effort_low: false,
@@ -790,7 +790,7 @@ fn effort_is_omitted_when_the_model_does_not_support_it() {
 #[test]
 fn effort_capability_parses_from_the_api_shape() {
     let (_root, paths) = keyed_fixture();
-    let mut no_low = api_model("model-a", Some("sonnet"), "2026-09-01T00:00:00Z");
+    let mut no_low = api_model("model-a", Some("haiku"), "2026-09-01T00:00:00Z");
     no_low["capabilities"]["effort"]["low"]["supported"] = json!(false);
     let mut no_effort = api_model("model-b", Some("opus"), "2026-09-01T00:00:00Z");
     no_effort["capabilities"]["effort"]["supported"] = json!(false);
@@ -798,7 +798,7 @@ fn effort_capability_parses_from_the_api_shape() {
         &[
             no_low,
             no_effort,
-            api_model("model-c", Some("haiku"), "2026-09-01T00:00:00Z"),
+            api_model("model-c", Some("sonnet"), "2026-09-01T00:00:00Z"),
         ],
         false,
         None,
@@ -818,7 +818,7 @@ fn refusal_is_checked_before_content_and_records_tokens_and_dollars() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -852,7 +852,7 @@ fn the_stop_category_is_stored_and_never_changes_the_outcome() {
             &paths,
             vec![catalog_model(
                 "model-a",
-                Some("sonnet"),
+                Some("haiku"),
                 "2026-09-01T00:00:00Z",
             )],
         );
@@ -901,7 +901,7 @@ fn max_tokens_maps_to_truncated_and_records_usage() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -920,7 +920,7 @@ fn unreadable_output_is_an_error_that_still_records_usage() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -973,7 +973,7 @@ fn a_success_body_that_cannot_be_parsed_records_a_zero_token_invalid_entry() {
         store_models(
             &paths,
             vec![
-                catalog_model("model-a", Some("sonnet"), "2026-09-01T00:00:00Z"),
+                catalog_model("model-a", Some("haiku"), "2026-09-01T00:00:00Z"),
                 catalog_model("model-pin", Some("opus"), "2026-09-01T00:00:00Z"),
             ],
         );
@@ -997,7 +997,7 @@ fn a_success_body_cut_off_mid_read_records_a_zero_token_invalid_entry() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -1016,7 +1016,7 @@ fn a_response_that_is_not_a_success_records_nothing_even_when_unparseable() {
             &paths,
             vec![catalog_model(
                 "model-a",
-                Some("sonnet"),
+                Some("haiku"),
                 "2026-09-01T00:00:00Z",
             )],
         );
@@ -1098,7 +1098,7 @@ fn the_ledger_is_written_with_usage_fields_and_cached_prices_before_returning() 
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -1134,7 +1134,7 @@ fn a_ledger_failure_never_discards_the_result() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -1157,12 +1157,12 @@ fn a_rejected_model_refreshes_once_and_is_named_without_switching() {
             &paths,
             vec![
                 catalog_model("model-pin", Some("opus"), "2026-09-01T00:00:00Z"),
-                catalog_model("model-a", Some("sonnet"), "2026-09-01T00:00:00Z"),
+                catalog_model("model-a", Some("haiku"), "2026-09-01T00:00:00Z"),
             ],
         );
         let (base_url, server) = serve(vec![
             http(status_code, r#"{"error":{"type":"not_found_error"}}"#),
-            sonnet_catalog(),
+            haiku_catalog(),
         ]);
         let error = block_on(generate_tests(
             &base_url,
@@ -1186,7 +1186,7 @@ fn other_failures_do_not_refresh_and_never_include_the_key() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -1205,7 +1205,7 @@ fn a_pin_that_left_the_list_falls_back_and_reports_it() {
         &paths,
         vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-09-01T00:00:00Z",
         )],
     );
@@ -1229,7 +1229,7 @@ fn an_ai_call_refreshes_a_stale_catalog_but_not_a_fresh_one() {
         fetched_at: now_ms() - DAY_MS - 1,
         models: vec![catalog_model(
             "model-old",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-01-01T00:00:00Z",
         )],
     };
@@ -1239,7 +1239,7 @@ fn an_ai_call_refreshes_a_stale_catalog_but_not_a_fresh_one() {
     )
     .unwrap();
     let (base_url, server) = serve(vec![
-        sonnet_catalog(),
+        haiku_catalog(),
         message_reply("end_turn", r#"{"statements":[]}"#),
     ]);
     let result = block_on(generate_tests(&base_url, &paths, &generate_request(None))).unwrap();
@@ -1260,7 +1260,7 @@ fn a_failed_stale_refresh_still_serves_from_the_cached_list() {
         fetched_at: now_ms() - DAY_MS - 1,
         models: vec![catalog_model(
             "model-a",
-            Some("sonnet"),
+            Some("haiku"),
             "2026-01-01T00:00:00Z",
         )],
     };
@@ -1959,7 +1959,7 @@ fn generate_request_deserializes_from_camel_case() {
 #[test]
 fn empty_names_and_pins_never_reach_the_strict_frontend_shapes() {
     let (_root, paths) = keyed_fixture();
-    let mut unnamed = api_model("model-a", Some("sonnet"), "2026-09-01T00:00:00Z");
+    let mut unnamed = api_model("model-a", Some("haiku"), "2026-09-01T00:00:00Z");
     unnamed["display_name"] = json!("");
     let (base_url, server) = serve(vec![models_page(&[unnamed], false, None)]);
     let list = block_on(list_models(&base_url, &paths, true));

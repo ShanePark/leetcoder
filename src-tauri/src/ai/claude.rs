@@ -21,7 +21,7 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 const MAX_ERROR_TYPE_CHARS: usize = 64;
 const CATALOG_FILE: &str = "ai-models-anthropic.json";
-const DEFAULT_LINE: &str = "sonnet";
+const DEFAULT_LINE: &str = "haiku";
 const USER_AGENT: &str = "leetcoder/0.1";
 
 /// Carries only what is safe to show: never a response body or the key.
@@ -369,7 +369,7 @@ fn newest<'a>(models: impl Iterator<Item = &'a CatalogModel>) -> Option<&'a Cata
     })
 }
 
-/// The newest active Sonnet.
+/// The newest active Haiku.
 pub(super) fn default_model(models: &[CatalogModel]) -> Option<&CatalogModel> {
     newest(models.iter().filter(|model| {
         model.is_listed()
