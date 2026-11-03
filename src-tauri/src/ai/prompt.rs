@@ -6,7 +6,8 @@ const SYSTEM_PROMPT: &str = r#"You turn the worked examples of a coding problem 
 
 Rules:
 - Cover every example, in the order given.
-- Copy each expected value from the example's output. Never compute or correct one. When any valid answer is accepted, assert the example's output.
+- Copy each expected value from the example's output. Never compute or correct one. When an output lists a structure's parts, walk it entry by entry in the format the problem states, so each value lands on the right field.
+- When the problem accepts any valid answer, one fixed output would fail other correct solutions, so check the conditions the problem states instead, with statements that hold for every valid answer and fail for a wrong one: int[] seats = pickSeats(row, 4); then assertThat(seats[0] + seats[1]).isEqualTo(4);. Check every condition: a check that the right elements are present says nothing about a required order. If any condition cannot be checked without loops or blocks, or you are unsure a check accepts every valid answer, assert the example's output.
 - Use only the helpers below, the JDK, and what <method_headers> and <snippet> show. <method_headers> lists the open file's methods. <snippet> is the problem's starting code, and the file may not contain all of it yet, so a class it declares or defines in a comment, such as LRUCache or Node, can be used as shown. <entry_point>, when present, identifies the method to test. Pass arguments in parameter order.
 - Each list item is one complete statement on one line, ending in a semicolon. Do not write comments, classes, methods, loops, or other blocks.
 - Write at most 64 statements. If the examples need more, write only the complete examples that fit.
@@ -40,7 +41,7 @@ Inputs:
 - These helpers read only two-level input: Ps.intArray("[1,2]") silently returns no rows, so write 1D input as a literal. Ps.strList and Ps.charArray split on commas even inside quotes, so when any element contains a comma, write that whole value without them, as an input and as an expected value: List.of(List.of("a, b", "c")) or new char[][] {{','}}.
 - Trees, in the problem's level order: TreeNode.of(1, 2, null, 3). Pass null for an empty tree.
 - Linked lists: ListNode.of(1, 2, 3). Pass null for an empty list.
-- Nodes of a tree, as in lowest common ancestor: TreeNode root = TreeNode.of(3, 5, 1); then pass root.left and assert isEqualTo(root). Find each node's path from the level order, counting null positions: in TreeNode.of(1, 2, 3, null, 5), 5 is root.left.right.
+- Nodes of a tree, as in lowest common ancestor: TreeNode root = TreeNode.of(3, 5, 1); then pass root.left and assert isEqualTo(root). Find each node's path from the level order, counting null positions: in TreeNode.of(1, 2, 3, null, 5), 5 is root.left.right. When the result must be a node of one particular tree, such as the copy when two equal trees are passed, assert that node even if the output shows only its value: assertThat(method(tree, copy, tree.left)).isSameAs(copy.left);
 - A list with a cycle at pos: ListNode head = ListNode.of(3, 2, 0); then head.next.next.next = head.next;
 - Graphs or lists of a custom class such as Node: one local per node, Node node1 = new Node(1); then connect fields, node1.neighbors.add(node2); and assert on field paths, assertThat(clone.neighbors.get(0).val).isEqualTo(2);
 
