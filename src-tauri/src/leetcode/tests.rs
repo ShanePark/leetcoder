@@ -1,5 +1,6 @@
-use super::client::{build_leetcode_client, leetcode_client};
+use super::client::{attempt_request, build_leetcode_client, leetcode_client, GRAPHQL_ERRORS};
 use super::parsing::normalize_frontend_id;
+use super::request_log::{self, format_line, utc_timestamp, RequestAttempt, RequestOutcome};
 use super::slug_cache::SlugResolver;
 use super::*;
 use serde_json::Value;
@@ -615,4 +616,284 @@ fn rejects_invalid_manual_problem_numbers() {
     assert!(normalize_frontend_id("abc").is_err());
     assert!(normalize_frontend_id("0").is_err());
     assert_eq!(normalize_frontend_id("001").unwrap(), "1");
+}
+
+const LOG_TIME: u64 = 1_793_681_052;
+
+fn attempt(status: Option<u16>, outcome: RequestOutcome) -> RequestAttempt {
+    RequestAttempt {
+        status,
+        challenge: None,
+        elapsed_ms: 312,
+        outcome,
+    }
+}
+
+fn read_log(directory: &Path) -> String {
+    std::fs::read_to_string(directory.join("leetcode-requests.log")).unwrap()
+}
+
+#[test]
+fn formats_a_request_log_line_for_each_outcome() {
+    assert_eq!(
+        format_line(LOG_TIME, "daily", &attempt(Some(200), RequestOutcome::Ok)),
+        "2026-11-03T04:44:12Z daily http=200 ok 312ms"
+    );
+    assert_eq!(
+        format_line(
+            LOG_TIME,
+            "detail two-sum",
+            &attempt(Some(200), RequestOutcome::Ok)
+        ),
+        "2026-11-03T04:44:12Z detail two-sum http=200 ok 312ms"
+    );
+    assert_eq!(
+        format_line(
+            LOG_TIME,
+            "index",
+            &RequestAttempt {
+                challenge: Some("challenge".to_string()),
+                ..attempt(
+                    Some(403),
+                    RequestOutcome::Failed("Just a moment...".to_string())
+                )
+            }
+        ),
+        "2026-11-03T04:44:12Z index http=403 failed 312ms challenge=challenge Just a moment..."
+    );
+    assert_eq!(
+        format_line(
+            LOG_TIME,
+            "daily",
+            &attempt(None, RequestOutcome::Failed("error sending".to_string()))
+        ),
+        "2026-11-03T04:44:12Z daily network-error failed 312ms error sending"
+    );
+    assert_eq!(
+        format_line(
+            LOG_TIME,
+            "daily",
+            &attempt(
+                Some(200),
+                RequestOutcome::ParseError("no daily".to_string())
+            )
+        ),
+        "2026-11-03T04:44:12Z daily http=200 parse-error 312ms no daily"
+    );
+    assert_eq!(
+        format_line(
+            LOG_TIME,
+            "daily",
+            &attempt(Some(502), RequestOutcome::Failed(" \n".to_string()))
+        ),
+        "2026-11-03T04:44:12Z daily http=502 failed 312ms"
+    );
+}
+
+#[test]
+fn formats_known_utc_timestamps() {
+    for (seconds, expected) in [
+        (0, "1970-01-01T00:00:00Z"),
+        (951_782_400, "2000-02-29T00:00:00Z"),
+        (1_709_164_800, "2024-02-29T00:00:00Z"),
+        (1_709_251_199, "2024-02-29T23:59:59Z"),
+        (1_709_251_200, "2024-03-01T00:00:00Z"),
+        (1_767_225_599, "2025-12-31T23:59:59Z"),
+        (4_107_542_400, "2100-03-01T00:00:00Z"),
+        (LOG_TIME, "2026-11-03T04:44:12Z"),
+    ] {
+        assert_eq!(utc_timestamp(seconds), expected);
+    }
+}
+
+#[test]
+fn a_cause_is_collapsed_to_one_line_and_truncated() {
+    let collapsed = format_line(
+        LOG_TIME,
+        "detail two\nsum",
+        &RequestAttempt {
+            challenge: Some("chal\r\nlenge".to_string()),
+            ..attempt(
+                Some(500),
+                RequestOutcome::Failed("Bad\r\n  gateway\t\u{2028}\0here".to_string()),
+            )
+        },
+    );
+    assert_eq!(
+        collapsed,
+        "2026-11-03T04:44:12Z detail two sum http=500 failed 312ms challenge=chal lenge Bad gateway here"
+    );
+
+    let long = format_line(
+        LOG_TIME,
+        "daily",
+        &attempt(Some(500), RequestOutcome::Failed("é".repeat(500))),
+    );
+    let cause = long.rsplit(' ').next().unwrap();
+    assert_eq!(cause, format!("{}…", "é".repeat(120)));
+    assert_eq!(long.lines().count(), 1);
+}
+
+#[test]
+fn concurrent_appends_keep_whole_lines() {
+    let directory = tempfile::tempdir().unwrap();
+    let writers: Vec<_> = (0..8)
+        .map(|writer| {
+            let path = directory.path().to_path_buf();
+            thread::spawn(move || {
+                let entry = attempt(Some(500), RequestOutcome::Failed("x".repeat(100)));
+                for _ in 0..25 {
+                    request_log::record(Some(&path), &format!("detail w{writer}"), &entry);
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+
+    let log = read_log(directory.path());
+    assert!(log.ends_with('\n'));
+    assert_eq!(log.lines().count(), 200);
+    let cause = "x".repeat(100);
+    for line in log.lines() {
+        assert!(line.contains(" detail w"), "{line}");
+        assert!(
+            line.ends_with(&format!(" http=500 failed 312ms {cause}")),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn recording_creates_the_log_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let nested = directory.path().join("logs").join("deeper");
+    request_log::record(
+        Some(&nested),
+        "daily",
+        &attempt(Some(200), RequestOutcome::Ok),
+    );
+    assert!(read_log(&nested).ends_with(" daily http=200 ok 312ms\n"));
+}
+
+#[test]
+fn recording_without_a_directory_does_nothing() {
+    request_log::record(None, "daily", &attempt(Some(200), RequestOutcome::Ok));
+}
+
+#[test]
+fn an_unwritable_log_directory_is_ignored() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("a-file");
+    std::fs::write(&file, "").unwrap();
+    request_log::record(
+        Some(&file.join("logs")),
+        "daily",
+        &attempt(Some(200), RequestOutcome::Ok),
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "");
+}
+
+/// Answers one request on a local port with a fixed raw response.
+fn serve_once(response: &'static str) -> String {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 256];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).unwrap();
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    url
+}
+
+fn attempt_against(url: &str) -> (Result<String, String>, String) {
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let (result, mut attempt) =
+        tauri::async_runtime::block_on(attempt_request(client.get(url), &GRAPHQL_ERRORS, |body| {
+            let value: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
+            match value.get("errors") {
+                Some(errors) => Err(format!("LeetCode GraphQL error: {errors}")),
+                None => Ok(body.to_string()),
+            }
+        }));
+    attempt.elapsed_ms = 7;
+    (result, format_line(LOG_TIME, "daily", &attempt))
+}
+
+#[test]
+fn a_successful_response_logs_no_body() {
+    let (result, line) = attempt_against(&serve_once(
+        "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"data\":\"a\"}",
+    ));
+    assert_eq!(result.unwrap(), "{\"data\":\"a\"}");
+    assert_eq!(line, "2026-11-03T04:44:12Z daily http=200 ok 7ms");
+}
+
+#[test]
+fn a_refused_response_logs_its_status_challenge_and_cause() {
+    let (result, line) = attempt_against(&serve_once(
+        "HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\nContent-Length: 17\r\nConnection: close\r\n\r\nJust a\nmoment...\n",
+    ));
+    assert_eq!(
+        result.unwrap_err(),
+        "LeetCode returned HTTP 403 Forbidden: Just a\nmoment...\n"
+    );
+    assert_eq!(
+        line,
+        "2026-11-03T04:44:12Z daily http=403 failed 7ms challenge=challenge Just a moment..."
+    );
+}
+
+#[test]
+fn a_success_status_with_graphql_errors_logs_a_parse_error() {
+    let (result, line) = attempt_against(&serve_once(
+        "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"errors\":1}",
+    ));
+    assert_eq!(result.unwrap_err(), "LeetCode GraphQL error: 1");
+    assert_eq!(
+        line,
+        "2026-11-03T04:44:12Z daily http=200 parse-error 7ms LeetCode GraphQL error: 1"
+    );
+}
+
+#[test]
+fn a_cut_off_body_logs_the_status_with_a_failure() {
+    let (result, line) = attempt_against(&serve_once(
+        "HTTP/1.1 200 OK\r\nContent-Length: 50\r\nConnection: close\r\n\r\nshort",
+    ));
+    assert!(result
+        .unwrap_err()
+        .starts_with("Unable to read LeetCode response: "));
+    assert!(
+        line.starts_with("2026-11-03T04:44:12Z daily http=200 failed 7ms error decoding"),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_connection_failure_logs_a_network_error_with_its_cause() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    drop(listener);
+
+    let (result, line) = attempt_against(&url);
+    let error = result.unwrap_err();
+    assert!(error.starts_with("Unable to reach LeetCode: error sending request for url"));
+    assert!(
+        line.starts_with(
+            "2026-11-03T04:44:12Z daily network-error failed 7ms error sending request: "
+        ),
+        "{line}"
+    );
+    assert!(!line.contains(&url), "{line}");
+    assert!(line.contains("onnect"), "{line}");
 }

@@ -117,6 +117,7 @@ fn eval_fetch() {
         return;
     };
     let input: FetchInput = read_input(&input_path);
+    crate::leetcode::set_request_log_dir(input.cache_dir.clone());
     let mut errors = Vec::new();
     let mut fetched_any = false;
 

@@ -69,6 +69,7 @@ with `Ctrl`.
 Requests to leetcode.com leave from the owner's network, and a block breaks the app's problem lookup and can put the owner's account at risk.
 
 - This covers every route: scripts, tests, `curl`, web fetches, browsers, and app flows. Relaunching the app, including `npm run rebuild`, sends the daily problem request.
+- The app appends each request and its result to `leetcode-requests.log` in its log directory (`~/.local/share/com.shane.leetcoder/logs/` on Linux, `~/Library/Logs/com.shane.leetcoder/` on macOS). Read it instead of sending a request to check the status.
 - Before any real request, weigh whether it is needed and whether its volume or pattern could look automated or excessive. Say what will be sent, how many requests, and why cached data, fixtures, or the dev mock will not do. If in doubt, ask the owner first.
 - Send requests one at a time, at least 10 seconds apart. Cache every result and never request the same thing twice.
 - A run of more than 5 requests needs the owner's approval first. Never crawl or fetch problem data in bulk.

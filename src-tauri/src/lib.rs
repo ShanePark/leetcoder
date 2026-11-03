@@ -32,6 +32,9 @@ pub fn run() {
         )
         .manage(watcher::RepositoryWatcher::default())
         .setup(|app| {
+            if let Ok(log_dir) = app.path().app_log_dir() {
+                leetcode::set_request_log_dir(log_dir);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
                 // The updater can terminate the process without a normal exit event.
