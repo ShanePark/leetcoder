@@ -764,7 +764,7 @@ fn request_carries_the_documented_headers_limits_and_schema() {
         assert!(body.get(absent).is_none(), "{absent} must not be sent");
     }
     let message = body["messages"][0]["content"].as_str().unwrap();
-    assert!(message.contains("<problem>\nTwo Sum\n<p>Example 1</p>\n</problem>"));
+    assert!(message.contains("<problem>\nTwo Sum\nExample 1\n</problem>"));
     assert!(message.contains("<entry_point>\nint[] twoSum"));
     assert!(message.contains("<method_headers>\nint[] twoSum"));
     assert!(message.contains("<helpers>\nint[][] Ps.intArray(String)\n</helpers>"));

@@ -239,6 +239,9 @@ These are fixed now because they are expensive to change later.
   exists.
 - Structured output (`output_config.format`) returns an array of statements.
 - No `thinking` or sampling parameters. `stop_reason` is checked before content.
+  Disabling thinking on Haiku cut output tokens by 35% and a run's cost by 20%, but one
+  run of the 18 eval cases dropped from all passing to 16, with a `new Solution()` call
+  and a `Ps.strList` element containing a comma. Some models also reject `disabled`.
 - The system prompt is one text block with a 5-minute cache breakpoint. Per-request
   text stays in `messages`, after it, and the prefix is silently uncached if it
   falls below the model's minimum cacheable length.
