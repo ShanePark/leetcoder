@@ -8,7 +8,8 @@ import {
 } from './layout'
 import type { AppState, ProblemSelection } from './types'
 
-const DAILY_RETRY_INTERVAL_MS = 60_000
+const DAILY_RETRY_BASE_MS = 60_000
+const DAILY_RETRY_MAX_MS = 30 * 60_000
 
 type ProblemSelectionState = Pick<
   AppState,
@@ -42,6 +43,8 @@ export class ProblemSelectionController {
   private lastProblemRequest: ProblemSelection = 'daily'
   /** Remember the current daily id while a manual problem is being viewed. */
   private latestDailyProblem: { frontendId: string; dateKey: string } | null = null
+  private dailyRetryStreak = 0
+  private nextDailyRetryAt = 0
   private disposed = false
 
   constructor(private readonly hooks: ProblemSelectionControllerHooks) {}
@@ -101,6 +104,8 @@ export class ProblemSelectionController {
         this.hooks.state.dailyProblemDateKey = problemDateKey
         this.hooks.state.dailyRetryPending = false
         this.hooks.state.dailyError = null
+        this.dailyRetryStreak = 0
+        this.nextDailyRetryAt = 0
       }
     } catch (error) {
       if (!this.isCurrentRequest(requestId)) {
@@ -117,7 +122,7 @@ export class ProblemSelectionController {
         this.hooks.state.dailyLoading = false
         this.scheduleDailyProblemRefresh(
           this.hooks.state.dailyRetryPending
-            ? DAILY_RETRY_INTERVAL_MS
+            ? this.backOffDailyRetry()
             : nextUtcMidnightDelayMs(),
         )
         this.hooks.render()
@@ -215,6 +220,13 @@ export class ProblemSelectionController {
       || !this.hooks.state.dailyProblem
       || this.hooks.state.dailyProblemDateKey !== currentDateKey
     ) {
+      // Window returns land here too. The due time outlives dailyRetryPending,
+      // which a failed manual lookup clears, so it is what gates the request.
+      const remainingMs = this.nextDailyRetryAt - Date.now()
+      if (remainingMs > 0) {
+        this.scheduleDailyProblemRefresh(remainingMs)
+        return
+      }
       void this.loadDailyProblem()
       return
     }
@@ -244,6 +256,13 @@ export class ProblemSelectionController {
     this.disposed = true
     this.requestId += 1
     this.clearScheduledRefresh()
+  }
+
+  private backOffDailyRetry(): number {
+    const delayMs = Math.min(DAILY_RETRY_BASE_MS * 2 ** this.dailyRetryStreak, DAILY_RETRY_MAX_MS)
+    this.dailyRetryStreak += 1
+    this.nextDailyRetryAt = Date.now() + delayMs
+    return delayMs
   }
 
   private scheduleDailyProblemRefresh(delayMs = nextUtcMidnightDelayMs()): void {

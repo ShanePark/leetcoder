@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { utcDateKey } from '../../../src/app'
 import {
@@ -47,7 +47,10 @@ function problem(frontendId: string, date = utcDateKey()): DailyProblem {
   }
 }
 
-function harness(overrides: Partial<SelectionState> = {}): {
+function harness(
+  overrides: Partial<SelectionState> = {},
+  isWindowVisible: () => boolean = () => true,
+): {
   controller: ProblemSelectionController
   state: SelectionState
   fetchDailyProblem: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchDailyProblem']>>
@@ -77,7 +80,7 @@ function harness(overrides: Partial<SelectionState> = {}): {
     backend,
     render,
     setMessage: (message, tone) => messages.push({ message, tone }),
-    isWindowVisible: () => true,
+    isWindowVisible,
     isDestroyed: () => false,
   })
   return { controller, state, fetchDailyProblem, fetchProblemByNumber, render, messages }
@@ -157,6 +160,181 @@ describe('ProblemSelectionController', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  describe('daily retry backoff', () => {
+    const MINUTE = 60_000
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-10T12:00:00.000Z'))
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('backs off 1, 2, 4, 8, 16 minutes and then stays at 30 minutes', async () => {
+      const { controller, fetchDailyProblem } = harness()
+      fetchDailyProblem.mockRejectedValue(new Error('refused'))
+
+      await controller.loadDailyProblem()
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(1)
+
+      let calls = 1
+      for (const minutes of [1, 2, 4, 8, 16, 30, 30, 30]) {
+        await vi.advanceTimersByTimeAsync(minutes * MINUTE - 1)
+        expect(fetchDailyProblem).toHaveBeenCalledTimes(calls)
+        await vi.advanceTimersByTimeAsync(1)
+        calls += 1
+        expect(fetchDailyProblem).toHaveBeenCalledTimes(calls)
+      }
+      controller.dispose()
+    })
+
+    it('backs off the same way while the provider serves yesterday’s problem', async () => {
+      const { controller, state, fetchDailyProblem } = harness()
+      fetchDailyProblem.mockResolvedValue(problem('1', '2026-09-09'))
+
+      await controller.loadDailyProblem()
+
+      let calls = 1
+      for (const minutes of [1, 2, 4]) {
+        await vi.advanceTimersByTimeAsync(minutes * MINUTE - 1)
+        expect(fetchDailyProblem).toHaveBeenCalledTimes(calls)
+        await vi.advanceTimersByTimeAsync(1)
+        calls += 1
+        expect(fetchDailyProblem).toHaveBeenCalledTimes(calls)
+      }
+      expect(state.dailyRetryPending).toBe(true)
+      controller.dispose()
+    })
+
+    it('restarts from 1 minute once today’s problem has loaded', async () => {
+      const { controller, state, fetchDailyProblem } = harness()
+      fetchDailyProblem
+        .mockRejectedValueOnce(new Error('refused'))
+        .mockRejectedValueOnce(new Error('refused'))
+        .mockRejectedValueOnce(new Error('refused'))
+        .mockResolvedValueOnce(problem('1', '2026-09-10'))
+        .mockRejectedValueOnce(new Error('refused'))
+        .mockRejectedValueOnce(new Error('refused'))
+
+      await controller.loadDailyProblem()
+      await vi.advanceTimersByTimeAsync((1 + 2 + 4) * MINUTE)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(4)
+      expect(state.dailyRetryPending).toBe(false)
+
+      await controller.loadDailyProblem(true)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(5)
+      await vi.advanceTimersByTimeAsync(MINUTE)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(6)
+      controller.dispose()
+    })
+
+    it('keeps the streak when a manual problem is picked', async () => {
+      const { controller, state, fetchDailyProblem, fetchProblemByNumber } = harness()
+      fetchDailyProblem.mockRejectedValue(new Error('refused'))
+      fetchProblemByNumber.mockResolvedValue(problem('7', '2026-01-01'))
+
+      await controller.loadDailyProblem()
+      await vi.advanceTimersByTimeAsync(MINUTE)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+
+      await controller.loadProblemByNumber('7')
+      expect(state.problemSelection).toBe('manual')
+      await vi.advanceTimersByTimeAsync(60 * MINUTE)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+
+      controller.selectToday()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(3)
+
+      await vi.advanceTimersByTimeAsync(4 * MINUTE - 1)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(3)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(4)
+      controller.dispose()
+    })
+
+    it('re-arms for the remaining time when the window returns before the retry is due', async () => {
+      let visible = true
+      const { controller, fetchDailyProblem } = harness({}, () => visible)
+      fetchDailyProblem.mockRejectedValue(new Error('refused'))
+
+      await controller.loadDailyProblem()
+      await vi.advanceTimersByTimeAsync(MINUTE)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+
+      visible = false
+      controller.clearScheduledRefresh()
+      await vi.advanceTimersByTimeAsync(MINUTE)
+
+      visible = true
+      controller.refreshDailyProblemIfStale()
+      controller.refreshDailyProblemIfStale()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+
+      await vi.advanceTimersByTimeAsync(MINUTE - 1)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(3)
+      controller.dispose()
+    })
+
+    it('sends when the window returns after the retry is due', async () => {
+      let visible = true
+      const { controller, fetchDailyProblem } = harness({}, () => visible)
+      fetchDailyProblem.mockRejectedValue(new Error('refused'))
+
+      await controller.loadDailyProblem()
+      visible = false
+      controller.clearScheduledRefresh()
+      await vi.advanceTimersByTimeAsync(10 * MINUTE)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(1)
+
+      visible = true
+      controller.refreshDailyProblemIfStale()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+      controller.dispose()
+    })
+
+    it('does not bypass the wait when a failed manual lookup cleared the pending retry', async () => {
+      const { controller, state, fetchDailyProblem, fetchProblemByNumber } = harness()
+      fetchDailyProblem.mockRejectedValue(new Error('refused'))
+      fetchProblemByNumber.mockRejectedValue(new Error('not found'))
+
+      await controller.loadDailyProblem()
+      await controller.loadProblemByNumber('9999')
+      expect(state.dailyRetryPending).toBe(false)
+
+      controller.refreshDailyProblemIfStale()
+      await vi.advanceTimersByTimeAsync(MINUTE - 1)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+      controller.dispose()
+    })
+
+    it('sends a user-driven retry immediately and counts its failure toward the streak', async () => {
+      const { controller, fetchDailyProblem } = harness()
+      fetchDailyProblem.mockRejectedValue(new Error('refused'))
+
+      await controller.loadDailyProblem()
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(1)
+
+      controller.retry()
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(2 * MINUTE - 1)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(3)
+      controller.dispose()
+    })
   })
 
   it('refreshes after UTC midnight when the daily date rolls over', async () => {
