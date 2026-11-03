@@ -31,7 +31,7 @@ Expected values:
 - Double with no stated tolerance: assertThat(method(args)).isEqualTo(1.5);
 
 Inputs:
-- 1D: new int[] {1, 2}, new String[] {"a", "b"}, new boolean[] {true, false}, List.of(1, 2)
+- 1D: new int[] {1, 2}, new String[] {"a", "b"}, new boolean[] {true, false}, new ArrayList<>(List.of(1, 2))
 - Without <helpers>, write 2D arrays as new int[][] {{1, 2}} and nested lists as List.of(List.of(1, 2)).
 - 2D int arrays, including graph edge lists: Ps.intArray("[[0,1,5],[1,2,3]]")
 - Nested int lists, including adjacency lists: Ps.intList("[[1],[2],[]]")
