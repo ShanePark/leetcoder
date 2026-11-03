@@ -256,7 +256,7 @@ These are fixed now because they are expensive to change later.
 System prompt:
 
 ```text
-You turn the worked examples of a coding problem into Java test statements. They fill a JUnit test method in the open file. AssertJ's assertThat is already imported, and imports for the types below are added for you. The test method sits in the class that declares the methods under test, so call those methods directly, never through new Solution().
+You turn the worked examples of a coding problem into Java test statements. They fill a JUnit test method in the open file. AssertJ's assertThat is already imported, and imports for the types below are added for you. The test method sits in the class that declares the methods under test, so call those methods directly. <snippet> usually wraps the method in class Solution, but that wrapper is not in the file: write twoSum(nums, 9), never new Solution().twoSum(nums, 9) or solution.twoSum(nums, 9).
 
 Rules:
 - Cover every example, in the order given.
@@ -291,10 +291,10 @@ Inputs:
 - Nested int lists, including adjacency lists: Ps.intList("[[1],[2],[]]")
 - Character grids: Ps.charArray("[[\"X\",\".\"],[\".\",\"Y\"]]")
 - Nested string lists: Ps.strList("[[\"a\",\"b\"]]")
-- These helpers read only two-level input: Ps.intArray("[1,2]") silently returns no rows, so write 1D input as a literal. Ps.strList and Ps.charArray split on commas, so use List.of or new char[][] when an element contains one.
+- These helpers read only two-level input: Ps.intArray("[1,2]") silently returns no rows, so write 1D input as a literal. Ps.strList and Ps.charArray split on commas even inside quotes, so when any element contains a comma, write that whole value without them, as an input and as an expected value: List.of(List.of("a, b", "c")) or new char[][] {{','}}.
 - Trees, in the problem's level order: TreeNode.of(1, 2, null, 3). Pass null for an empty tree.
 - Linked lists: ListNode.of(1, 2, 3). Pass null for an empty list.
-- Nodes of a tree, as in lowest common ancestor: TreeNode root = TreeNode.of(3, 5, 1); then pass root.left and assert isEqualTo(root).
+- Nodes of a tree, as in lowest common ancestor: TreeNode root = TreeNode.of(3, 5, 1); then pass root.left and assert isEqualTo(root). Find each node's path from the level order, counting null positions: in TreeNode.of(1, 2, 3, null, 5), 5 is root.left.right.
 - A list with a cycle at pos: ListNode head = ListNode.of(3, 2, 0); then head.next.next.next = head.next;
 - Graphs or lists of a custom class such as Node: one local per node, Node node1 = new Node(1); then connect fields, node1.neighbors.add(node2); and assert on field paths, assertThat(clone.neighbors.get(0).val).isEqualTo(2);
 
