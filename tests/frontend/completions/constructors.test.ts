@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { java } from '@codemirror/lang-java'
 import { EditorState } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
 
+import { psLibraryExtension, setPsLibraryMetadata } from '../../../src/completions/library'
+import { javaAutoImports } from '../../../src/editor/auto-import'
 import { applyCompletion, complete, labels } from './helpers'
 
 /** Options in popup order for an empty prefix: boost first, then label. */
@@ -152,4 +155,59 @@ describe('completions after new', () => {
     expect(array.text).toContain('int[] counts = new int[]')
     expect(array.text.slice(0, array.cursor).endsWith('new int[')).toBe(true)
   })
+})
+
+describe.each(['ListNode', 'TreeNode'])('constructor completion of the helper type %s', (type) => {
+  const helperImport = `import io.github.shanepark.leetcode.${type};`
+  const metadata = {
+    fingerprint: 'fixture',
+    methods: [{ name: 'parse', returnType: 'java.lang.Object', parameters: [] }],
+  }
+
+  /** Pick an option in a state running the real import filter, as the editor does. */
+  function pick(source: string, label: string, library: boolean): { text: string, cursor: number } {
+    const marker = source.indexOf('|')
+    const completion = complete(source, true)!.options.find((option) => option.label === label)!
+    let state = EditorState.create({
+      doc: `${source.slice(0, marker)}${source.slice(marker + 1)}`,
+      extensions: [java(), javaAutoImports, psLibraryExtension],
+    }).update({ effects: setPsLibraryMetadata.of(library ? metadata : null) }).state
+    const view = {
+      get state() { return state },
+      dispatch(spec: Parameters<EditorState['update']>[0]) { state = state.update(spec).state },
+    } as unknown as EditorView
+    ;(completion.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(view, completion, marker, marker)
+    return { text: state.doc.toString(), cursor: state.selection.main.head }
+  }
+
+  it('adds no import itself, for a plain or an array type', () => {
+    expect(applyCompletion(`class S { void t() { ${type} n = new |; } }`, type))
+      .toBe(`class S { void t() { ${type} n = new ${type}(); } }`)
+    expect(applyCompletion(`class S { void t() { ${type}[] n = new |; } }`, `${type}[]`))
+      .toBe(`class S { void t() { ${type}[] n = new ${type}[]; } }`)
+  })
+
+  it('gets no import without the library', () => {
+    expect(pick(`class S { void t() { ${type} n = new |; } }`, type, false).text).not.toContain('import ')
+    expect(pick(`class S { void t() { ${type}[] n = new |; } }`, `${type}[]`, false).text).not.toContain('import ')
+  })
+
+  it('gets its import through the filter when the library is present, keeping the cursor', () => {
+    const plain = pick(`class S { void t() { ${type} n = new |; } }`, type, true)
+    expect(plain.text).toBe(`${helperImport}\n\nclass S { void t() { ${type} n = new ${type}(); } }`)
+    expect(plain.text.slice(plain.cursor - 1, plain.cursor + 1)).toBe('()')
+
+    const array = pick(`class S { void t() { ${type}[] n = new |; } }`, `${type}[]`, true)
+    expect(array.text).toContain(helperImport)
+    expect(array.text.slice(array.cursor - 1, array.cursor + 1)).toBe('[]')
+  })
+
+  it('does not import over a declaration in the file, even with the library present', () => {
+    const local = pick(`class S { static class ${type} {} void t() { ${type} n = new |; } }`, type, true)
+    expect(local.text).toBe(`class S { static class ${type} {} void t() { ${type} n = new ${type}(); } }`)
+  })
+})
+
+it('still imports a catalog type directly from a constructor completion', () => {
+  expect(applyCompletion('class S { void t() { Object n = new |; } }', 'ArrayList<>')).toContain('import java.util.ArrayList;')
 })

@@ -81,6 +81,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
                 <span id="selected-file" class="selected-file"></span>
                 <span id="save-status" class="save-status" aria-live="polite"></span>
               </div>
+              <button id="ai-generate-tests" class="icon-button ai-generate-button" type="button" aria-label="Generate tests with AI" aria-busy="false" disabled></button>
             </div>
             <div class="editor-host" id="editor-host" aria-label="Java source editor">
               <div id="editor" class="editor"></div>
@@ -234,6 +235,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
             <nav class="settings-nav" aria-label="Settings sections" role="tablist" aria-orientation="vertical">
               <button id="settings-appearance-nav" class="settings-nav-item" type="button" role="tab" aria-controls="settings-appearance-panel">Appearance</button>
               <button id="settings-keymap-nav" class="settings-nav-item" type="button" role="tab" aria-controls="settings-keymap-panel">Keymap</button>
+              <button id="settings-llm-nav" class="settings-nav-item" type="button" role="tab" aria-controls="settings-llm-panel">LLM</button>
             </nav>
             <div class="settings-content">
               <section id="settings-appearance-panel" class="settings-panel" role="tabpanel" aria-labelledby="settings-appearance-nav">
@@ -268,10 +270,69 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
                 <div id="shortcuts-body" class="shortcuts-body" role="tabpanel"></div>
                 <p class="shortcuts-note">App commands use Alt on Linux and Cmd on macOS. Standard editor shortcuts such as Ctrl+C, Ctrl+V, and Ctrl+Z remain available on Linux.</p>
               </section>
+              <section id="settings-llm-panel" class="settings-panel llm-settings-panel" role="tabpanel" aria-labelledby="settings-llm-nav" hidden>
+                <div class="settings-panel-heading">
+                  <h3 class="settings-panel-title">LLM</h3>
+                </div>
+                <section class="llm-settings-section" aria-label="API key">
+                  <div class="llm-key-label-row">
+                    <label class="shortcuts-group-title" for="llm-api-key">Claude API key</label>
+                    <a id="llm-keys-link" class="llm-link" href="https://platform.claude.com/settings/keys" target="_blank" rel="noreferrer noopener">Create or manage keys</a>
+                  </div>
+                  <div id="llm-key-entry" class="llm-key-row">
+                    <div class="llm-key-field">
+                      <input id="llm-api-key" class="rename-file-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+                      <button id="llm-toggle-key" class="icon-button llm-key-toggle" type="button" aria-label="Show API key" aria-pressed="false" title="Show API key"></button>
+                    </div>
+                    <button id="llm-save-key" class="primary-button" type="button">Save</button>
+                    <button id="llm-cancel-replace-key" class="secondary-button" type="button" hidden>Cancel</button>
+                  </div>
+                  <div class="llm-key-row">
+                    <p id="llm-key-status" class="settings-description llm-key-status"></p>
+                    <button id="llm-replace-key" class="secondary-button" type="button" hidden>Replace</button>
+                    <button id="llm-clear-key" class="secondary-button" type="button" hidden>Remove</button>
+                  </div>
+                  <p id="llm-key-message" class="llm-message" role="status" aria-live="polite" hidden></p>
+                  <p id="llm-key-note" class="shortcuts-note">Stored unencrypted in a file only your account can read.</p>
+                </section>
+                <section class="llm-settings-section" aria-labelledby="llm-model-title">
+                  <h4 id="llm-model-title" class="shortcuts-group-title">Model</h4>
+                  <label class="sr-only" for="llm-model-select">Model</label>
+                  <div class="llm-key-row">
+                    <select id="llm-model-select" class="rename-file-input llm-model-select"></select>
+                    <button id="llm-refresh-models" class="secondary-button" type="button">Refresh</button>
+                  </div>
+                  <div id="llm-model-notes" class="llm-notes" role="status" aria-live="polite"></div>
+                </section>
+                <section class="llm-settings-section llm-usage-section" aria-labelledby="llm-usage-title">
+                  <div class="llm-usage-heading">
+                    <h4 id="llm-usage-title" class="shortcuts-group-title">Usage</h4>
+                    <a id="llm-console-link" class="llm-link" href="https://platform.claude.com/usage" target="_blank" rel="noreferrer noopener">Open Console</a>
+                  </div>
+                  <div id="llm-usage-controls" class="llm-usage-controls" hidden>
+                    <div class="shortcuts-platform-tabs" role="tablist" aria-label="Usage period">
+                      <button id="llm-usage-day-tab" class="shortcuts-platform-tab" type="button" role="tab" aria-controls="llm-usage-body">Day</button>
+                      <button id="llm-usage-week-tab" class="shortcuts-platform-tab" type="button" role="tab" aria-controls="llm-usage-body">Week</button>
+                    </div>
+                    <span id="llm-usage-all-time" class="llm-usage-all-time"></span>
+                  </div>
+                  <div id="llm-usage-body" class="llm-usage-body" role="tabpanel"></div>
+                </section>
+              </section>
             </div>
           </div>
           <div class="settings-actions">
             <button id="close-settings" class="text-button" type="button">Close</button>
+          </div>
+        </form>
+      </div>
+      <div id="clear-llm-key-dialog" class="dialog-backdrop" hidden>
+        <form id="clear-llm-key-form" class="discard-git-dialog" role="dialog" aria-modal="true" aria-labelledby="clear-llm-key-title" aria-describedby="clear-llm-key-message">
+          <h2 id="clear-llm-key-title" class="discard-git-title">Remove API key?</h2>
+          <p id="clear-llm-key-message" class="discard-git-message">This deletes the saved key. Your model choice and usage history are kept.</p>
+          <div class="discard-git-actions">
+            <button id="cancel-clear-llm-key" class="text-button" type="button">Cancel</button>
+            <button id="confirm-clear-llm-key" class="primary-button discard-git-confirm" type="submit">Remove Key</button>
           </div>
         </form>
       </div>

@@ -11,8 +11,24 @@ import {
   THEME_MODE_KEY,
 } from './layout'
 import { shortcutLabel } from '../shortcuts'
-import type { SettingsSection, ShortcutPlatform, ThemeMode } from './types'
+import {
+  SETTINGS_SECTIONS,
+  type SettingsSection,
+  type ShortcutPlatform,
+  type ThemeMode,
+} from './types'
 import type { UpdatePhase } from '../update-controller'
+
+/** The LLM settings tab, which owns its own DOM and backend requests. */
+export interface LlmSettingsPanel {
+  /** The tab became visible. Not called for overlay re-renders. */
+  activate: () => void
+  /** The settings dialog closed. */
+  dialogClosed: () => void
+  /** Close a confirmation owned by the tab; true when one was open. */
+  handleEscape: () => boolean
+  dispose: () => void
+}
 
 export interface OverlayControllerOptions {
   root: HTMLElement
@@ -20,6 +36,7 @@ export interface OverlayControllerOptions {
   /** The platform used for the first shortcut-reference tab and menu label. */
   macPlatform: boolean
   updatePhase?: UpdatePhase
+  llmSettings?: LlmSettingsPanel
   onRequestUpdate?: () => void | Promise<void>
   onRequestClose?: () => void | Promise<void>
 }
@@ -28,11 +45,31 @@ type FocusableElement = HTMLElement & {
   focus: () => void
 }
 
+function settingsNavTargetIndex(key: string, index: number): number | null {
+  const last = SETTINGS_SECTIONS.length - 1
+  switch (key) {
+    case 'Home':
+      return 0
+    case 'End':
+      return last
+    case 'ArrowUp':
+    case 'ArrowLeft':
+      return Math.max(0, index - 1)
+    case 'ArrowDown':
+    case 'ArrowRight':
+      return Math.min(last, index + 1)
+    default:
+      return null
+  }
+}
+
 /** Own the application-menu and informational/settings overlays. */
 export class OverlayController {
   private readonly root: HTMLElement
   private readonly storage: Storage | undefined
   private readonly macPlatform: boolean
+  private readonly llmSettings: LlmSettingsPanel | undefined
+  private llmSettingsVisible = false
   private readonly onRequestUpdate: (() => void | Promise<void>) | undefined
   private readonly onRequestClose: (() => void | Promise<void>) | undefined
   private readonly listeners: Array<() => void> = []
@@ -52,6 +89,7 @@ export class OverlayController {
     this.root = options.root
     this.storage = options.storage
     this.macPlatform = options.macPlatform
+    this.llmSettings = options.llmSettings
     this.onRequestUpdate = options.onRequestUpdate
     this.onRequestClose = options.onRequestClose
     this.shortcutsPlatform = defaultShortcutPlatform(options.macPlatform)
@@ -139,17 +177,12 @@ export class OverlayController {
     }
     this.settingsSection = section
     this.renderSettingsDialog()
+    this.syncLlmSettingsVisibility()
     queueMicrotask(() => {
       if (this.disposed || !this.settingsDialogOpen) {
         return
       }
-      if (this.settingsSection === 'keymap') {
-        this.element<FocusableElement>(this.shortcutsPlatform === 'macos'
-          ? '#shortcuts-macos-tab'
-          : '#shortcuts-linux-tab').focus()
-      } else {
-        this.root.querySelector<FocusableElement>('#settings-form input:checked')?.focus()
-      }
+      this.root.querySelector<FocusableElement>(this.settingsInitialFocusSelector())?.focus()
     })
   }
 
@@ -161,6 +194,8 @@ export class OverlayController {
     const target = this.settingsDialogFocusTarget
     this.settingsDialogFocusTarget = null
     this.renderSettingsDialog()
+    this.syncLlmSettingsVisibility()
+    this.llmSettings?.dialogClosed()
     this.restoreFocus(target, '#app-menu-button')
   }
 
@@ -170,10 +205,9 @@ export class OverlayController {
     }
     this.settingsSection = section
     this.renderSettingsDialog()
+    this.syncLlmSettingsVisibility()
     if (focus) {
-      this.element<FocusableElement>(section === 'keymap'
-        ? '#settings-keymap-nav'
-        : '#settings-appearance-nav').focus()
+      this.element<FocusableElement>(`#settings-${section}-nav`).focus()
     }
   }
 
@@ -247,7 +281,9 @@ export class OverlayController {
     }
     if (this.settingsDialogOpen) {
       event.preventDefault()
-      this.closeSettingsDialog()
+      if (!this.llmSettings?.handleEscape()) {
+        this.closeSettingsDialog()
+      }
       return true
     }
     if (this.aboutDialogOpen) {
@@ -272,6 +308,7 @@ export class OverlayController {
     for (const remove of this.listeners.splice(0)) {
       remove()
     }
+    this.llmSettings?.dispose()
     this.appMenuFocusTarget = null
     this.settingsDialogFocusTarget = null
     this.aboutDialogFocusTarget = null
@@ -308,6 +345,10 @@ export class OverlayController {
         this.closeSettingsDialog()
       }
     })
+    // Enter in the key field or on a theme option would otherwise reload the webview.
+    this.listen(this.element('#settings-form'), 'submit', (event) => {
+      event.preventDefault()
+    })
     this.listen(this.element('#settings-form'), 'change', (event) => {
       const target = event.target
       if (!(target instanceof HTMLInputElement) || target.name !== 'theme-mode' || !target.checked) {
@@ -335,31 +376,19 @@ export class OverlayController {
         this.setShortcutsPlatform(platform, true)
       })
     }
-    for (const [section, id] of [
-      ['appearance', '#settings-appearance-nav'],
-      ['keymap', '#settings-keymap-nav'],
-    ] as const) {
-      this.listen(this.element<HTMLButtonElement>(id), 'click', () => {
+    for (const [index, section] of SETTINGS_SECTIONS.entries()) {
+      const tab = this.element<HTMLButtonElement>(`#settings-${section}-nav`)
+      this.listen(tab, 'click', () => {
         this.setSettingsSection(section)
       })
-    }
-    const settingsNavItems = [
-      this.element<HTMLButtonElement>('#settings-appearance-nav'),
-      this.element<HTMLButtonElement>('#settings-keymap-nav'),
-    ]
-    for (const tab of settingsNavItems) {
       this.listen(tab, 'keydown', (event) => {
         const keyboardEvent = event as KeyboardEvent
-        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(keyboardEvent.key)) {
+        const target = settingsNavTargetIndex(keyboardEvent.key, index)
+        if (target === null) {
           return
         }
         keyboardEvent.preventDefault()
-        const section: SettingsSection = keyboardEvent.key === 'Home'
-          || keyboardEvent.key === 'ArrowUp'
-          || keyboardEvent.key === 'ArrowLeft'
-          ? 'appearance'
-          : 'keymap'
-        this.setSettingsSection(section, true)
+        this.setSettingsSection(SETTINGS_SECTIONS[target], true)
       })
     }
     this.listen(this.element('#close-about'), 'click', () => {
@@ -423,6 +452,27 @@ export class OverlayController {
 
   private renderAboutDialog(): void {
     renderAboutDialog(this.root, this.aboutDialogOpen)
+  }
+
+  private settingsInitialFocusSelector(): string {
+    switch (this.settingsSection) {
+      case 'appearance':
+        return '#settings-form input:checked'
+      case 'keymap':
+        return this.shortcutsPlatform === 'macos' ? '#shortcuts-macos-tab' : '#shortcuts-linux-tab'
+      case 'llm':
+        return this.root.querySelector<HTMLElement>('#llm-key-entry')?.hidden ? '#llm-replace-key' : '#llm-api-key'
+    }
+  }
+
+  /** Activate the LLM tab only on the transition to visible, never on a re-render. */
+  private syncLlmSettingsVisibility(): void {
+    const visible = this.settingsDialogOpen && this.settingsSection === 'llm'
+    const becameVisible = visible && !this.llmSettingsVisible
+    this.llmSettingsVisible = visible
+    if (becameVisible) {
+      this.llmSettings?.activate()
+    }
   }
 
   private activeElement(): FocusableElement | null {

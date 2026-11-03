@@ -153,6 +153,7 @@ function createRoot(): {
   themeInput.checked = true
   const settingsAppearanceNav = root.register('#settings-appearance-nav')
   const settingsKeymapNav = root.register('#settings-keymap-nav')
+  root.register('#settings-llm-nav')
   const linuxTab = root.register('#shortcuts-linux-tab')
   linuxTab.id = 'shortcuts-linux-tab'
   const macosTab = root.register('#shortcuts-macos-tab')

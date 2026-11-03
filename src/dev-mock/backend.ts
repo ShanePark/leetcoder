@@ -1,4 +1,11 @@
 import type {
+  AiGenerateRequest,
+  AiGenerateResult,
+  AiKeySaveResult,
+  AiModelList,
+  AiStatus,
+  AiUsageSummary,
+  AiUsageTotals,
   BackendClient,
   DailyProblem,
   GitCommitResult,
@@ -13,7 +20,19 @@ import type {
   UpdateStatus,
 } from '../backend'
 import type { ProblemFilePlan } from '../domain'
-import { DAILY_PROBLEM, MANUAL_PROBLEM, MODIFIED_DIFF, addedDiffFor, seedFiles } from './fixtures'
+import {
+  AI_DEFAULT_MODEL_ID,
+  AI_GENERATION_USAGE,
+  AI_MODELS,
+  AI_STATEMENTS,
+  DAILY_PROBLEM,
+  MANUAL_PROBLEM,
+  MODIFIED_DIFF,
+  addedDiffFor,
+  seedAiUsage,
+  seedFiles,
+  type AiUsageEntry,
+} from './fixtures'
 import { delay } from './runtime'
 import { createMockTestRunner } from './test-runner'
 
@@ -280,7 +299,116 @@ export function createDevMockBackend(): BackendClient & {
     async applyUpdate(): Promise<void> {
       throw new Error('Updates are unavailable in the browser preview.')
     },
+
+    ...createMockAi(),
   }
+}
+
+type MockAi = Pick<
+  BackendClient,
+  'aiStatus' | 'aiSaveKey' | 'aiClearKey' | 'aiListModels' | 'aiGenerateTests' | 'aiUsage'
+>
+
+function createMockAi(): MockAi {
+  const usage = seedAiUsage(Date.now())
+  let configured = false
+  let modelsFetchedAt: number | null = null
+
+  return {
+    async aiStatus(): Promise<AiStatus> {
+      return { configured }
+    },
+
+    // The key argument is deliberately not declared: the preview only records that one was saved.
+    async aiSaveKey(): Promise<AiKeySaveResult> {
+      await delay(250)
+      configured = true
+      return { verified: true }
+    },
+
+    async aiClearKey(): Promise<void> {
+      configured = false
+    },
+
+    async aiListModels(refresh: boolean): Promise<AiModelList> {
+      if (!configured) {
+        return { models: [], defaultModelId: null, fetchedAt: null, error: null }
+      }
+      await delay(150)
+      if (refresh || modelsFetchedAt === null) {
+        modelsFetchedAt = Date.now()
+      }
+      return {
+        models: [...AI_MODELS],
+        defaultModelId: AI_DEFAULT_MODEL_ID,
+        fetchedAt: modelsFetchedAt,
+        error: null,
+      }
+    },
+
+    async aiGenerateTests(request: AiGenerateRequest): Promise<AiGenerateResult> {
+      if (!configured) {
+        throw new Error('No API key is configured.')
+      }
+      await delay(900)
+      const { selectedModelId } = request
+      const fellBack = selectedModelId !== null && !AI_MODELS.some((model) => model.id === selectedModelId)
+      const servedModel = selectedModelId === null || fellBack ? AI_DEFAULT_MODEL_ID : selectedModelId
+      usage.push({ ...AI_GENERATION_USAGE, ts: Date.now(), model: servedModel })
+      return { outcome: 'ok', statements: mockAiStatements(request), servedModel, fellBack }
+    },
+
+    async aiUsage(bucketStartsMs: number[]): Promise<AiUsageSummary> {
+      return {
+        buckets: bucketStartsMs.map((startMs, index) => {
+          const end = bucketStartsMs[index + 1] ?? Number.POSITIVE_INFINITY
+          const entries = usage.filter((entry) => entry.ts >= startMs && entry.ts < end)
+          const models = [...new Set(entries.map((entry) => entry.model))].sort()
+          return {
+            startMs,
+            totals: sumAiUsage(entries),
+            perModel: models.map((model) => ({
+              model,
+              totals: sumAiUsage(entries.filter((entry) => entry.model === model)),
+            })),
+          }
+        }),
+        allTime: sumAiUsage(usage),
+        skippedLines: 0,
+      }
+    },
+  }
+}
+
+function mockAiStatements(request: AiGenerateRequest): string[] {
+  const signature = request.entryPoint ?? request.methodHeaders[0] ?? ''
+  const method = /(\w+)\s*\(/.exec(signature)?.[1] ?? 'solve'
+  return [...(AI_STATEMENTS.get(method) ?? [`assertThat(${method}()).isNotNull();`])]
+}
+
+function sumAiUsage(entries: readonly AiUsageEntry[]): AiUsageTotals {
+  const totals: AiUsageTotals = {
+    requests: entries.length,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    costUsd: 0,
+    unpricedRequests: 0,
+    approximateRequests: 0,
+    refusedRequests: 0,
+  }
+  for (const entry of entries) {
+    totals.inputTokens += entry.inputTokens
+    totals.outputTokens += entry.outputTokens
+    totals.cacheReadTokens += entry.cacheReadTokens
+    totals.cacheWriteTokens += entry.cacheWriteTokens
+    totals.costUsd += entry.costUsd ?? 0
+    totals.unpricedRequests += entry.costUsd === null ? 1 : 0
+    totals.approximateRequests += entry.approximate ? 1 : 0
+    totals.refusedRequests += entry.refused ? 1 : 0
+  }
+  return totals
 }
 
 function escapeRegExp(value: string): string {

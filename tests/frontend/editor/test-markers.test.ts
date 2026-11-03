@@ -5,6 +5,8 @@ import {
   findJavaTestMethodMarkers,
   testRunShortcutLabel,
 } from '../../../src/editor'
+import { renderJavaProblemSource } from '../../../src/domain/template'
+import { findBareJavaTest } from '../../../src/editor/test-markers'
 import { javaState } from './helpers'
 
 describe('Java test method lookup', () => {
@@ -138,5 +140,82 @@ describe('Java test method lookup', () => {
   it('uses the platform-specific selected-test shortcut label', () => {
     expect(testRunShortcutLabel('other')).toBe('Ctrl+Shift+R')
     expect(testRunShortcutLabel('mac')).toBe('⌃⇧R')
+  })
+})
+
+describe('bare test stub lookup', () => {
+  const withBody = (body: string, annotation = '@Test') => (
+    `class Solution {\n    ${annotation}\n    public void test() {${body}}\n}\n`
+  )
+
+  it.each([
+    ['the template statement without a semicolon', '\n        assertThat()\n    '],
+    ['the statement with a semicolon', '\n        assertThat();\n    '],
+    ['spaces inside the statement', ' assertThat ( ) ; '],
+    ['an empty body', ''],
+    ['a blank body', '\n\n    '],
+  ])('treats %s as bare and returns the range between the braces', (_label, body) => {
+    const source = withBody(body)
+    const from = source.indexOf('test() {') + 'test() {'.length
+    expect(findBareJavaTest(source)).toEqual({
+      status: 'bare',
+      body: { from, to: from + body.length },
+    })
+  })
+
+  it('finds the stub in the generated problem template', () => {
+    const source = renderJavaProblemSource('example', 'Q1Example', 'public int example(int[] nums) {')
+    const lookup = findBareJavaTest(source)
+    expect(lookup.status).toBe('bare')
+    if (lookup.status === 'bare') {
+      expect(source.slice(lookup.body.from, lookup.body.to)).toBe('\n        assertThat()\n    ')
+    }
+  })
+
+  it.each([
+    ['a line comment', ' // keep\n '],
+    ['a block comment', ' /* keep */ '],
+    ['a comment after the statement', ' assertThat() // keep\n '],
+    ['a comment between the call and its semicolon', ' assertThat() /* keep */ ; '],
+    ['a comment inside the arguments', ' assertThat(/* keep */) '],
+    ['a partial assertion', ' assertThat(x) '],
+    ['an unfinished argument list', ' assertThat( '],
+    ['a chained assertion', ' assertThat().isEqualTo(1); '],
+    ['a qualified call', ' Assertions.assertThat(); '],
+    ['another method name', ' assertThatCode(); '],
+    ['two stubs', ' assertThat(); assertThat(); '],
+    ['an extra empty statement', ' assertThat();; '],
+    ['a lone empty statement', ' ; '],
+    ['a local declaration', ' int x = 1; '],
+    ['an empty inner block', ' {} '],
+  ])('treats %s as filled', (_label, body) => {
+    expect(findBareJavaTest(withBody(body))).toEqual({ status: 'filled' })
+  })
+
+  it('accepts a qualified @Test and ignores other method names and non-test methods', () => {
+    expect(findBareJavaTest(withBody('', '@org.junit.jupiter.api.Test')).status).toBe('bare')
+    expect(findBareJavaTest(withBody('', '@Disabled'))).toEqual({ status: 'missing' })
+    expect(findBareJavaTest('class S {\n    @Test void test2() {}\n    @Test void testing() {}\n}'))
+      .toEqual({ status: 'missing' })
+    expect(findBareJavaTest('class S {\n    @Test void test2() { x(); }\n    @Test void test() {}\n}').status)
+      .toBe('bare')
+  })
+
+  it('ignores a test method named only in a comment or a string', () => {
+    const source = 'class S {\n    // @Test void test() {}\n    String s = "@Test void test() {}";\n}'
+    expect(findBareJavaTest(source)).toEqual({ status: 'missing' })
+  })
+
+  it('treats a body it cannot trust as filled', () => {
+    expect(findBareJavaTest('abstract class S {\n    @Test abstract void test();\n}')).toEqual({ status: 'filled' })
+    expect(findBareJavaTest('class S {\n    @Test void test() {\n        assertThat()\n'))
+      .toEqual({ status: 'filled' })
+    expect(findBareJavaTest('class S {\n    @Test void test() {}\n    class T { @Test void test() {} }\n}'))
+      .toEqual({ status: 'filled' })
+  })
+
+  it('still finds the stub beside a syntax error in another method', () => {
+    const source = 'class S {\n    int a() { int x = ; }\n    @Test void test() {\n        assertThat()\n    }\n}'
+    expect(findBareJavaTest(source).status).toBe('bare')
   })
 })

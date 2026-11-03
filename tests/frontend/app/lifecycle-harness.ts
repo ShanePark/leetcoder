@@ -1,6 +1,6 @@
 import './lifecycle-mocks'
 import { vi } from 'vitest'
-import type { BackendClient, ProblemFileEntry, PsLibraryMetadata, RepositoryFilesChanged } from '../../../src/backend'
+import type { AiUsageTotals, BackendClient, ProblemFileEntry, PsLibraryMetadata, RepositoryFilesChanged } from '../../../src/backend'
 import { LeetcoderApp } from '../../../src/app'
 export { LeetcoderApp }
 
@@ -52,6 +52,7 @@ export class FakeElement extends FakeEventTarget {
     contains: (name: string): boolean => this.classList.values.has(name),
   }
   readonly dataset: Record<string, string> = {}
+  readonly attributes = new Map<string, string>()
   readonly children: FakeElement[] = []
   ownerDocument!: FakeDocument
   parentElement: FakeElement | null = null
@@ -102,6 +103,7 @@ export class FakeElement extends FakeEventTarget {
   }
 
   setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value)
     if (name === 'title') this.title = value
   }
 
@@ -251,6 +253,18 @@ export const psLibraryMetadata: PsLibraryMetadata = {
   methods: [],
 }
 
+const emptyAiUsageTotals: AiUsageTotals = {
+  requests: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  costUsd: 0,
+  unpricedRequests: 0,
+  approximateRequests: 0,
+  refusedRequests: 0,
+}
+
 interface BackendHarness {
   backend: BackendClient
   watcher: {
@@ -307,6 +321,16 @@ export function createBackend(): BackendHarness {
     }),
     buildUpdate: vi.fn().mockResolvedValue({ commit: 'latest' }),
     applyUpdate: vi.fn().mockResolvedValue(undefined),
+    aiStatus: vi.fn().mockResolvedValue({ configured: false }),
+    aiSaveKey: vi.fn().mockResolvedValue({ verified: true }),
+    aiClearKey: vi.fn().mockResolvedValue(undefined),
+    aiListModels: vi.fn().mockResolvedValue({ models: [], defaultModelId: null, fetchedAt: null, error: null }),
+    aiGenerateTests: vi.fn().mockResolvedValue({ outcome: 'ok', statements: [], servedModel: '', fellBack: false }),
+    aiUsage: vi.fn().mockResolvedValue({
+      buckets: [],
+      allTime: emptyAiUsageTotals,
+      skippedLines: 0,
+    }),
   } as unknown as BackendClient
   return { backend, watcher }
 }

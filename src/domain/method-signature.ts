@@ -12,35 +12,50 @@ export function extractJavaMethodSignature(snippet: string | null | undefined): 
     return null
   }
 
-  const masked = maskJavaTrivia(snippet)
+  const candidates = solutionMemberHeaders(maskJavaTrivia(snippet))
+    .map((header) => methodSignatureFromSegment(header, 'Solution'))
+    .filter((candidate) => candidate !== null)
+
+  // LeetCode's entry point is normally public. If a snippet happens to declare
+  // a private helper first, prefer the public entry point while still retaining
+  // a package-private fallback.
+  return candidates.find((candidate) => /\bpublic\b/.test(candidate)) ?? candidates[0] ?? null
+}
+
+/**
+ * Whether `class Solution` declares a constructor, which marks a design problem:
+ * its example calls need an instance, and its other methods still look like an
+ * ordinary entry point.
+ */
+export function declaresJavaSolutionConstructor(snippet: string | null | undefined): boolean {
+  if (!snippet) {
+    return false
+  }
+  return solutionMemberHeaders(maskJavaTrivia(snippet)).some((header) =>
+    /^(?:(?:public|protected|private)\s+)?(?:<[\s\S]*>\s*)?Solution\s*\(/.test(withoutLeadingAnnotations(header)))
+}
+
+/** The text before each member body of `class Solution`, from masked source. */
+function solutionMemberHeaders(masked: string): string[] {
   const classMatch = /\bclass\s+Solution\b/.exec(masked)
   if (!classMatch) {
-    return null
+    return []
   }
 
   const classOpenBrace = masked.indexOf('{', classMatch.index + classMatch[0].length)
   if (classOpenBrace < 0) {
-    return null
+    return []
   }
 
+  const headers: string[] = []
   let depth = 1
   let segmentStart = classOpenBrace + 1
-  let firstCandidate: string | null = null
 
   for (let index = classOpenBrace + 1; index < masked.length; index += 1) {
     const character = masked[index]
     if (character === '{') {
       if (depth === 1) {
-        const candidate = methodSignatureFromSegment(masked.slice(segmentStart, index), 'Solution')
-        if (candidate) {
-          // LeetCode's entry point is normally public. If a snippet happens
-          // to declare a private helper first, prefer the public entry point
-          // while still retaining a package-private fallback.
-          if (/\bpublic\b/.test(candidate)) {
-            return candidate
-          }
-          firstCandidate ??= candidate
-        }
+        headers.push(masked.slice(segmentStart, index))
       }
       depth += 1
       continue
@@ -64,18 +79,19 @@ export function extractJavaMethodSignature(snippet: string | null | undefined): 
     }
   }
 
-  return firstCandidate
+  return headers
+}
+
+/**
+ * Annotations are not part of a method signature inserted into the user's
+ * class. Strip only annotations at the beginning of a declaration.
+ */
+function withoutLeadingAnnotations(segment: string): string {
+  return segment.trim().replace(/^(?:@[\w$.]+(?:\s*\([^)]*\))?\s*)+/, '').trim()
 }
 
 function methodSignatureFromSegment(segment: string, className: string): string | null {
-  let candidate = segment.trim()
-  if (candidate.length === 0) {
-    return null
-  }
-
-  // Annotations are not part of the method signature inserted into the
-  // user's class. Strip only annotations at the beginning of a declaration.
-  candidate = candidate.replace(/^(?:@[\w$.]+(?:\s*\([^)]*\))?\s*)+/, '').trim()
+  const candidate = withoutLeadingAnnotations(segment)
   if (candidate.length === 0 || candidate.includes('=')) {
     return null
   }

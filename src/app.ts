@@ -5,6 +5,7 @@ import {
   errorMessage,
   type BackendClient,
   type ProblemFileEntry,
+  type PsLibraryMetadata,
 } from './backend'
 import {
   findJavaTestMethodAt,
@@ -61,6 +62,8 @@ import {
 } from './app/tabs-view'
 import { TestRunController } from './app/test-run-controller'
 import { ToastController } from './app/toast-controller'
+import { LlmSettingsController, readSelectedLlmModel } from './app/llm-settings-controller'
+import { aiFillMayTakeFocus, createAiController, psSignatures, type AiController } from './app/ai-controller'
 import { OverlayController } from './app/overlay-controller'
 import {
   renderGitPanel as renderGitPanelView,
@@ -140,6 +143,9 @@ export class LeetcoderApp {
   private editor: JavaEditor
   private readonly liveDiagnostics: LiveDiagnosticsController
   private readonly psLibraryController: PsLibraryController
+  private psLibraryMetadata: PsLibraryMetadata | null = null
+  private readonly aiController: AiController
+  private readonly llmSettings: LlmSettingsController
   private readonly javaTypeMembersController: JavaTypeMembersController
   private readonly dailyProblemView: DailyProblemViewRenderer
   private readonly problemSelectionController: ProblemSelectionController
@@ -298,10 +304,12 @@ export class LeetcoderApp {
       },
     })
     this.toastController = new ToastController(this.element<HTMLElement>('#toast-stack'))
+    this.llmSettings = new LlmSettingsController({ root: this.root, backend: this.backend, storage: this.storage })
     this.overlay = new OverlayController({
       root: this.root,
       storage: this.storage,
       macPlatform: currentIsMacPlatform(),
+      llmSettings: this.llmSettings,
       onRequestUpdate: () => this.requestApplicationUpdate(),
       onRequestClose: () => this.requestApplicationClose(),
     })
@@ -441,7 +449,10 @@ export class LeetcoderApp {
     })
     this.psLibraryController = new PsLibraryController({
       backend: this.backend,
-      setMetadata: (metadata) => this.editor.setPsLibraryMetadata(metadata),
+      setMetadata: (metadata) => {
+        this.psLibraryMetadata = metadata
+        this.editor.setPsLibraryMetadata(metadata)
+      },
       setMessage: (message, tone) => this.setMessage(message, tone),
     })
     this.documentController = new DocumentController({
@@ -532,12 +543,39 @@ export class LeetcoderApp {
       openSettings: options.openPermissionSettings ?? (() => tauriInvoke<void>('open_repository_permission_settings')),
       showError: (message, actions, detail) => this.toastController.show(message, 'error', actions, detail),
     })
+    this.aiController = createAiController(
+      {
+        aiStatus: () => this.backend.aiStatus(),
+        fetchProblemByNumber: (frontendId) => this.backend.fetchProblemByNumber(frontendId),
+        aiGenerateTests: (request) => this.backend.aiGenerateTests(request),
+        currentTarget: () => ({
+          repoPath: this.state.repoPath,
+          path: this.state.selectedPath,
+          repositoryGeneration: this.repository.generation,
+        }),
+        headerProblem: () => this.state.dailyProblem,
+        readContext: () => this.editor.aiTestContext(),
+        selectedModelId: () => readSelectedLlmModel(this.storage),
+        psSignatures: () => psSignatures(this.psLibraryMetadata),
+        applyStatements: (statements) => this.editor.applyAiTests(statements),
+        focusEditor: () => {
+          if (aiFillMayTakeFocus(this.root, this.element<HTMLElement>('#ai-generate-tests'))) this.editor.focus()
+        },
+      },
+      {
+        requestChanged: () => this.controlsView.updateAiButton(),
+        showMessage: (message, tone) => this.setMessage(message, tone),
+        showMissingKey: () => this.overlay.openSettingsDialog('llm'),
+        generationFinished: () => this.llmSettings.refreshUsageIfVisible(),
+      },
+    )
     this.controlsView = new ShellControlsView({
       root: this.root,
       state: this.state,
       pickerOpen: () => this.repository.pickerOpen,
       macPlatform: currentIsMacPlatform,
       invalidatePendingNavigation: () => this.documentController.invalidatePendingNavigation(),
+      aiRequestPath: () => this.aiController.requestPath,
     })
     this.bindEvents()
     this.renderAll()
@@ -594,6 +632,7 @@ export class LeetcoderApp {
     }
     await this.prepareToClose()
     this.destroyed = true
+    this.aiController.dispose()
     this.projectContentSearchController.dispose()
     this.psLibraryController.dispose()
     this.javaTypeMembersController.dispose()
@@ -700,6 +739,9 @@ export class LeetcoderApp {
       } else {
         void this.testRunController.runCurrentTest()
       }
+    })
+    this.listen(this.element<HTMLButtonElement>('#ai-generate-tests'), 'click', () => {
+      void this.aiController.generate()
     })
     this.listen(this.element<HTMLButtonElement>('#tests-tab'), 'click', () => {
       this.selectBottomPanelTab('tests')

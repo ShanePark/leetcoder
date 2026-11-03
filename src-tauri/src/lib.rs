@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod commands;
 mod git;
 mod java_library;
@@ -78,6 +79,12 @@ pub fn run() {
             update::check_for_update,
             update::build_update,
             update::apply_update,
+            ai::ai_status,
+            ai::ai_save_key,
+            ai::ai_clear_key,
+            ai::ai_list_models,
+            ai::ai_generate_tests,
+            ai::ai_usage,
         ])
         .build(tauri::generate_context!())
         .expect("error while running leetcoder")

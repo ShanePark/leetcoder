@@ -206,6 +206,82 @@ export type TestRunProgress =
 
 export type TestRunProgressHandler = (progress: TestRunProgress) => void
 
+/** Whether an AI provider credential is stored. The key itself never leaves native code. */
+export interface AiStatus {
+  configured: boolean
+}
+
+export interface AiKeySaveResult {
+  /** False when the key was saved but the provider could not be reached to verify it. */
+  verified: boolean
+}
+
+export interface AiModel {
+  id: string
+  displayName: string
+  deprecated: boolean
+  /** A newer model of the same line exists. It stays usable as an existing pin. */
+  superseded: boolean
+}
+
+export interface AiModelList {
+  models: AiModel[]
+  defaultModelId: string | null
+  fetchedAt: number | null
+  /** The refresh failed; `models` is the cached list. */
+  error: string | null
+}
+
+export interface AiGenerateRequest {
+  selectedModelId: string | null
+  problemTitle: string
+  problemContent: string
+  /** The snippet signature that identifies the method under test. */
+  entryPoint: string | null
+  /** The problem's starting code, which shows classes the file may not declare yet. */
+  javaSnippet: string | null
+  methodHeaders: string[]
+  psSignatures: string[]
+}
+
+export interface AiGenerateResult {
+  outcome: 'ok' | 'refused' | 'truncated'
+  /** Empty unless `outcome` is `ok`. */
+  statements: string[]
+  servedModel: string
+  /** A pinned model left the list, so the default was used. */
+  fellBack: boolean
+}
+
+export interface AiUsageTotals {
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  costUsd: number
+  unpricedRequests: number
+  approximateRequests: number
+  refusedRequests: number
+}
+
+export interface AiModelUsage {
+  model: string
+  totals: AiUsageTotals
+}
+
+export interface AiUsageBucket {
+  startMs: number
+  totals: AiUsageTotals
+  perModel: AiModelUsage[]
+}
+
+export interface AiUsageSummary {
+  buckets: AiUsageBucket[]
+  allTime: AiUsageTotals
+  skippedLines: number
+}
+
 export interface BackendClient {
   validateProject(repoPath: string): Promise<ProjectValidation>
   inspectPsLibrary(repoPath: string): Promise<PsLibraryMetadata>
@@ -262,6 +338,17 @@ export interface BackendClient {
   buildUpdate(): Promise<UpdateBuild>
   /** Install the staged build and restart into it. */
   applyUpdate(): Promise<void>
+  aiStatus(): Promise<AiStatus>
+  /** Rejects when the provider rejects the key, which is then not saved. */
+  aiSaveKey(apiKey: string): Promise<AiKeySaveResult>
+  aiClearKey(): Promise<void>
+  aiListModels(refresh: boolean): Promise<AiModelList>
+  aiGenerateTests(request: AiGenerateRequest): Promise<AiGenerateResult>
+  /**
+   * Usage per bucket, with one bucket for each ascending start. A bucket runs up
+   * to the next start and the last is open-ended; older entries count only toward `allTime`.
+   */
+  aiUsage(bucketStartsMs: number[]): Promise<AiUsageSummary>
 }
 
 /** Tauri's event bridge, narrowed to what the watcher subscription needs. */

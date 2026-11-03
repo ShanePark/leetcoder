@@ -1,4 +1,4 @@
-import { JAVA_TYPE_IMPORTS, TYPE_GROUPS, type JavaSymbol } from './model'
+import { JAVA_HELPER_NODE_TYPES, JAVA_TYPE_IMPORTS, TYPE_GROUPS, type JavaSymbol } from './model'
 import { baseType } from './source'
 import { importLines } from './imports'
 
@@ -49,7 +49,7 @@ export function canonicalTypes(source: string, typeName: string): string[] {
     .filter((name) => !name.endsWith('.*') && name.slice(name.lastIndexOf('.') + 1) === simpleName)
   if (explicit.length) return [...new Set(explicit)]
 
-  const knownType = JAVA_TYPE_IMPORTS[simpleName]
+  const knownType = JAVA_HELPER_NODE_TYPES.has(simpleName) ? undefined : JAVA_TYPE_IMPORTS[simpleName]
   if (knownType) return [knownType]
   if (JAVA_LANG_TYPES.has(simpleName)) return [`java.lang.${simpleName}`]
 
