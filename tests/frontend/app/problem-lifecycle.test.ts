@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { normalizeProblemNumber, utcDateKey } from '../../../src/app'
+import { normalizeProblemNumber, problemSlugFromUrl, utcDateKey } from '../../../src/app'
 import {
   FileOperationsController,
   type FileOperationsBackend,
@@ -42,7 +42,7 @@ function selectionHarness(overrides: Partial<SelectionState> = {}): {
   controller: ProblemSelectionController
   state: SelectionState
   fetchDailyProblem: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchDailyProblem']>>
-  fetchProblemByNumber: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchProblemByNumber']>>
+  fetchProblemBySlug: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchProblemBySlug']>>
   messages: Array<{ message: string; tone: string }>
 } {
   const state: SelectionState = {
@@ -55,11 +55,11 @@ function selectionHarness(overrides: Partial<SelectionState> = {}): {
     ...overrides,
   }
   const fetchDailyProblem = vi.fn<ProblemSelectionControllerBackend['fetchDailyProblem']>()
-  const fetchProblemByNumber = vi.fn<ProblemSelectionControllerBackend['fetchProblemByNumber']>()
+  const fetchProblemBySlug = vi.fn<ProblemSelectionControllerBackend['fetchProblemBySlug']>()
   const messages: Array<{ message: string; tone: string }> = []
   const backend: ProblemSelectionControllerBackend = {
     fetchDailyProblem,
-    fetchProblemByNumber,
+    fetchProblemBySlug,
   }
   const controller = new ProblemSelectionController({
     state,
@@ -69,7 +69,7 @@ function selectionHarness(overrides: Partial<SelectionState> = {}): {
     isWindowVisible: () => true,
     isDestroyed: () => false,
   })
-  return { controller, state, fetchDailyProblem, fetchProblemByNumber, messages }
+  return { controller, state, fetchDailyProblem, fetchProblemBySlug, messages }
 }
 
 describe('problem lookup input', () => {
@@ -86,20 +86,64 @@ describe('problem lookup input', () => {
     expect(normalizeProblemNumber('abc')).toBeNull()
   })
 
+  it.each([
+    ['https://leetcode.com/problems/minimum-moves-to-equal-array-elements-iii/description/', 'minimum-moves-to-equal-array-elements-iii'],
+    ['https://leetcode.com/problems/two-sum', 'two-sum'],
+    ['https://leetcode.com/problems/two-sum/', 'two-sum'],
+    ['  https://leetcode.com/problems/two-sum/\n', 'two-sum'],
+    ['https://www.leetcode.com/problems/two-sum/', 'two-sum'],
+    ['http://leetcode.com/problems/two-sum/', 'two-sum'],
+    ['leetcode.com/problems/two-sum', 'two-sum'],
+    ['www.leetcode.com/problems/3sum/', '3sum'],
+    ['https://leetcode.com/problems/two-sum/submissions/1234/', 'two-sum'],
+    ['https://leetcode.com/problems/two-sum?envType=daily', 'two-sum'],
+    ['https://leetcode.com/problems/two-sum/description/?envType=daily#top', 'two-sum'],
+    ['https://leetcode.com/problems/two-sum#top', 'two-sum'],
+  ])('reads the slug from %s', (pasted, slug) => {
+    expect(problemSlugFromUrl(pasted)).toBe(slug)
+  })
+
+  it.each([
+    [''],
+    ['   '],
+    ['1'],
+    ['3622'],
+    ['two-sum'],
+    ['https://leetcode.cn/problems/two-sum/'],
+    ['https://example.com/problems/two-sum/'],
+    ['https://example.com/leetcode.com/problems/two-sum/'],
+    ['https://leetcode.com.example.com/problems/two-sum/'],
+    ['https://notleetcode.com/problems/two-sum/'],
+    ['https://user@leetcode.com/problems/two-sum/'],
+    ['https://leetcode.com:8443/problems/two-sum/'],
+    ['ftp://leetcode.com/problems/two-sum/'],
+    ['https://leetcode.com/'],
+    ['https://leetcode.com/problems/'],
+    ['https://leetcode.com/problems//description/'],
+    ['https://leetcode.com/problemset/two-sum/'],
+    ['https://leetcode.com/problems/Two-Sum/'],
+    ['https://leetcode.com/problems/two_sum/'],
+    ['https://leetcode.com/problems/two sum/'],
+    ['https://leetcode.com/problems/two-sum/\nhttps://leetcode.com/problems/3sum/'],
+  ])('rejects %j', (pasted) => {
+    expect(problemSlugFromUrl(pasted)).toBeNull()
+  })
+
   it('keeps the displayed problem when a manual lookup fails', async () => {
     const displayed = problem('1', '2026-08-23')
-    const { controller, state, fetchProblemByNumber, messages } = selectionHarness({
+    const { controller, state, fetchProblemBySlug, messages } = selectionHarness({
       dailyProblem: displayed,
     })
-    fetchProblemByNumber.mockRejectedValue(new Error('not found'))
+    fetchProblemBySlug.mockRejectedValue(new Error('not found'))
+    const pasted = 'https://leetcode.com/problems/no-such-problem/'
 
-    await controller.loadProblemByNumber('9999')
+    await controller.loadProblemFromUrl(pasted)
 
     expect(state.dailyProblem).toBe(displayed)
-    expect(controller.problemNumberDraft).toBe('1')
+    expect(controller.problemUrlDraft).toBe(pasted)
     expect(state.problemSelection).toBe('daily')
     expect(messages).toEqual([{
-      message: 'Could not load problem #9999: not found',
+      message: 'Could not load no-such-problem: not found',
       tone: 'error',
     }])
     controller.dispose()

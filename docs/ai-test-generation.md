@@ -31,7 +31,7 @@ code, and OAuth scaffolding.
 | D2 | Usage comes from an in-app ledger only, with a link to the Console for billed totals and balance. | Usage and cost APIs need an admin credential and are unavailable to individual accounts. |
 | D3 | The newest model of each line is selectable in settings. With no explicit choice the app uses the newest Haiku, currently Haiku 5.5, and follows new releases. An explicit choice stays pinned, even after a newer version leaves it out of the picker. | Requested by the owner, who first asked for every model and narrowed this after seeing the 13-entry list, then moved the default from Sonnet to Haiku because this task needs little inference. |
 | D4 | The button only fills a bare stub. Anything else gets a message and no API call. | Cannot destroy written tests or spend money by accident. Undo restores the stub, so regenerating still works. |
-| D5 | The button follows the open file, not the displayed problem. | The header can show problem A while file B is open. |
+| D5 | The button follows the open file, not the displayed problem, and runs only when the two match. | The header can show problem A while file B is open. The button sends no LeetCode request, so a mismatch stops with a message. |
 | D6 | No model IDs or prices are hardcoded in the app. | Both change over time. Requested by the owner. |
 | D7 | No provider trait yet. Plain functions return neutral types, and the facade gains a `match` with the second provider. Persisted formats are fixed now. | Frontend and native ship in one binary, so code can change freely later. Only stored data is expensive to change. Native async trait methods are not dyn-compatible, so a trait would add cost with one implementation. |
 | D8 | Send only: problem `content`, non-test method headers from the current document, the snippet signature to identify the entry point, `Ps` signatures, and fixed helper examples. No method bodies, path, repository name, or Git data. | The solution body is unnecessary and could bias expected values. Headers from the document survive a renamed method. |
@@ -341,10 +341,12 @@ at click time, not at render.
 
 ### Button behavior
 
-One in-flight flag in the controller is set before any LeetCode fetch and checked
-on click. Shows a spinner, `aria-busy`, and a title naming the file. No cancel
-button, since the timeout bounds the call. The problem number comes from the
-`Q<number>` file name; the header problem is reused when the IDs match.
+One in-flight flag in the controller is set before anything asynchronous and
+checked on click. Shows a spinner, `aria-busy`, and a title naming the file. No
+cancel button, since the timeout bounds the call. The problem number comes from the
+`Q<number>` file name. The button sends no LeetCode request: it uses the problem the
+app has loaded, the one the Description panel shows, when the numbers match.
+Otherwise it asks for that problem's URL to be pasted in the header and stops.
 
 ### Model catalog
 
@@ -423,7 +425,7 @@ another line automatically. If no Haiku exists, ask the user to choose.
 | `test()` missing or filled | Message, no API call. |
 | No `content` | Message, no API call. |
 | An example needs an interface or API the platform implements, such as `MountainArray` | The model returns no statements, and the result is rejected with a message. The call is charged. |
-| `fetchProblemByNumber` fails | Message, no API call. |
+| The loaded problem is another one, or none is loaded | Message asking to paste the file's problem URL in the header. No LeetCode request, no API call. |
 | Validation rejects the output | Message. Buffer untouched. Usage recorded. |
 | File or repository changed during the call | Result discarded with a toast. Usage recorded. |
 | 401, 429, 5xx, 3xx, or timeout | Toast with a readable reason. Buffer untouched. |
@@ -467,13 +469,12 @@ EVAL_MODEL=<model id> npm run eval:prompt
 EVAL_MODEL=<model id> EVAL_CASES=146,133 npm run eval:prompt
 ```
 
-`EVAL_DRY=1` makes no model call and never loads the key. It fetches the problems,
-checks the baselines, builds every request and prints its size, then splices one
-trivial statement into each case and runs it. `EVAL_PS_REPO` overrides the default
-`../ps`. The dry run counts as real LeetCode traffic, so the policy in `AGENTS.md`
-applies. Only uncached problems are fetched, 10 seconds apart, and the fetch stops
-at its first failure, with no retry. The baseline and splice checks still
-run without the problem text, but the run fails and a real run makes no call.
+`EVAL_DRY=1` makes no model call and never loads the key. It checks the baselines,
+builds every request and prints its size, then splices one trivial statement into
+each case and runs it. `EVAL_PS_REPO` overrides the default `../ps`. The eval sends
+no LeetCode request and reads problem text only from `eval/.cache/problems/`. The
+baseline and splice checks still run without the problem text, but the run fails
+and a real run makes no call.
 
 Each case stops at its first failed stage:
 
@@ -495,8 +496,9 @@ source set, which the plain `test` task does not run, and it is never written to
 Gradle's ignored directories.
 
 Problem text stays in the ignored `eval/.cache/`, because this repository is public.
-`eval/cases.ts` holds only numbers, paths, and labels. Delete `eval/.cache/` to fetch
-the problems and Ps signatures again. The native steps are ignored tests in
+`eval/cases.ts` holds only numbers, paths, and labels. Delete
+`eval/.cache/ps-metadata.json` to inspect the Ps signatures again. Nothing fetches
+the cached problems, so deleting them loses them. The native steps are ignored tests in
 `src-tauri/src/ai/eval.rs`, which do nothing unless the driver sets their input and
 output paths. They build in their own target directory, which can be removed with:
 

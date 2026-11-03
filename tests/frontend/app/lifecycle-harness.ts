@@ -281,7 +281,7 @@ export function createBackend(): BackendHarness {
   const backend = {
     validateProject: vi.fn().mockResolvedValue({ valid: true }),
     fetchDailyProblem: vi.fn().mockResolvedValue(dailyProblem),
-    fetchProblemByNumber: vi.fn().mockResolvedValue(dailyProblem),
+    fetchProblemBySlug: vi.fn().mockResolvedValue(dailyProblem),
     listProblemFiles: vi.fn().mockResolvedValue([file]),
     readProblemFile: vi.fn().mockResolvedValue('class Q1TwoSum {}'),
     createProblemFile: vi.fn().mockResolvedValue(undefined),

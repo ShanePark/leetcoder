@@ -19,9 +19,9 @@ export interface AiTarget {
 }
 
 export interface AiControllerApi
-  extends Pick<BackendClient, 'aiStatus' | 'fetchProblemByNumber' | 'aiGenerateTests'> {
+  extends Pick<BackendClient, 'aiStatus' | 'aiGenerateTests'> {
   currentTarget: () => AiTarget
-  /** The problem the header shows, which may not be the open file's problem. */
+  /** The problem the app has loaded, which may not be the open file's problem. */
   headerProblem: () => DailyProblem | null
   readContext: () => AiTestContext
   selectedModelId: () => string | null
@@ -169,11 +169,18 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     return context
   }
 
-  const loadProblem = (problemNumber: string): Promise<DailyProblem> => {
-    const header = api.headerProblem()
-    return header && normalizeProblemNumber(header.frontendId) === problemNumber
-      ? Promise.resolve(header)
-      : api.fetchProblemByNumber(problemNumber)
+  /** The loaded problem when it is the open file's, or null with a message. No request is sent. */
+  const loadedProblem = (problemNumber: string): DailyProblem | null => {
+    const loaded = api.headerProblem()
+    if (loaded && normalizeProblemNumber(loaded.frontendId) === problemNumber) {
+      return loaded
+    }
+    const current = loaded ? `problem #${loaded.frontendId} is loaded` : 'no problem is loaded'
+    ui.showMessage(
+      `This file is problem #${problemNumber}, but ${current}. Paste the URL for #${problemNumber} in the header, then try again.`,
+      'error',
+    )
+    return null
   }
 
   const finish = (target: AiTarget, name: string, result: AiGenerateResult): void => {
@@ -223,11 +230,11 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         ui.showMissingKey()
         return
       }
-      if (!fillableContext(target, name)) return
+      const context = fillableContext(target, name)
+      if (!context) return
 
-      action = `load problem #${problemNumber}`
-      const problem = await loadProblem(problemNumber)
-      if (disposed) return
+      const problem = loadedProblem(problemNumber)
+      if (!problem) return
       if (!problem.content?.trim()) {
         ui.showMessage(`Problem #${problemNumber} has no description to read examples from.`, 'error')
         return
@@ -238,9 +245,6 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
       // no single method is the entry point and the file need not declare it yet.
       const designProblem = javaSnippet !== null && (!signature || declaresJavaSolutionConstructor(javaSnippet))
       const entryPoint = designProblem ? null : signature
-      // The fetch gives the user time to switch files or fill the stub.
-      const context = fillableContext(target, name)
-      if (!context) return
       if (context.methodHeaders.length === 0 && !designProblem) {
         ui.showMessage(`${name} has no method to test. No request was sent.`, 'error')
         return

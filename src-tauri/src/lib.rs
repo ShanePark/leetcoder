@@ -56,7 +56,7 @@ pub fn run() {
             commands::open_repository_permission_settings,
             commands::validate_project,
             commands::fetch_daily_problem,
-            commands::fetch_problem_by_number,
+            commands::fetch_problem_by_slug,
             commands::list_problem_files,
             commands::search_project,
             commands::inspect_ps_library,

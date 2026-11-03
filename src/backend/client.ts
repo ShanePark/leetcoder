@@ -78,8 +78,8 @@ export function createBackendClient(
       return normalizeDailyProblem(response)
     },
 
-    async fetchProblemByNumber(frontendId) {
-      const response = await invoke<unknown>('fetch_problem_by_number', { frontendId })
+    async fetchProblemBySlug(titleSlug) {
+      const response = await invoke<unknown>('fetch_problem_by_slug', { titleSlug })
       return normalizeDailyProblem(response)
     },
 

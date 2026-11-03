@@ -1,5 +1,4 @@
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
 
 use crate::models::DailyProblem;
 
@@ -35,42 +34,7 @@ pub(crate) fn parse_daily_problem(body: &str) -> Result<DailyProblem, String> {
     parse_question_metadata(question, date, link)
 }
 
-/// Maps every normalized frontend number to its title slug. The first usable entry
-/// for a number wins.
-pub(crate) fn parse_problem_index(body: &str) -> Result<BTreeMap<String, String>, String> {
-    let response: Value = serde_json::from_str(body)
-        .map_err(|error| format!("LeetCode returned invalid problem index JSON: {error}"))?;
-    let problems = response
-        .get("stat_status_pairs")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "LeetCode problem index is missing stat_status_pairs".to_string())?;
-
-    let mut slugs = BTreeMap::new();
-    let stats = problems
-        .iter()
-        .filter_map(|entry| entry.get("stat").and_then(Value::as_object));
-    for stat in stats {
-        let number = stat
-            .get("frontend_question_id")
-            .or_else(|| stat.get("questionFrontendId"))
-            .and_then(value_to_string)
-            .and_then(|number| normalize_frontend_id(&number).ok());
-        let slug = stat
-            .get("question__title_slug")
-            .or_else(|| stat.get("titleSlug"))
-            .and_then(Value::as_str)
-            .filter(|slug| !slug.trim().is_empty());
-        if let (Some(number), Some(slug)) = (number, slug) {
-            slugs.entry(number).or_insert_with(|| slug.to_string());
-        }
-    }
-    Ok(slugs)
-}
-
-pub(crate) fn parse_problem_detail(
-    body: &str,
-    expected_frontend_id: &str,
-) -> Result<DailyProblem, String> {
+pub(crate) fn parse_problem_detail(body: &str) -> Result<DailyProblem, String> {
     let response: Value = serde_json::from_str(body)
         .map_err(|error| format!("LeetCode returned invalid JSON: {error}"))?;
     if let Some(errors) = response.get("errors") {
@@ -90,12 +54,8 @@ pub(crate) fn parse_problem_detail(
         .or_else(|| question.get("frontendQuestionId"))
         .and_then(value_to_string)
         .ok_or_else(|| "LeetCode response is missing questionFrontendId".to_string())?;
-    let normalized_number = normalize_frontend_id(&number)?;
-    if normalized_number != expected_frontend_id {
-        return Err(format!(
-            "LeetCode returned problem #{normalized_number} while looking up #{expected_frontend_id}"
-        ));
-    }
+    // The number names the solution file, so one that cannot do that is refused here.
+    normalize_frontend_id(&number)?;
     let title_slug = required_string(question.get("titleSlug"), "titleSlug")?;
     let url = format!("https://leetcode.com/problems/{title_slug}/");
     parse_question_metadata(question, String::new(), url)
@@ -188,7 +148,7 @@ fn normalize_link(link: &str) -> String {
     }
 }
 
-pub(super) fn truncate(value: &str) -> String {
+fn truncate(value: &str) -> String {
     truncate_chars(value, 1_000)
 }
 

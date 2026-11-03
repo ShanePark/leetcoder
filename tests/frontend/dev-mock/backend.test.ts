@@ -64,7 +64,7 @@ public class Q1TwoSum {
 `)
   })
 
-  it('keeps delayed daily/manual lookups and rejects unavailable numbers', async () => {
+  it('keeps delayed daily/manual lookups and rejects unavailable slugs', async () => {
     const backend = createDevMockBackend()
     let settled = false
     const pending = backend.fetchDailyProblem().then((problem) => { settled = true; return problem })
@@ -77,12 +77,12 @@ public class Q1TwoSum {
       javaSnippet: 'class Solution {\n    public boolean checkDivisibility(int n) {\n        \n    }\n}',
     })
     expect(daily.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-    expect(await finishDelayed(backend.fetchProblemByNumber(' 3622 '))).toEqual({ ...daily, date: '' })
-    expect(await finishDelayed(backend.fetchProblemByNumber(' 1 '))).toMatchObject({
+    expect(await finishDelayed(backend.fetchProblemBySlug(daily.titleSlug))).toEqual({ ...daily, date: '' })
+    expect(await finishDelayed(backend.fetchProblemBySlug('two-sum'))).toMatchObject({
       date: '', frontendId: '1', title: 'Two Sum', titleSlug: 'two-sum',
     })
-    const rejected = expect(backend.fetchProblemByNumber('999')).rejects
-      .toThrow('Problem #999 was not found in the preview.')
+    const rejected = expect(backend.fetchProblemBySlug('no-such-problem')).rejects
+      .toThrow('Problem no-such-problem was not found in the preview.')
     await vi.runAllTimersAsync()
     await rejected
   })

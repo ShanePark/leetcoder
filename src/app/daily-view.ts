@@ -13,7 +13,7 @@ export interface DailyProblemViewModel {
   dailyLoading: boolean
   dailyError: string | null
   problemSelection: DailyProblemSelection
-  problemNumberDraft: string | null
+  problemUrlDraft: string
   viewingToday: boolean
   dailyDescriptionOpen: boolean
 }
@@ -53,7 +53,7 @@ interface DailyProblemRenderSnapshot {
   readonly dailyLoading: boolean
   readonly dailyError: string | null
   readonly problemSelection: DailyProblemSelection
-  readonly problemNumberDraft: string
+  readonly problemUrlDraft: string
   readonly viewingToday: boolean
   readonly dailyDescriptionOpen: boolean
 }
@@ -128,6 +128,10 @@ export function createDailyProblemView(
       }
       return
     }
+
+    const number = document.createElement('span')
+    number.className = 'problem-number'
+    number.textContent = `#${problem.frontendId}`
 
     const title = document.createElement('strong')
     title.className = 'problem-title'
@@ -207,7 +211,7 @@ export function createDailyProblemView(
       primary.addEventListener('click', () => currentCallbacks.onCreateFile())
     }
     actions.append(primary)
-    identity.append(title, difficulty, today)
+    identity.append(number, title, difficulty, today)
     elements.header.append(actions)
 
     if (hasContent && model.dailyDescriptionOpen) {
@@ -255,9 +259,7 @@ function dailyProblemRenderSnapshot(model: DailyProblemViewModel): DailyProblemR
     dailyLoading: model.dailyLoading,
     dailyError: model.dailyError,
     problemSelection: model.problemSelection,
-    // This stores the value the input actually displays. A null draft falls
-    // back to the problem id, while an empty draft intentionally stays blank.
-    problemNumberDraft: model.problemNumberDraft ?? problem?.frontendId ?? '',
+    problemUrlDraft: model.problemUrlDraft,
     viewingToday: model.viewingToday,
     dailyDescriptionOpen: model.dailyDescriptionOpen,
   }
@@ -284,7 +286,7 @@ function sameDailyProblemSnapshot(
     && previous.dailyLoading === next.dailyLoading
     && previous.dailyError === next.dailyError
     && previous.problemSelection === next.problemSelection
-    && previous.problemNumberDraft === next.problemNumberDraft
+    && previous.problemUrlDraft === next.problemUrlDraft
     && previous.viewingToday === next.viewingToday
     && previous.dailyDescriptionOpen === next.dailyDescriptionOpen
 }
@@ -295,30 +297,23 @@ function renderProblemLookup(
 ): HTMLElement {
   const form = document.createElement('form')
   form.className = 'problem-lookup'
-  form.setAttribute('aria-label', 'Load a LeetCode problem by number')
+  form.setAttribute('aria-label', 'Load a LeetCode problem from its URL')
 
   const field = document.createElement('label')
   field.className = 'problem-lookup-field'
-  field.title = 'Load a LeetCode problem by number'
-
-  const prefix = document.createElement('span')
-  prefix.className = 'problem-lookup-prefix'
-  prefix.textContent = '#'
-  prefix.setAttribute('aria-hidden', 'true')
+  field.title = 'Load a LeetCode problem from its URL'
 
   const input = document.createElement('input')
   input.className = 'problem-lookup-input'
   input.type = 'text'
-  input.inputMode = 'numeric'
-  input.pattern = '[0-9]*'
-  input.placeholder = 'number'
+  input.placeholder = 'Paste problem URL'
   input.autocomplete = 'off'
   input.spellcheck = false
-  input.value = model.problemNumberDraft ?? model.problem?.frontendId ?? ''
-  input.setAttribute('aria-label', 'LeetCode problem number')
+  input.value = model.problemUrlDraft
+  input.setAttribute('aria-label', 'LeetCode problem URL')
   input.addEventListener('input', () => callbacks.onLookupInput(input.value))
   input.addEventListener('focus', () => input.select())
-  field.append(prefix, input)
+  field.append(input)
 
   const submit = document.createElement('button')
   submit.type = 'submit'

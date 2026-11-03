@@ -333,9 +333,9 @@ export class LeetcoderApp {
         resizeHandle: this.element<HTMLElement>('#daily-description-resize-handle'),
       },
       {
-        onLookupInput: (value) => this.problemSelectionController.setProblemNumberDraft(value),
+        onLookupInput: (value) => this.problemSelectionController.setProblemUrlDraft(value),
         onLookupSubmit: (value) => {
-          void this.problemSelectionController.loadProblemByNumber(value)
+          void this.problemSelectionController.loadProblemFromUrl(value)
         },
         onRetry: () => {
           this.problemSelectionController.retry()
@@ -546,7 +546,6 @@ export class LeetcoderApp {
     this.aiController = createAiController(
       {
         aiStatus: () => this.backend.aiStatus(),
-        fetchProblemByNumber: (frontendId) => this.backend.fetchProblemByNumber(frontendId),
         aiGenerateTests: (request) => this.backend.aiGenerateTests(request),
         currentTarget: () => ({
           repoPath: this.state.repoPath,
@@ -955,7 +954,7 @@ export class LeetcoderApp {
       dailyLoading: this.state.dailyLoading,
       dailyError: this.state.dailyError,
       problemSelection: this.state.problemSelection,
-      problemNumberDraft: this.problemSelectionController.problemNumberDraft,
+      problemUrlDraft: this.problemSelectionController.problemUrlDraft,
       viewingToday: problem ? this.problemSelectionController.isViewingTodayProblem(problem) : false,
       dailyDescriptionOpen: this.dailyDescriptionOpen,
     })
@@ -1188,6 +1187,7 @@ export {
   normalizeDailyProblemDateKey,
   normalizeProblemNumber,
   normalizeThemeMode,
+  problemSlugFromUrl,
   readThemeMode,
   utcDateKey,
 } from './app/layout'

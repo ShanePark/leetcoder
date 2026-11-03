@@ -5,8 +5,8 @@ edit solutions, run JUnit tests, and review and commit changes.
 
 ## Features
 
-- **Problems and workspace:** open the daily problem or look up a problem by
-  number, read its description, and create a solution. Browse by difficulty,
+- **Problems and workspace:** open the daily problem or paste a problem's URL,
+  read its description, and create a solution. Browse by difficulty,
   search files and saved contents, and duplicate, rename, or delete solutions.
 - **Java assistance:** complete local symbols, members, collections, supported
   Stream chains, and classpath library APIs, with overload and parameter hints.
@@ -80,8 +80,8 @@ and `src/main/java/shane/leetcode/problems/{easy,medium,xhard}`. The supported s
 uses Java 11 source/target compatibility and Gradle 7.3.3; the app prefers JDK 17 and
 falls back to JDK 11.
 
-1. Open today's problem or look up a problem number, then choose **Create file**
-   or **Open file**.
+1. Open today's problem or paste a problem's URL, then choose **Create file** or
+   **Open file**.
 2. Edit your solution; changes save automatically. Use **Duplicate** to start
    another attempt with the same test harness.
 3. Run the class or an individual test and inspect results in **Tests**.

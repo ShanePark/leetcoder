@@ -54,7 +54,7 @@ function harness(
   controller: ProblemSelectionController
   state: SelectionState
   fetchDailyProblem: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchDailyProblem']>>
-  fetchProblemByNumber: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchProblemByNumber']>>
+  fetchProblemBySlug: ReturnType<typeof vi.fn<ProblemSelectionControllerBackend['fetchProblemBySlug']>>
   render: ReturnType<typeof vi.fn>
   messages: Array<{ message: string; tone: string }>
 } {
@@ -68,12 +68,12 @@ function harness(
     ...overrides,
   }
   const fetchDailyProblem = vi.fn<ProblemSelectionControllerBackend['fetchDailyProblem']>()
-  const fetchProblemByNumber = vi.fn<ProblemSelectionControllerBackend['fetchProblemByNumber']>()
+  const fetchProblemBySlug = vi.fn<ProblemSelectionControllerBackend['fetchProblemBySlug']>()
   const render = vi.fn()
   const messages: Array<{ message: string; tone: string }> = []
   const backend: ProblemSelectionControllerBackend = {
     fetchDailyProblem,
-    fetchProblemByNumber,
+    fetchProblemBySlug,
   }
   const controller = new ProblemSelectionController({
     state,
@@ -83,7 +83,7 @@ function harness(
     isWindowVisible,
     isDestroyed: () => false,
   })
-  return { controller, state, fetchDailyProblem, fetchProblemByNumber, render, messages }
+  return { controller, state, fetchDailyProblem, fetchProblemBySlug, render, messages }
 }
 
 describe('ProblemSelectionController', () => {
@@ -97,7 +97,7 @@ describe('ProblemSelectionController', () => {
     expect(state.dailyProblem).toBe(selected)
     expect(state.problemSelection).toBe('daily')
     expect(state.dailyProblemDateKey).toBe(utcDateKey())
-    expect(controller.problemNumberDraft).toBe('3622')
+    expect(controller.problemUrlDraft).toBe('')
 
     state.problemSelection = 'manual'
     expect(controller.isViewingTodayProblem(selected)).toBe(true)
@@ -105,22 +105,142 @@ describe('ProblemSelectionController', () => {
     controller.dispose()
   })
 
-  it('keeps the displayed problem when a manual lookup fails', async () => {
+  it('loads a pasted URL with one request by slug and clears the draft', async () => {
+    const { controller, state, fetchDailyProblem, fetchProblemBySlug, messages } = harness()
+    const selected = problem('3', '')
+    fetchProblemBySlug.mockResolvedValue(selected)
+    const pasted = 'https://leetcode.com/problems/minimum-moves-to-equal-array-elements-iii/description/'
+    controller.setProblemUrlDraft(pasted)
+
+    const request = controller.loadProblemFromUrl(pasted)
+    expect(state.dailyLoading).toBe(true)
+    await request
+
+    expect(fetchProblemBySlug.mock.calls).toEqual([['minimum-moves-to-equal-array-elements-iii']])
+    expect(fetchDailyProblem).not.toHaveBeenCalled()
+    expect(state.dailyProblem).toBe(selected)
+    expect(state.problemSelection).toBe('manual')
+    expect(state.dailyProblemDateKey).toBeNull()
+    expect(state.dailyLoading).toBe(false)
+    expect(controller.problemUrlDraft).toBe('')
+    expect(messages).toEqual([])
+    controller.dispose()
+  })
+
+  it.each([
+    ['a bare number', '1'],
+    ['a bare slug', 'two-sum'],
+    ['another host', 'https://example.com/problems/two-sum/'],
+    ['blank text', '   '],
+  ])('sends nothing and keeps the text for %s', async (_case, pasted) => {
     const displayed = problem('1', '2026-08-23')
-    const { controller, state, fetchProblemByNumber, messages } = harness({
+    const { controller, state, fetchDailyProblem, fetchProblemBySlug, messages } = harness({
       dailyProblem: displayed,
     })
-    fetchProblemByNumber.mockRejectedValue(new Error('not found'))
 
-    await controller.loadProblemByNumber('9999')
+    await controller.loadProblemFromUrl(pasted)
 
+    expect(fetchProblemBySlug).not.toHaveBeenCalled()
+    expect(fetchDailyProblem).not.toHaveBeenCalled()
     expect(state.dailyProblem).toBe(displayed)
-    expect(controller.problemNumberDraft).toBe('1')
-    expect(state.problemSelection).toBe('daily')
+    expect(state.dailyLoading).toBe(false)
+    expect(controller.problemUrlDraft).toBe(pasted)
     expect(messages).toEqual([{
-      message: 'Could not load problem #9999: not found',
+      message: 'Paste a LeetCode problem URL, such as https://leetcode.com/problems/two-sum/.',
       tone: 'error',
     }])
+    controller.dispose()
+  })
+
+  it('keeps the displayed problem and the pasted text when a manual lookup fails', async () => {
+    const displayed = problem('1', '2026-08-23')
+    const { controller, state, fetchProblemBySlug, messages } = harness({
+      dailyProblem: displayed,
+    })
+    fetchProblemBySlug.mockRejectedValue(new Error('not found'))
+    const pasted = 'https://leetcode.com/problems/no-such-problem/'
+
+    await controller.loadProblemFromUrl(pasted)
+
+    expect(state.dailyProblem).toBe(displayed)
+    expect(controller.problemUrlDraft).toBe(pasted)
+    expect(state.problemSelection).toBe('daily')
+    expect(messages).toEqual([{
+      message: 'Could not load no-such-problem: not found',
+      tone: 'error',
+    }])
+    controller.dispose()
+  })
+
+  it('retries a failed manual lookup with the same slug, whatever the input now holds', async () => {
+    const { controller, state, fetchDailyProblem, fetchProblemBySlug } = harness()
+    const selected = problem('1', '')
+    fetchProblemBySlug.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(selected)
+
+    await controller.loadProblemFromUrl('https://leetcode.com/problems/two-sum/')
+    controller.setProblemUrlDraft('half typed')
+    controller.retry()
+    await vi.waitFor(() => {
+      expect(state.dailyProblem).toBe(selected)
+    })
+
+    expect(fetchProblemBySlug.mock.calls).toEqual([['two-sum'], ['two-sum']])
+    expect(fetchDailyProblem).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  it('retries the daily problem once a daily request followed a manual one', async () => {
+    const { controller, fetchDailyProblem, fetchProblemBySlug } = harness()
+    fetchProblemBySlug.mockRejectedValue(new Error('offline'))
+    fetchDailyProblem.mockRejectedValue(new Error('offline'))
+
+    await controller.loadProblemFromUrl('https://leetcode.com/problems/two-sum/')
+    await controller.loadDailyProblem()
+    controller.retry()
+
+    expect(fetchProblemBySlug).toHaveBeenCalledOnce()
+    expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+    controller.dispose()
+  })
+
+  it('sends nothing for a pasted URL while another request is loading', async () => {
+    const response = deferred<DailyProblem>()
+    const { controller, fetchDailyProblem, fetchProblemBySlug } = harness()
+    fetchDailyProblem.mockReturnValue(response.promise)
+
+    const daily = controller.loadDailyProblem()
+    await controller.loadProblemFromUrl('https://leetcode.com/problems/two-sum/')
+
+    expect(fetchProblemBySlug).not.toHaveBeenCalled()
+    response.resolve(problem('1'))
+    await daily
+    controller.dispose()
+  })
+
+  it('ignores a delayed manual response after disposal', async () => {
+    const response = deferred<DailyProblem>()
+    const { controller, state, fetchProblemBySlug } = harness()
+    fetchProblemBySlug.mockReturnValue(response.promise)
+    const pasted = 'https://leetcode.com/problems/two-sum/'
+
+    const request = controller.loadProblemFromUrl(pasted)
+    controller.dispose()
+    response.resolve(problem('1', ''))
+    await request
+
+    expect(state.dailyProblem).toBeNull()
+    expect(state.problemSelection).toBe('daily')
+    expect(controller.problemUrlDraft).toBe(pasted)
+  })
+
+  it('leaves the draft blank when going back to today', () => {
+    const { controller, fetchDailyProblem } = harness({ problemSelection: 'manual' })
+    fetchDailyProblem.mockReturnValue(new Promise(() => {}))
+    controller.setProblemUrlDraft('half typed')
+
+    controller.selectToday()
+
+    expect(controller.problemUrlDraft).toBe('')
     controller.dispose()
   })
 
@@ -233,15 +353,15 @@ describe('ProblemSelectionController', () => {
     })
 
     it('keeps the streak when a manual problem is picked', async () => {
-      const { controller, state, fetchDailyProblem, fetchProblemByNumber } = harness()
+      const { controller, state, fetchDailyProblem, fetchProblemBySlug } = harness()
       fetchDailyProblem.mockRejectedValue(new Error('refused'))
-      fetchProblemByNumber.mockResolvedValue(problem('7', '2026-01-01'))
+      fetchProblemBySlug.mockResolvedValue(problem('7', '2026-01-01'))
 
       await controller.loadDailyProblem()
       await vi.advanceTimersByTimeAsync(MINUTE)
       expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
 
-      await controller.loadProblemByNumber('7')
+      await controller.loadProblemFromUrl('https://leetcode.com/problems/problem-7/')
       expect(state.problemSelection).toBe('manual')
       await vi.advanceTimersByTimeAsync(60 * MINUTE)
       expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
@@ -302,12 +422,12 @@ describe('ProblemSelectionController', () => {
     })
 
     it('does not bypass the wait when a failed manual lookup cleared the pending retry', async () => {
-      const { controller, state, fetchDailyProblem, fetchProblemByNumber } = harness()
+      const { controller, state, fetchDailyProblem, fetchProblemBySlug } = harness()
       fetchDailyProblem.mockRejectedValue(new Error('refused'))
-      fetchProblemByNumber.mockRejectedValue(new Error('not found'))
+      fetchProblemBySlug.mockRejectedValue(new Error('not found'))
 
       await controller.loadDailyProblem()
-      await controller.loadProblemByNumber('9999')
+      await controller.loadProblemFromUrl('https://leetcode.com/problems/no-such-problem/')
       expect(state.dailyRetryPending).toBe(false)
 
       controller.refreshDailyProblemIfStale()

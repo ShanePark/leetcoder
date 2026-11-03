@@ -84,15 +84,15 @@ export function createDevMockBackend(): BackendClient & {
       return DAILY_PROBLEM
     },
 
-    async fetchProblemByNumber(frontendId: string): Promise<DailyProblem> {
+    async fetchProblemBySlug(titleSlug: string): Promise<DailyProblem> {
       await delay(350)
-      if (frontendId.trim() === MANUAL_PROBLEM.frontendId) {
+      if (titleSlug === MANUAL_PROBLEM.titleSlug) {
         return MANUAL_PROBLEM
       }
-      if (frontendId.trim() === DAILY_PROBLEM.frontendId) {
+      if (titleSlug === DAILY_PROBLEM.titleSlug) {
         return { ...DAILY_PROBLEM, date: '' }
       }
-      throw new Error(`Problem #${frontendId} was not found in the preview.`)
+      throw new Error(`Problem ${titleSlug} was not found in the preview.`)
     },
 
     async listProblemFiles(): Promise<ProblemFileEntry[]> {

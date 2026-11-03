@@ -290,7 +290,7 @@ export interface BackendClient {
     typeNames: string[],
   ): Promise<JavaTypeMembersMetadata>
   fetchDailyProblem(): Promise<DailyProblem>
-  fetchProblemByNumber(frontendId: string): Promise<DailyProblem>
+  fetchProblemBySlug(titleSlug: string): Promise<DailyProblem>
   listProblemFiles(repoPath: string): Promise<ProblemFileEntry[]>
   searchProject(
     repoPath: string,

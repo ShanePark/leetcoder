@@ -64,6 +64,12 @@ const problemOne: DailyProblem = {
   javaSnippet: 'class Solution {\n    public int[] twoSum(int[] nums, int target) {\n    }\n}',
 }
 
+/** A problem the app has loaded, which the daily request only accepts with today's date. */
+const loaded = (problem: DailyProblem): DailyProblem => ({
+  ...problem,
+  date: new Date().toISOString().slice(0, 10),
+})
+
 const okResult: AiGenerateResult = {
   outcome: 'ok',
   statements,
@@ -89,7 +95,7 @@ describe('AI test generation button', () => {
     const { backend } = createBackend()
     vi.mocked(backend.aiStatus).mockResolvedValue({ configured: true })
     vi.mocked(backend.readProblemFile).mockResolvedValue(source)
-    vi.mocked(backend.fetchProblemByNumber).mockResolvedValue(problemOne)
+    vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded(problemOne))
     vi.mocked(backend.aiGenerateTests).mockResolvedValue(okResult)
     return backend
   }
@@ -140,7 +146,7 @@ describe('AI test generation button', () => {
 
     await clickAndSettle()
 
-    expect(backend.fetchProblemByNumber).not.toHaveBeenCalled()
+    expect(backend.fetchProblemBySlug).not.toHaveBeenCalled()
     expect(backend.aiGenerateTests).not.toHaveBeenCalled()
     expect(lastToast()).toBeUndefined()
     expect(testMocks.settingsSections).toEqual(['llm'])
@@ -152,7 +158,7 @@ describe('AI test generation button', () => {
 
     await clickAndSettle()
 
-    expect(backend.fetchProblemByNumber).not.toHaveBeenCalled()
+    expect(backend.fetchProblemBySlug).not.toHaveBeenCalled()
     expect(backend.aiGenerateTests).not.toHaveBeenCalled()
     expect(lastToast()?.message).toContain('has no test() method')
   })
@@ -163,7 +169,7 @@ describe('AI test generation button', () => {
 
     await clickAndSettle()
 
-    expect(backend.fetchProblemByNumber).not.toHaveBeenCalled()
+    expect(backend.fetchProblemBySlug).not.toHaveBeenCalled()
     expect(backend.aiGenerateTests).not.toHaveBeenCalled()
     expect(lastToast()?.message).toContain('already has code')
     expect(editor().source).toBe(filledSource)
@@ -218,45 +224,76 @@ describe('AI test generation button', () => {
     expect(vi.mocked(backend.aiGenerateTests).mock.calls[0][0].selectedModelId).toBeNull()
   })
 
-  it('reuses the header problem when it matches the open file', async () => {
+  it('uses the loaded problem and sends no LeetCode request when it matches the open file', async () => {
     const backend = configuredBackend()
-    const today = new Date().toISOString().slice(0, 10)
-    vi.mocked(backend.fetchDailyProblem).mockResolvedValue({ ...problemOne, date: today })
     await openStub(backend)
     expect(appState().dailyProblem?.frontendId).toBe('1')
+    const dailyRequests = vi.mocked(backend.fetchDailyProblem).mock.calls.length
 
     await clickAndSettle()
 
-    expect(backend.fetchProblemByNumber).not.toHaveBeenCalled()
+    expect(backend.fetchProblemBySlug).not.toHaveBeenCalled()
+    expect(backend.fetchDailyProblem).toHaveBeenCalledTimes(dailyRequests)
     expect(vi.mocked(backend.aiGenerateTests).mock.calls[0][0].problemContent).toBe(problemOne.content)
   })
 
-  it('follows the open file and leaves the header alone when the header shows another problem', async () => {
+  it('sends nothing and names both problems when another problem is loaded', async () => {
     const backend = configuredBackend()
-    const today = new Date().toISOString().slice(0, 10)
-    const header = { ...problemOne, date: today, frontendId: '9', title: 'Palindrome', content: '<p>Other</p>' }
+    const header = loaded({ ...problemOne, frontendId: '9', title: 'Palindrome', content: '<p>Other</p>' })
     vi.mocked(backend.fetchDailyProblem).mockResolvedValue(header)
     await openStub(backend)
+    const dailyRequests = vi.mocked(backend.fetchDailyProblem).mock.calls.length
 
     await clickAndSettle()
 
-    expect(backend.fetchProblemByNumber).toHaveBeenCalledWith('1')
-    expect(vi.mocked(backend.aiGenerateTests).mock.calls[0][0].problemContent).toBe(problemOne.content)
+    expect(backend.fetchProblemBySlug).not.toHaveBeenCalled()
+    expect(backend.fetchDailyProblem).toHaveBeenCalledTimes(dailyRequests)
+    expect(backend.aiGenerateTests).not.toHaveBeenCalled()
+    expect(lastToast()).toMatchObject({
+      message: 'This file is problem #1, but problem #9 is loaded. Paste the URL for #1 in the header, then try again.',
+      tone: 'error',
+    })
     expect(appState().dailyProblem).toEqual(header)
+    expect(editor().source).toBe(stubSource)
   })
 
-  it.each([
-    ['a failed lookup', () => Promise.reject(new Error('Network down')), 'Could not load problem #1: Network down'],
-    ['no content', () => Promise.resolve({ ...problemOne, content: null }), 'has no description'],
-  ])('makes no generation call after %s', async (_case, lookup, message) => {
+  it('sends nothing and says so when no problem is loaded', async () => {
     const backend = configuredBackend()
-    vi.mocked(backend.fetchProblemByNumber).mockImplementation(lookup)
+    vi.mocked(backend.fetchDailyProblem).mockRejectedValue(new Error('Network down'))
+    await openStub(backend)
+    expect(appState().dailyProblem).toBeNull()
+    const dailyRequests = vi.mocked(backend.fetchDailyProblem).mock.calls.length
+
+    await clickAndSettle()
+
+    expect(backend.fetchProblemBySlug).not.toHaveBeenCalled()
+    expect(backend.fetchDailyProblem).toHaveBeenCalledTimes(dailyRequests)
+    expect(backend.aiGenerateTests).not.toHaveBeenCalled()
+    expect(lastToast()).toMatchObject({
+      message: 'This file is problem #1, but no problem is loaded. Paste the URL for #1 in the header, then try again.',
+      tone: 'error',
+    })
+  })
+
+  it('checks the stub before the loaded problem', async () => {
+    const backend = configuredBackend()
+    vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded({ ...problemOne, frontendId: '9' }))
+    await openStub(backend, filledSource)
+
+    await clickAndSettle()
+
+    expect(lastToast()?.message).toContain('already has code')
+  })
+
+  it('makes no generation call when the loaded problem has no content', async () => {
+    const backend = configuredBackend()
+    vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded({ ...problemOne, content: null }))
     await openStub(backend)
 
     await clickAndSettle()
 
     expect(backend.aiGenerateTests).not.toHaveBeenCalled()
-    expect(lastToast()?.message).toContain(message)
+    expect(lastToast()?.message).toContain('has no description')
     expect(lastToast()?.tone).toBe('error')
     expect(editor().source).toBe(stubSource)
   })
@@ -266,7 +303,7 @@ describe('AI test generation button', () => {
     ['a parameter type', 'class Solution {\n    public int f(Solution other) {\n    }\n}', 'public int f(Solution other)'],
   ])('still generates when %s only mentions the class name', async (_case, javaSnippet, entryPoint) => {
     const backend = configuredBackend()
-    vi.mocked(backend.fetchProblemByNumber).mockResolvedValue({ ...problemOne, javaSnippet })
+    vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded({ ...problemOne, javaSnippet }))
     await openStub(backend)
 
     await clickAndSettle()
@@ -279,7 +316,7 @@ describe('AI test generation button', () => {
     ['a Solution constructor', 'class Solution {\n    public Solution(int[] nums) {\n    }\n    public int[] reset() {\n    }\n}'],
   ])('generates for a design problem with %s, before the file declares it', async (_case, javaSnippet) => {
     const backend = configuredBackend()
-    vi.mocked(backend.fetchProblemByNumber).mockResolvedValue({ ...problemOne, javaSnippet })
+    vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded({ ...problemOne, javaSnippet }))
     await openStub(backend, testOnlySource)
 
     await clickAndSettle()
@@ -305,7 +342,7 @@ describe('AI test generation button', () => {
 
   it('makes no call for a test-only file when the problem has no snippet', async () => {
     const backend = configuredBackend()
-    vi.mocked(backend.fetchProblemByNumber).mockResolvedValue({ ...problemOne, javaSnippet: null })
+    vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded({ ...problemOne, javaSnippet: null }))
     await openStub(backend, testOnlySource)
 
     await clickAndSettle()
@@ -314,18 +351,19 @@ describe('AI test generation button', () => {
     expect(lastToast()?.message).toContain('has no method to test')
   })
 
-  it('makes no call when the methods are removed during the problem lookup', async () => {
+  it('makes no call when the methods are removed during the key status check', async () => {
     const backend = configuredBackend()
-    const lookup = deferred<DailyProblem>()
-    vi.mocked(backend.fetchProblemByNumber).mockReturnValue(lookup.promise)
+    const status = deferred<{ configured: boolean }>()
     await openStub(backend)
+    vi.mocked(backend.aiStatus).mockClear()
+    vi.mocked(backend.aiStatus).mockReturnValue(status.promise)
     button().dispatch('click')
     await vi.waitFor(() => {
-      expect(backend.fetchProblemByNumber).toHaveBeenCalledOnce()
+      expect(backend.aiStatus).toHaveBeenCalledOnce()
     })
 
     editor().emitChange(testOnlySource)
-    lookup.resolve(problemOne)
+    status.resolve({ configured: true })
     await vi.waitFor(() => {
       expect(button().attributes.get('aria-busy')).toBe('false')
     })
@@ -336,7 +374,7 @@ describe('AI test generation button', () => {
 
   it('still generates from the document when the problem has no snippet', async () => {
     const backend = configuredBackend()
-    vi.mocked(backend.fetchProblemByNumber).mockResolvedValue({ ...problemOne, javaSnippet: null })
+    vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded({ ...problemOne, javaSnippet: null }))
     await openStub(backend)
 
     await clickAndSettle()
@@ -405,19 +443,20 @@ describe('AI test generation button', () => {
     expect(button().title).toContain('Q9Palindrome.java')
   })
 
-  it('sends nothing when the file changes during the problem lookup', async () => {
+  it('sends nothing when the file changes during the key status check', async () => {
     const backend = configuredBackend()
-    const lookup = deferred<DailyProblem>()
-    vi.mocked(backend.fetchProblemByNumber).mockReturnValue(lookup.promise)
+    const status = deferred<{ configured: boolean }>()
     vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
     await openStub(backend)
+    vi.mocked(backend.aiStatus).mockClear()
+    vi.mocked(backend.aiStatus).mockReturnValue(status.promise)
     button().dispatch('click')
     await vi.waitFor(() => {
-      expect(backend.fetchProblemByNumber).toHaveBeenCalledOnce()
+      expect(backend.aiStatus).toHaveBeenCalledOnce()
     })
 
     await selectFile(otherFile)
-    lookup.resolve(problemOne)
+    status.resolve({ configured: true })
     await vi.waitFor(() => {
       expect(button().attributes.get('aria-busy')).toBe('false')
     })
@@ -771,10 +810,9 @@ describe('AI controller helpers', () => {
     const controller = createAiController(
       {
         aiStatus: async () => ({ configured: true }),
-        fetchProblemByNumber: async () => problemOne,
         aiGenerateTests: () => generation.promise,
         currentTarget: () => current,
-        headerProblem: () => null,
+        headerProblem: () => problemOne,
         readContext: () => ({ stub: 'bare', methodHeaders: ['int f()'] }),
         selectedModelId: () => null,
         psSignatures: () => [],

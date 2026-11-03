@@ -6,13 +6,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use super::{generate_tests, ledger, AiGenerateRequest, AiPaths, API_BASE_URL};
 
 const APP_IDENTIFIER: &str = "com.shane.leetcoder";
-/// The gap AGENTS.md requires between real LeetCode requests.
-const FETCH_GAP: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,7 +106,7 @@ fn platform_dirs(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
     )
 }
 
-/// Free: fetches uncached problems and inspects the Ps library once.
+/// Free: inspects the Ps library once and finds a JDK. It sends no LeetCode request.
 #[test]
 #[ignore = "run by the prompt eval driver"]
 fn eval_fetch() {
@@ -117,35 +114,7 @@ fn eval_fetch() {
         return;
     };
     let input: FetchInput = read_input(&input_path);
-    crate::leetcode::set_request_log_dir(input.cache_dir.clone());
     let mut errors = Vec::new();
-    let mut fetched_any = false;
-
-    for number in &input.numbers {
-        let path = input
-            .cache_dir
-            .join("problems")
-            .join(format!("{number}.json"));
-        if path.exists() {
-            continue;
-        }
-        if fetched_any {
-            std::thread::sleep(FETCH_GAP);
-        }
-        fetched_any = true;
-        match tauri::async_runtime::block_on(crate::leetcode::fetch_problem_by_number(
-            number,
-            &input.cache_dir,
-        )) {
-            Ok(problem) => write_json(&path, &problem),
-            Err(error) => {
-                // A site that refused one request is not asked again for the rest.
-                let brief: String = error.chars().take(160).collect();
-                errors.push(format!("Problem {number}: {brief}"));
-                break;
-            }
-        }
-    }
 
     let metadata_path = input.cache_dir.join("ps-metadata.json");
     if !metadata_path.exists() {
