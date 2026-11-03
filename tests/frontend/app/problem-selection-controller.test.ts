@@ -377,6 +377,63 @@ describe('ProblemSelectionController', () => {
       controller.dispose()
     })
 
+    it('goes back to today with no request while the loaded daily problem is current', async () => {
+      const { controller, state, fetchDailyProblem, fetchProblemBySlug } = harness()
+      const today = problem('2', '2026-09-10')
+      fetchDailyProblem.mockResolvedValue(today)
+      fetchProblemBySlug.mockResolvedValue(problem('7', ''))
+      await controller.loadDailyProblem()
+      await controller.loadProblemFromUrl('https://leetcode.com/problems/problem-7/')
+      expect(state.dailyProblem?.frontendId).toBe('7')
+
+      controller.selectToday()
+
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(1)
+      expect(state.dailyProblem).toBe(today)
+      expect(state.problemSelection).toBe('daily')
+      expect(state.dailyProblemDateKey).toBe('2026-09-10')
+      expect(state.dailyLoading).toBe(false)
+      expect(controller.isViewingTodayProblem(today)).toBe(true)
+      controller.dispose()
+    })
+
+    it('ignores a manual lookup still in flight when going back to today', async () => {
+      const { controller, state, fetchDailyProblem, fetchProblemBySlug } = harness()
+      const today = problem('2', '2026-09-10')
+      fetchDailyProblem.mockResolvedValue(today)
+      await controller.loadDailyProblem()
+      let finishLookup: (value: DailyProblem) => void = () => {}
+      fetchProblemBySlug.mockReturnValue(new Promise((resolve) => { finishLookup = resolve }))
+      const lookup = controller.loadProblemFromUrl('https://leetcode.com/problems/problem-7/')
+
+      controller.selectToday()
+      finishLookup(problem('7', ''))
+      await lookup
+
+      expect(state.dailyProblem).toBe(today)
+      expect(state.problemSelection).toBe('daily')
+      expect(state.dailyLoading).toBe(false)
+      controller.dispose()
+    })
+
+    it('asks again for today once the UTC date has changed', async () => {
+      const { controller, state, fetchDailyProblem, fetchProblemBySlug } = harness()
+      fetchDailyProblem
+        .mockResolvedValueOnce(problem('2', '2026-09-10'))
+        .mockResolvedValueOnce(problem('3', '2026-09-11'))
+      fetchProblemBySlug.mockResolvedValue(problem('7', ''))
+      await controller.loadDailyProblem()
+      await controller.loadProblemFromUrl('https://leetcode.com/problems/problem-7/')
+
+      vi.setSystemTime(new Date('2026-09-11T00:30:00.000Z'))
+      controller.selectToday()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(fetchDailyProblem).toHaveBeenCalledTimes(2)
+      expect(state.dailyProblem?.frontendId).toBe('3')
+      controller.dispose()
+    })
+
     it('re-arms for the remaining time when the window returns before the retry is due', async () => {
       let visible = true
       const { controller, fetchDailyProblem } = harness({}, () => visible)

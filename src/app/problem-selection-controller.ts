@@ -42,8 +42,8 @@ export class ProblemSelectionController {
   private draft = ''
   /** The slug `retry` sends again, or null when the last request was for the daily problem. */
   private lastManualSlug: string | null = null
-  /** Remember the current daily id while a manual problem is being viewed. */
-  private latestDailyProblem: { frontendId: string; dateKey: string } | null = null
+  /** Remember the current daily problem while a manual problem is being viewed. */
+  private latestDailyProblem: { problem: DailyProblem; dateKey: string } | null = null
   private dailyRetryStreak = 0
   private nextDailyRetryAt = 0
   private disposed = false
@@ -97,10 +97,7 @@ export class ProblemSelectionController {
       } else {
         this.hooks.state.dailyProblem = problem
         this.hooks.state.problemSelection = 'daily'
-        this.latestDailyProblem = {
-          frontendId: problem.frontendId,
-          dateKey: problemDateKey,
-        }
+        this.latestDailyProblem = { problem, dateKey: problemDateKey }
         this.hooks.state.dailyProblemDateKey = problemDateKey
         this.hooks.state.dailyRetryPending = false
         this.hooks.state.dailyError = null
@@ -200,6 +197,20 @@ export class ProblemSelectionController {
     }
     this.draft = ''
     this.hooks.state.problemSelection = 'daily'
+    // The daily problem stays the same for a whole UTC day, so going back sends nothing.
+    const latest = this.latestDailyProblem
+    if (latest?.dateKey === utcDateKey()) {
+      this.requestId += 1
+      this.lastManualSlug = null
+      this.hooks.state.dailyProblem = latest.problem
+      this.hooks.state.dailyProblemDateKey = latest.dateKey
+      this.hooks.state.dailyRetryPending = false
+      this.hooks.state.dailyError = null
+      this.hooks.state.dailyLoading = false
+      this.scheduleDailyProblemRefresh()
+      this.hooks.render()
+      return
+    }
     this.hooks.state.dailyProblemDateKey = null
     void this.loadDailyProblem(true)
   }
@@ -235,7 +246,7 @@ export class ProblemSelectionController {
     if (this.hooks.state.problemSelection === 'daily') {
       return this.hooks.state.dailyProblemDateKey === currentDateKey
     }
-    return this.latestDailyProblem?.frontendId === problem.frontendId
+    return this.latestDailyProblem?.problem.frontendId === problem.frontendId
       && this.latestDailyProblem.dateKey === currentDateKey
   }
 
