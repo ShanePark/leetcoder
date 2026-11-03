@@ -72,10 +72,61 @@ pub(super) fn system_prompt(helpers_available: bool) -> String {
         .join("\n")
 }
 
+const MARKUP_TAGS: [&str; 19] = [
+    "a", "b", "br", "code", "div", "em", "font", "i", "img", "li", "ol", "p", "pre", "span",
+    "strong", "sub", "sup", "u", "ul",
+];
+
+/// Markup only costs tokens, but `10<sup>4</sup>` must not read as 104, so exponents
+/// keep a `^`. `&lt;` and `&gt;` stay escaped so the text cannot close `<problem>`.
+pub(super) fn problem_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        text.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let tag = after
+            .find('>')
+            .map(|end| (&after[..end], &after[end + 1..]));
+        let name = tag.and_then(|(body, _)| {
+            body.trim_start_matches('/')
+                .split(|c: char| c.is_whitespace() || c == '/')
+                .next()
+        });
+        match (tag, name) {
+            (Some((body, remainder)), Some(name)) if MARKUP_TAGS.contains(&name) => {
+                if !body.starts_with('/') {
+                    text.push_str(match name {
+                        "sup" => "^",
+                        "sub" => "_",
+                        "li" => "- ",
+                        _ => "",
+                    });
+                }
+                rest = remainder;
+            }
+            _ => {
+                text.push('<');
+                rest = after;
+            }
+        }
+    }
+    text.push_str(rest);
+    text.replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(super) fn user_message(request: &AiGenerateRequest) -> String {
     let mut message = format!(
         "<problem>\n{}\n{}\n</problem>\n",
-        request.problem_title, request.problem_content
+        request.problem_title,
+        problem_text(&request.problem_content)
     );
     if let Some(entry_point) = &request.entry_point {
         message.push_str(&format!("<entry_point>\n{entry_point}\n</entry_point>\n"));

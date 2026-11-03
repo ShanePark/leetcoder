@@ -1395,6 +1395,21 @@ fn prompt_drops_helper_lines_when_the_library_is_unavailable() {
     assert!(message.contains("<snippet>\nclass LRUCache {}\n</snippet>"));
 }
 
+#[test]
+fn problem_text_drops_markup_and_keeps_what_it_meant() {
+    let html = "<p><strong>Input:</strong> s = &quot;it&#39;s&quot;&nbsp;</p>\n\n\
+                <p>&nbsp;</p>\n<ul>\n\t<li><code>1 &lt;= n &lt;= 10<sup>4</sup></code></li>\n\
+                \t<li><code>x<sub>i</sub></code> <a href=\"/a\">link</a></li>\n</ul>\n\
+                <img src=\"/tree.png\" />";
+    assert_eq!(
+        prompt::problem_text(html),
+        "Input: s = \"it's\"\n\t- 1 &lt;= n &lt;= 10^4\n\t- x_i link"
+    );
+
+    let untouched = "List<Integer> a < b > c <problem> </problem> <";
+    assert_eq!(prompt::problem_text(untouched), untouched);
+}
+
 /// The request without `messages`: what must stay byte-identical between requests
 /// for the cached prefix to match.
 fn outside_messages(body: &Value) -> String {
