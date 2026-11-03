@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  classifyGradleRun,
+  classifyRunnerResult,
   countExamples,
   countScenarios,
   fullyQualifiedClassName,
@@ -108,53 +108,48 @@ describe('countScenarios', () => {
   })
 })
 
-describe('classifyGradleRun', () => {
-  const run = { exitCode: 1, timedOut: false, output: '', junitXml: null }
-
-  it('passes only when a test really ran', () => {
-    expect(classifyGradleRun({ ...run, exitCode: 0, junitXml: '<testsuite name="a" tests="1" failures="0">' }))
-      .toEqual({ kind: 'pass' })
-    expect(classifyGradleRun({ ...run, exitCode: 0, junitXml: '<testsuite name="a" tests="0">' }).kind).toBe('tool')
-    expect(classifyGradleRun({ ...run, exitCode: 0 }).kind).toBe('tool')
+describe('classifyRunnerResult', () => {
+  it('passes a test that ran', () => {
+    expect(classifyRunnerResult({ status: 'pass', detail: '' })).toEqual({ kind: 'pass' })
   })
 
   it('reports compile errors with their location and source line', () => {
-    const output = [
-      '/tmp/project/src/test/java/example/Q1.java:9: error: cannot find symbol',
+    const detail = [
+      '/tmp/batch/0/src/example/Q1.java:9: error: cannot find symbol',
       '        assertThat(nope());',
       '                   ^',
       '  symbol:   method nope()',
-      "Execution failed for task ':compileTestJava'.",
+      '1 error',
     ].join('\n')
-    expect(classifyGradleRun({ ...run, output })).toEqual({
+    expect(classifyRunnerResult({ status: 'compile', detail })).toEqual({
       kind: 'compile',
       details: ['Q1.java:9: error: cannot find symbol', '        assertThat(nope());', '                   ^'],
     })
   })
 
-  it('reports a failed assertion with the decoded JUnit message', () => {
-    const junitXml = '<testsuite tests="1"><failure message="expected: &lt;3&gt;&#10;but was: 4 &amp; more" '
-      + 'type="org.opentest4j.AssertionFailedError">trace</failure></testsuite>'
-    expect(classifyGradleRun({ ...run, junitXml })).toEqual({
-      kind: 'assertion',
-      details: ['expected: <3> but was: 4 & more org.opentest4j.AssertionFailedError'],
+  it('keeps compiler output that names no error', () => {
+    expect(classifyRunnerResult({ status: 'compile', detail: 'error: invalid flag\n' })).toEqual({
+      kind: 'compile',
+      details: ['error: invalid flag'],
     })
   })
 
-  it('reports an exception that has no message', () => {
-    const junitXml = '<testsuite tests="1"><failure type="java.lang.NullPointerException">trace</failure></testsuite>'
-    expect(classifyGradleRun({ ...run, junitXml })).toEqual({
+  it('reports a failed test as one line', () => {
+    const detail = 'org.opentest4j.AssertionFailedError: \nexpected: 3\n but was: 4 org.opentest4j.AssertionFailedError'
+    expect(classifyRunnerResult({ status: 'failure', detail })).toEqual({
       kind: 'assertion',
-      details: ['java.lang.NullPointerException'],
+      details: ['org.opentest4j.AssertionFailedError: expected: 3 but was: 4 org.opentest4j.AssertionFailedError'],
     })
   })
 
-  it('blames the tool for anything else, such as an offline resolve failure', () => {
-    const output = 'FAILURE: Build failed.\n* What went wrong:\nPlugin was not found.\n\n* Try:'
-    expect(classifyGradleRun({ ...run, output })).toEqual({
+  it('keeps timeouts and tool errors apart', () => {
+    expect(classifyRunnerResult({ status: 'timeout', detail: 'Too slow.' })).toEqual({
+      kind: 'timeout',
+      details: ['Too slow.'],
+    })
+    expect(classifyRunnerResult({ status: 'tool', detail: 'No test.' })).toEqual({
       kind: 'tool',
-      details: ['Plugin was not found.', '* Try:'],
+      details: ['No test.'],
     })
-    expect(classifyGradleRun({ ...run, timedOut: true, exitCode: null }).kind).toBe('timeout')
   })
 })

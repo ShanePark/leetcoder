@@ -3,7 +3,8 @@
 import { java } from '@codemirror/lang-java'
 import { EditorState } from '@codemirror/state'
 import { spawn } from 'node:child_process'
-import { chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { expect, it } from 'vitest'
@@ -19,12 +20,13 @@ import { applyAiTestStatements, listJavaMethodHeaders } from '../src/editor/ai-t
 import { javaAutoImports } from '../src/editor/auto-import'
 import { mutableEditorView } from '../tests/frontend/editor/helpers'
 import {
-  classifyGradleRun,
+  classifyRunnerResult,
   countExamples,
   countScenarios,
   fullyQualifiedClassName,
   resetTestBody,
-  type GradleVerdict,
+  type RunnerResult,
+  type Verdict,
 } from './helpers'
 
 const REPO_ROOT = resolve(import.meta.dirname, '..')
@@ -32,11 +34,42 @@ const CACHE_DIR = join(REPO_ROOT, 'eval/.cache')
 const OUT_DIR = join(REPO_ROOT, 'eval/.out')
 const PROBLEMS_DIR = join(REPO_ROOT, 'eval/problems')
 const CARGO_TARGET_DIR = join(tmpdir(), 'leetcoder-prompt-eval-cargo')
+const RUNNER_SOURCE = join(REPO_ROOT, 'eval/JavaGradeRunner.java')
+const CLASSPATH_CACHE = join(CACHE_DIR, 'java-classpath.json')
+const CLASSPATH_MARKER = 'LEETCODER_EVAL_CLASSPATH:'
+// Files that decide the classpath and compiler levels, relative to the ps repo.
+const PS_PROJECT_FILES = ['build.gradle', 'settings.gradle', 'gradle.properties']
+const PS_BUILD_FILES = [...PS_PROJECT_FILES, 'gradle/wrapper/gradle-wrapper.properties']
 const GRADLE_TIMEOUT_MS = 5 * 60 * 1000
 const CARGO_TIMEOUT_MS = 2 * 60 * 60 * 1000
-// One daemon and one test JVM each. This machine runs under load and tests here have
-// timed out under load, so raise this with care.
-const MAX_GRADLE_PROJECTS = 4
+// This machine has been overloaded by rebuilds of the native steps.
+const CARGO_BUILD_JOBS = '4'
+const TEST_TIMEOUT_MS = 30 * 1000
+const COMPILE_ALLOWANCE_MS = 10 * 1000
+const RUNNER_STARTUP_ALLOWANCE_MS = 60 * 1000
+// The heap and assertions are what Gradle's test task defaults to. The rest keeps the
+// JVM off the other cores, since the batch runs one case at a time.
+const RUNNER_JVM_FLAGS = ['-Xmx512m', '-ea', '-XX:+UseSerialGC', '-XX:TieredStopAtLevel=1']
+const CLASSPATH_INIT_SCRIPT = `
+import groovy.json.JsonOutput
+
+allprojects {
+    plugins.withId('java') {
+        if (project == rootProject) {
+            tasks.register('leetcoderPrintEvalClasspath') {
+                doLast {
+                    println('${CLASSPATH_MARKER}' + JsonOutput.toJson([
+                        compile: configurations.testCompileClasspath.files*.canonicalPath,
+                        runtime: configurations.testRuntimeClasspath.files*.canonicalPath,
+                        source: compileTestJava.sourceCompatibility.toString(),
+                        target: compileTestJava.targetCompatibility.toString(),
+                    ]))
+                }
+            }
+        }
+    }
+}
+`
 const TRIVIAL_STATEMENT = 'assertThat(1).isEqualTo(1);'
 
 interface ProcessResult {
@@ -44,6 +77,20 @@ interface ProcessResult {
   timedOut: boolean
   stdout: string
   stderr: string
+}
+
+/** How the ps build compiles and runs its tests. */
+interface JavaBuild {
+  compile: string[]
+  runtime: string[]
+  source: string
+  target: string
+}
+
+interface GradeItem {
+  id: string
+  fqcn: string
+  source: string
 }
 
 interface EvalCase {
@@ -176,6 +223,7 @@ async function runNativeStep(testName: string, inputPath: string, outputPath: st
       env: {
         CARGO_TARGET_DIR,
         CARGO_INCREMENTAL: '0',
+        CARGO_BUILD_JOBS,
         LEETCODER_EVAL_INPUT: inputPath,
         LEETCODER_EVAL_OUTPUT: outputPath,
       },
@@ -190,78 +238,86 @@ function assertNativeStep(step: string, result: ProcessResult): void {
   }
 }
 
-/** A fresh project holding the ps build and only one Java file, so the ps repo stays untouched. */
-async function createProject(project: string, psRepo: string): Promise<string> {
+/** Gradle runs once per change to the ps build files, over a copy of them so the ps repo stays untouched. */
+async function resolveJavaBuild(psRepo: string, javaHome: string, root: string): Promise<JavaBuild> {
+  const contents = await Promise.all(PS_BUILD_FILES.map((file) => readFile(join(psRepo, file), 'utf8').catch(() => '')))
+  const key = createHash('sha256').update(JSON.stringify([javaHome, ...contents])).digest('hex')
+  const cached = JSON.parse(await readFile(CLASSPATH_CACHE, 'utf8').catch(() => 'null')) as
+    (JavaBuild & { key: string }) | null
+  if (cached?.key === key && await allExist([...cached.compile, ...cached.runtime])) {
+    return cached
+  }
+
+  console.log('Resolving the Java classpath with Gradle...')
+  const project = join(root, 'classpath-project')
   await mkdir(project)
-  await copyFile(join(psRepo, 'build.gradle'), join(project, 'build.gradle'))
-  await copyFile(join(psRepo, 'settings.gradle'), join(project, 'settings.gradle'))
-  await copyFile(join(psRepo, 'gradlew'), join(project, 'gradlew'))
-  await chmod(join(project, 'gradlew'), 0o755)
-  await cp(join(psRepo, 'gradle'), join(project, 'gradle'), { recursive: true })
-  await writeFile(join(project, 'gradle.properties'), 'org.gradle.daemon.idletimeout=60000\n')
-  return project
+  // Not every one of them has to exist, and Gradle reports the ones it needs.
+  await Promise.all(PS_PROJECT_FILES.map((file) => copyFile(join(psRepo, file), join(project, file)).catch(() => undefined)))
+  const initScript = join(root, 'classpath.init.gradle')
+  await writeFile(initScript, CLASSPATH_INIT_SCRIPT)
+  const result = await run(
+    join(psRepo, 'gradlew'),
+    ['-p', project, '--init-script', initScript, '--offline', '--no-daemon', '--console=plain', '--quiet', 'leetcoderPrintEvalClasspath'],
+    { cwd: project, env: { JAVA_HOME: javaHome }, timeoutMs: GRADLE_TIMEOUT_MS },
+  )
+  const line = result.stdout.split('\n').find((candidate) => candidate.startsWith(CLASSPATH_MARKER))
+  if (result.exitCode !== 0 || !line) {
+    throw new Error(`Could not resolve the Java classpath:\n${`${result.stdout}\n${result.stderr}`.slice(-2000)}`)
+  }
+  const build = JSON.parse(line.slice(CLASSPATH_MARKER.length)) as JavaBuild
+  await writeFile(CLASSPATH_CACHE, `${JSON.stringify({ key, ...build }, null, 2)}\n`)
+  return build
 }
 
-/**
- * The file goes in the test source set, not the ps repo's main one, because the
- * plain `test` task only runs the former. The app reaches main with an init script.
- */
-async function runTest(project: string, javaHome: string, fqcn: string, source: string): Promise<GradleVerdict> {
-  const testSources = join(project, 'src/test/java')
-  await rm(testSources, { recursive: true, force: true })
-  await rm(join(project, 'build'), { recursive: true, force: true })
-  const path = join(testSources, `${fqcn.replaceAll('.', '/')}.java`)
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, source)
+/** Gradle can clean a jar out of its cache after the classpath was saved. */
+async function allExist(paths: readonly string[]): Promise<boolean> {
+  const checks = await Promise.all(paths.map((path) => access(path).then(() => true, () => false)))
+  return checks.every(Boolean)
+}
+
+/** Grades the items in one JVM, in order, and returns their verdicts in that order. */
+async function gradeBatch(
+  batchDir: string,
+  javaHome: string,
+  build: JavaBuild,
+  items: readonly GradeItem[],
+): Promise<Verdict[]> {
+  if (items.length === 0) return []
+  const rows = await Promise.all(items.map(async ({ id, fqcn, source }, index) => {
+    const directory = join(batchDir, String(index))
+    const path = join(directory, 'src', `${fqcn.replaceAll('.', '/')}.java`)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, source)
+    return `${id}\t${fqcn}\t${directory}\n`
+  }))
+  await writeFile(join(batchDir, 'cases.tsv'), rows.join(''))
 
   const result = await run(
-    './gradlew',
-    ['test', '--tests', `${fqcn}.test`, '--offline', '--console=plain'],
+    join(javaHome, 'bin', 'java'),
+    [
+      ...RUNNER_JVM_FLAGS,
+      '-cp', build.runtime.join(delimiter),
+      RUNNER_SOURCE,
+      batchDir,
+      String(TEST_TIMEOUT_MS),
+      build.source,
+      build.target,
+      build.compile.join(delimiter),
+    ],
     {
-      cwd: project,
-      env: {
-        JAVA_HOME: javaHome,
-        PATH: `${join(javaHome, 'bin')}${delimiter}${process.env.PATH ?? ''}`,
-      },
-      timeoutMs: GRADLE_TIMEOUT_MS,
+      cwd: batchDir,
+      timeoutMs: RUNNER_STARTUP_ALLOWANCE_MS + items.length * (TEST_TIMEOUT_MS + COMPILE_ALLOWANCE_MS),
     },
   )
-  const junitXml = await readFile(join(project, `build/test-results/test/TEST-${fqcn}.xml`), 'utf8').catch(() => null)
-  return classifyGradleRun({
-    exitCode: result.exitCode,
-    timedOut: result.timedOut,
-    output: `${result.stdout}\n${result.stderr}`,
-    junitXml,
+  const lines = await readFile(join(batchDir, 'results.jsonl'), 'utf8').catch(() => '')
+  const results = lines.split('\n').filter(Boolean).map((line) => JSON.parse(line) as RunnerResult & { id: string })
+  const byId = new Map(results.map((entry) => [entry.id, entry]))
+  return items.map(({ id }) => {
+    const entry = byId.get(id)
+    if (entry) return classifyRunnerResult(entry)
+    const ending = result.timedOut ? 'timed out' : `exited with ${result.exitCode}`
+    return { kind: 'tool', details: [`The runner ${ending} before this case. ${result.stderr.slice(-500)}`.trim()] }
   })
-}
-
-/**
- * Runs `work` over `items`, with each project holding one item at a time so a compile
- * error stays in its own project. Results keep the order of `items`. A rejection waits
- * for the running items, because the caller removes the projects next.
- */
-async function mapInProjects<T, R>(
-  items: readonly T[],
-  projects: readonly string[],
-  work: (item: T, project: string) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const settled = await Promise.allSettled(projects.map(async (project) => {
-    while (next < items.length) {
-      const index = next++
-      try {
-        results[index] = await work(items[index], project)
-      } catch (error) {
-        next = items.length
-        throw error
-      }
-    }
-  }))
-  for (const outcome of settled) {
-    if (outcome.status === 'rejected') throw outcome.reason
-  }
-  return results
 }
 
 /** Builds the request as `src/app/ai-controller.ts` does, over the source a new file would have. */
@@ -322,62 +378,53 @@ function coverageOf(prepared: PreparedCase, statements: readonly string[]): stri
   return `${scenarios}/${examples}${scenarios < examples ? ' short' : ''}`
 }
 
-async function scoreGenerated(
+/** Settles the report unless the reply has statements to run, and then returns the source to grade. */
+function spliceGenerated(
   prepared: PreparedCase,
   generated: GenerateResult,
   report: CaseReport,
-  project: string,
-  javaHome: string,
   metadata: PsLibraryMetadata,
-): Promise<void> {
+): string | null {
   report.statements = generated.statements
   report.usage = generated.usage
   report.servedModel = generated.servedModel
-  const fail = (result: string, details: string[] = []): void => {
+  const fail = (result: string, details: string[] = []): null => {
     report.result = result
     report.passed = false
     report.details = details
+    return null
   }
 
   if (generated.wrongModel) {
-    fail('wrong-model', [`Served ${generated.servedModel ?? 'an unknown model'}.`])
-    return
+    return fail('wrong-model', [`Served ${generated.servedModel ?? 'an unknown model'}.`])
   }
   if (generated.error !== null) {
-    fail('error', [generated.error])
-    return
+    return fail('error', [generated.error])
   }
   if (generated.outcome !== 'ok') {
-    fail(generated.outcome ?? 'error')
-    return
+    return fail(generated.outcome ?? 'error')
   }
   if (prepared.evalCase.expectEmpty) {
     if (generated.statements.length === 0) {
       report.result = 'empty as expected'
       report.passed = true
-    } else {
-      fail('expected empty', generated.statements)
+      return null
     }
-    return
+    return fail('expected empty', generated.statements)
   }
   if (generated.statements.length === 0) {
-    fail('empty')
-    return
+    return fail('empty')
   }
 
   report.coverage = coverageOf(prepared, generated.statements)
   const spliced = spliceStatements(prepared.evalCase.source, generated.statements, metadata)
-  if (!spliced.ok) {
-    fail(`rejected: ${spliced.reason}`)
-    return
-  }
-  const verdict = await runTest(project, javaHome, prepared.evalCase.fqcn, spliced.source)
-  if (verdict.kind === 'pass') {
-    report.result = 'pass'
-    report.passed = true
-    return
-  }
-  fail(verdict.kind, verdict.details)
+  return spliced.ok ? spliced.source : fail(`rejected: ${spliced.reason}`)
+}
+
+function applyVerdict(report: CaseReport, verdict: Verdict): void {
+  report.passed = verdict.kind === 'pass'
+  report.result = verdict.kind
+  report.details = verdict.kind === 'pass' ? [] : verdict.details
 }
 
 function printTable(reports: readonly CaseReport[], dry: boolean): void {
@@ -453,10 +500,7 @@ it('scores the test generation prompt', async () => {
       await readFile(join(CACHE_DIR, 'ps-metadata.json'), 'utf8'),
     ) as PsLibraryMetadata
 
-    const projects = await Promise.all(
-      Array.from({ length: Math.min(MAX_GRADLE_PROJECTS, cases.length) }, (_, index) =>
-        createProject(join(root, `project-${index}`), psRepo)),
-    )
+    const javaBuild = await resolveJavaBuild(psRepo, native.javaHome, root)
     const candidates: PreparedCase[] = []
     for (const evalCase of cases) {
       const report = blankReport(evalCase)
@@ -473,15 +517,17 @@ it('scores the test generation prompt', async () => {
     }
 
     // Free, and before any call, so a broken case is never charged.
-    const baselines = await mapInProjects(candidates, projects, async ({ evalCase }, project) => {
-      const baseline = await runTest(project, native.javaHome, evalCase.fqcn, evalCase.source)
-      if (baseline.kind === 'pass') console.log(`${evalCase.name}: baseline passed`)
-      return baseline
-    })
-    // Folded here so the case order, not the finishing order, sets the call order.
+    console.log(`Grading ${candidates.length} baselines...`)
+    const baselines = await gradeBatch(
+      join(root, 'baselines'),
+      native.javaHome,
+      javaBuild,
+      candidates.map(({ evalCase }) => ({ id: evalCase.name, fqcn: evalCase.fqcn, source: evalCase.source })),
+    )
     const prepared = candidates.filter(({ evalCase, report }, index) => {
       const baseline = baselines[index]
       if (baseline.kind === 'pass') {
+        console.log(`${evalCase.name}: baseline passed`)
         report.result = 'baseline ok'
         return true
       }
@@ -494,22 +540,28 @@ it('scores the test generation prompt', async () => {
     })
 
     if (dry) {
-      const errors = await mapInProjects(prepared, projects, async ({ evalCase, report }, project) => {
+      const items: (GradeItem & { report: CaseReport })[] = []
+      for (const { evalCase, report } of prepared) {
         const spliced = spliceStatements(evalCase.source, [TRIVIAL_STATEMENT], metadata)
-        if (!spliced.ok) {
+        if (spliced.ok) {
+          items.push({ id: evalCase.name, fqcn: evalCase.fqcn, source: spliced.source, report })
+        } else {
           report.result = `splice rejected: ${spliced.reason}`
           report.passed = false
-          return [`${report.name} splice: ${spliced.reason}`]
+          toolErrors.push(`${report.name} splice: ${spliced.reason}`)
         }
-        const verdict = await runTest(project, native.javaHome, evalCase.fqcn, spliced.source)
+      }
+      console.log(`Grading ${items.length} spliced sources...`)
+      const verdicts = await gradeBatch(join(root, 'trivial'), native.javaHome, javaBuild, items)
+      items.forEach(({ report }, index) => {
+        const verdict = verdicts[index]
         report.passed = verdict.kind === 'pass'
-        report.result = verdict.kind === 'pass' ? 'baseline+splice+gradle ok' : `trivial ${verdict.kind}`
+        report.result = verdict.kind === 'pass' ? 'baseline+splice+run ok' : `trivial ${verdict.kind}`
         console.log(`${report.name}: ${report.result}`)
-        if (verdict.kind === 'pass') return []
+        if (verdict.kind === 'pass') return
         report.details = verdict.details
-        return [`${report.name} trivial run: ${verdict.details.join(' ')}`]
+        toolErrors.push(`${report.name} trivial run: ${verdict.details.join(' ')}`)
       })
-      toolErrors.push(...errors.flat())
     } else if (toolErrors.length === 0) {
       const generateInput = join(root, 'generate-input.json')
       // Kept in the ignored output directory, since these calls are paid for.
@@ -524,20 +576,28 @@ it('scores the test generation prompt', async () => {
       }
       const results = JSON.parse(await readFile(generateOutput, 'utf8').catch(() => '[]')) as GenerateResult[]
       const byId = new Map(results.map((result) => [result.id, result]))
-      const errors = await mapInProjects(prepared, projects, async (current, project) => {
-        const { report } = current
+      const items: (GradeItem & { report: CaseReport })[] = []
+      for (const current of prepared) {
+        const { evalCase, report } = current
         const result = byId.get(report.name)
         if (!result) {
           report.result = 'not called'
-          return []
+          continue
         }
-        await scoreGenerated(current, result, report, project, native.javaHome, metadata)
+        const source = spliceGenerated(current, result, report, metadata)
+        if (source !== null) {
+          items.push({ id: evalCase.name, fqcn: evalCase.fqcn, source, report })
+        }
+        if (result.wrongModel) {
+          toolErrors.push(`${report.name}: wrong model, ${report.details.join(' ')} The run stopped.`)
+        }
+      }
+      console.log(`Grading ${items.length} generated tests...`)
+      const verdicts = await gradeBatch(join(root, 'scored'), native.javaHome, javaBuild, items)
+      items.forEach(({ report }, index) => applyVerdict(report, verdicts[index]))
+      for (const { report } of prepared) {
         console.log(`${report.name}: ${report.result}`)
-        return result.wrongModel
-          ? [`${report.name}: wrong model, ${report.details.join(' ')} The run stopped.`]
-          : []
-      })
-      toolErrors.push(...errors.flat())
+      }
     }
   } finally {
     await rm(root, { recursive: true, force: true })

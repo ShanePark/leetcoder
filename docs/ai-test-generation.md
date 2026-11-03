@@ -524,21 +524,43 @@ To add a case:
    example in `test()`. If the examples need an API the platform provides, add a
    stand-in to the reference file and set `expectEmpty`.
 5. Run `EVAL_DRY=1 EVAL_CASES=<name> npm run eval:prompt`. It must reach
-   `baseline+splice+gradle ok`.
+   `baseline+splice+run ok`.
 
 ### Running
 
-The reference file goes in a throwaway Gradle project under the OS temp directory,
-with `--offline`, in `src/test/java`. Baselines and scoring run concurrently through up
-to 4 such projects (`MAX_GRADLE_PROJECTS`), one run per project at a time, so a compile
-error stays in its own project. The `ps` repository supplies only the Gradle build
-files and the library metadata, and it is never written to. `eval_prepare` does run the
-app's Ps library inspection there, which only touches Gradle's ignored directories.
+`eval/JavaGradeRunner.java` grades one batch in one JVM, using the JDK `eval_prepare`
+found: the baselines, then the spliced sources, with one JVM for each. Cases run one at
+a time. Each compiles with `javax.tools.JavaCompiler` into its own directory under the
+OS temp directory, with its own captured diagnostics, then loads in its own class loader
+and runs `test` by reflection, on a new instance in its own thread. So a compile error
+or a failed test stays in its case. A thrown `Error`, such as a stack overflow, is a
+failed test. A test still running after 30 seconds (`TEST_TIMEOUT_MS`) is stopped and
+reported as `timeout`, and the JVM halts at the end whatever is left running. A case
+with no result, because the JVM itself died, is a tool error.
+
+Grading follows the `ps` test task where it affects a verdict:
+
+- The compile and runtime classpaths are the `ps` build's `testCompileClasspath` and
+  `testRuntimeClasspath`, and the `-source` and `-target` levels come from its
+  `compileTestJava`. Its other compiler settings are assumed, not read: `-g`,
+  `-proc:none`, and UTF-8 sources.
+- The JVM has Gradle's test defaults of `-Xmx512m` and `-ea`.
+- Only the method named `test` runs, as with `--tests <class>.test`. There is no JUnit
+  engine, so `@BeforeEach`, `@AfterEach`, `@BeforeAll`, `@Disabled`, `@Timeout`, and
+  extensions do nothing, and an aborted assumption counts as a failure. A reference file
+  must not depend on them.
+
+Gradle runs only to resolve those settings, over a copy of the `ps` build files in the OS
+temp directory with `--offline`. The result goes to `eval/.cache/java-classpath.json`, keyed
+by the JDK and the contents of the `ps` build files, so it stays until one of them changes
+or a jar disappears. Delete the file to resolve it again. The `ps` repository is never
+written to by grading. `eval_prepare` does run the app's Ps library inspection there, which
+only touches Gradle's ignored directories.
 
 Delete `eval/.cache/ps-metadata.json` to inspect the Ps signatures again. The native
 steps are ignored tests in `src-tauri/src/ai/eval.rs`, which do nothing unless the
-driver sets their input and output paths. They build in their own target directory,
-which can be removed with:
+driver sets their input and output paths. They build with `CARGO_BUILD_JOBS` at 4 in
+their own target directory, which can be removed with:
 
 ```bash
 rm -rf "${TMPDIR:-/tmp}/leetcoder-prompt-eval-cargo"

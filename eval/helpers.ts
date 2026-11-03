@@ -69,36 +69,24 @@ function scenarioPattern(entryPoint: string | null, javaSnippet: string | null):
   return designClass ? new RegExp(`\\bnew\\s+${designClass}\\s*\\(`, 'g') : null
 }
 
-export type GradleVerdict =
+export type Verdict =
   | { kind: 'pass' }
   | { kind: 'compile' | 'assertion' | 'timeout' | 'tool'; details: string[] }
 
-export interface GradleRun {
-  exitCode: number | null
-  timedOut: boolean
-  /** Combined stdout and stderr. */
-  output: string
-  /** The JUnit report of the test class, when the run wrote one. */
-  junitXml: string | null
+/** One line of `eval/JavaGradeRunner.java`'s results. */
+export interface RunnerResult {
+  status: 'pass' | 'compile' | 'failure' | 'timeout' | 'tool'
+  detail: string
 }
 
 /** Separate what the model got wrong from what is wrong with the tool. */
-export function classifyGradleRun(run: GradleRun): GradleVerdict {
-  if (run.timedOut) {
-    return { kind: 'timeout', details: ['The Gradle run timed out.'] }
+export function classifyRunnerResult({ status, detail }: RunnerResult): Verdict {
+  switch (status) {
+    case 'pass': return { kind: 'pass' }
+    case 'compile': return { kind: 'compile', details: compileErrors(detail) }
+    case 'failure': return { kind: 'assertion', details: [detail.replace(/\s+/g, ' ').trim().slice(0, MAX_DETAIL_LENGTH)] }
+    default: return { kind: status, details: [detail] }
   }
-  if (run.exitCode === 0) {
-    return /<testsuite\b[^>]*\btests="[1-9]/.test(run.junitXml ?? '')
-      ? { kind: 'pass' }
-      : { kind: 'tool', details: ['Gradle succeeded but no test ran.'] }
-  }
-  if (/Execution failed for task ':compile\w*Java'/.test(run.output)) {
-    return { kind: 'compile', details: compileErrors(run.output) }
-  }
-  if (run.junitXml && /<failure\b/.test(run.junitXml)) {
-    return { kind: 'assertion', details: [junitFailure(run.junitXml)] }
-  }
-  return { kind: 'tool', details: gradleFailure(run.output) }
 }
 
 function compileErrors(output: string): string[] {
@@ -109,38 +97,5 @@ function compileErrors(output: string): string[] {
     const location = line.slice(line.lastIndexOf('/') + 1)
     details.push(location, ...lines.slice(index + 1, index + 3).map((next) => next.trimEnd()))
   })
-  return (details.length > 0 ? details : gradleFailure(output)).slice(0, MAX_DETAIL_LINES)
-}
-
-function junitFailure(xml: string): string {
-  const failure = /<failure\b[^>]*?\bmessage="([^"]*)"[^>]*?\btype="([^"]*)"/.exec(xml)
-    ?? /<failure\b[^>]*?\btype="([^"]*)"()/.exec(xml)
-  if (!failure) {
-    return 'The test failed.'
-  }
-  const text = [failure[1], failure[2]].filter(Boolean).map(decodeXml).join(' ')
-  return text.replace(/\s+/g, ' ').trim().slice(0, MAX_DETAIL_LENGTH)
-}
-
-function decodeXml(text: string): string {
-  return text.replace(/&(lt|gt|quot|apos|#\d+|#x[\da-f]+|amp);/gi, (_, entity: string) => {
-    switch (entity.toLowerCase()) {
-      case 'lt': return '<'
-      case 'gt': return '>'
-      case 'quot': return '"'
-      case 'apos': return "'"
-      case 'amp': return '&'
-      default: {
-        const hex = entity[1].toLowerCase() === 'x'
-        return String.fromCodePoint(Number.parseInt(entity.slice(hex ? 2 : 1), hex ? 16 : 10))
-      }
-    }
-  })
-}
-
-function gradleFailure(output: string): string[] {
-  const lines = output.split('\n')
-  const start = lines.findIndex((line) => line.startsWith('* What went wrong:'))
-  const details = start < 0 ? lines.slice(-MAX_DETAIL_LINES) : lines.slice(start + 1, start + 1 + MAX_DETAIL_LINES)
-  return details.map((line) => line.trimEnd()).filter(Boolean)
+  return (details.length > 0 ? details : lines.filter(Boolean)).slice(0, MAX_DETAIL_LINES)
 }
