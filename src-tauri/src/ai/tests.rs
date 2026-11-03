@@ -1395,6 +1395,82 @@ fn prompt_drops_helper_lines_when_the_library_is_unavailable() {
     assert!(message.contains("<snippet>\nclass LRUCache {}\n</snippet>"));
 }
 
+/// The request without `messages`: what must stay byte-identical between requests
+/// for the cached prefix to match.
+fn outside_messages(body: &Value) -> String {
+    let mut rest = body.clone();
+    rest.as_object_mut().unwrap().remove("messages");
+    rest.to_string()
+}
+
+#[test]
+fn cache_breakpoint_ends_the_fixed_prompt_and_request_text_follows_it() {
+    let request = AiGenerateRequest {
+        selected_model_id: None,
+        problem_title: "SENTINELTITLE".to_string(),
+        problem_content: "SENTINELCONTENT".to_string(),
+        entry_point: Some("SENTINELENTRY".to_string()),
+        java_snippet: Some("SENTINELSNIPPET".to_string()),
+        method_headers: vec!["SENTINELHEADER".to_string()],
+        ps_signatures: vec!["SENTINELHELPER".to_string()],
+    };
+    let body = claude::request_body("model-a", true, &request);
+
+    let system = body["system"].as_array().unwrap();
+    assert_eq!(system.len(), 1);
+    assert_eq!(system[0]["type"], "text");
+    assert_eq!(system[0]["text"], prompt::system_prompt(true));
+    assert_eq!(system[0]["cache_control"], json!({ "type": "ephemeral" }));
+    assert_eq!(body.to_string().matches("cache_control").count(), 1);
+
+    let message = body["messages"][0]["content"].as_str().unwrap();
+    let prefix = outside_messages(&body);
+    for text in [
+        "SENTINELTITLE",
+        "SENTINELCONTENT",
+        "SENTINELENTRY",
+        "SENTINELSNIPPET",
+        "SENTINELHEADER",
+        "SENTINELHELPER",
+    ] {
+        assert!(
+            message.contains(text),
+            "{text} belongs after the breakpoint"
+        );
+        assert!(
+            !prefix.contains(text),
+            "{text} would break the cached prefix"
+        );
+    }
+}
+
+#[test]
+fn different_problems_share_one_cached_prefix_per_prompt_variant() {
+    let first = generate_request(None);
+    let mut second = generate_request(None);
+    second.problem_title = "Another Problem".to_string();
+    second.problem_content = "<p>Other examples</p>".to_string();
+    second.entry_point = None;
+    second.java_snippet = Some("class Other {}".to_string());
+    second.method_headers = vec!["void other()".to_string()];
+
+    let body = |request: &AiGenerateRequest| claude::request_body("model-a", true, request);
+    assert_ne!(body(&first)["messages"], body(&second)["messages"]);
+    assert_eq!(
+        outside_messages(&body(&first)),
+        outside_messages(&body(&second))
+    );
+
+    // Without the helper library the prompt is shorter, and it still gets a breakpoint.
+    second.ps_signatures.clear();
+    let bare = body(&second);
+    assert_eq!(bare["system"][0]["text"], prompt::system_prompt(false));
+    assert_eq!(
+        bare["system"][0]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+}
+
 // Prices
 
 fn price_row(provider: &str, input: f64, output: f64) -> Value {

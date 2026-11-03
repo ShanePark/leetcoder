@@ -448,10 +448,16 @@ pub(super) fn request_body(model_id: &str, effort_low: bool, request: &AiGenerat
     if effort_low {
         output_config["effort"] = json!("low");
     }
+    // The breakpoint ends the prefix that every request shares. Per-request text
+    // belongs in `messages`, after it: anything earlier would miss the cache.
     json!({
         "model": model_id,
         "max_tokens": MAX_OUTPUT_TOKENS,
-        "system": prompt::system_prompt(!request.ps_signatures.is_empty()),
+        "system": [{
+            "type": "text",
+            "text": prompt::system_prompt(!request.ps_signatures.is_empty()),
+            "cache_control": { "type": "ephemeral" },
+        }],
         "messages": [{ "role": "user", "content": prompt::user_message(request) }],
         "output_config": output_config,
     })

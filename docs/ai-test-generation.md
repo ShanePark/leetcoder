@@ -239,6 +239,9 @@ These are fixed now because they are expensive to change later.
   exists.
 - Structured output (`output_config.format`) returns an array of statements.
 - No `thinking` or sampling parameters. `stop_reason` is checked before content.
+- The system prompt is one text block with a 5-minute cache breakpoint. Per-request
+  text stays in `messages`, after it, and the prefix is silently uncached if it
+  falls below the model's minimum cacheable length.
 - Headers: `x-api-key` and `anthropic-version: 2026-10-21`. `max_tokens` is 16000,
   non-streaming, with a 300-second timeout.
 - The output schema is an object with one required `statements` array of strings
