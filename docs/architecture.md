@@ -90,7 +90,7 @@ Focused implementation trees keep distinct responsibilities behind their facades
 - `src/editor/intentions/` separates analysis/inference/rendering/planning from the
   CodeMirror menu; `src/editor/editing/` separates refactoring, JavaDoc, clipboard,
   and command behavior. Auto-import and method-call input are independent leaves.
-- Native `leetcode/` separates pooled clients/parsing/tests; `update/` separates
+- Native `leetcode/` separates pooled clients/parsing/slug cache/tests; `update/` separates
   source validation, rebuild/environment setup, progress, and tests.
   `project_search/` and `commands/` retain cohesive implementation with owned tests.
   Runner process leaves separate control/registry, capture/cancellation, and marker

@@ -1,10 +1,14 @@
 use reqwest::header::{ACCEPT, CONTENT_TYPE, ORIGIN, REFERER};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::models::DailyProblem;
 
 use super::parsing::{normalize_frontend_id, truncate};
+use super::slug_cache::SlugResolver;
 use super::{parse_daily_problem, parse_problem_detail, parse_problem_index};
 
 const LEETCODE_GRAPHQL_URL: &str = "https://leetcode.com/graphql";
@@ -48,6 +52,7 @@ query questionData($titleSlug: String!) {
 "#;
 
 static LEETCODE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static SLUG_RESOLVER: SlugResolver = SlugResolver::new();
 
 pub(crate) async fn fetch_daily_problem() -> Result<DailyProblem, String> {
     let client = leetcode_client()?;
@@ -59,11 +64,30 @@ pub(crate) async fn fetch_daily_problem() -> Result<DailyProblem, String> {
 ///
 /// LeetCode's current problemset GraphQL query requires authentication, while
 /// the public problem index still exposes the number-to-slug mapping. Resolve
-/// the slug from that index first, then use the same unauthenticated question
-/// detail query that powers the daily card.
-pub(crate) async fn fetch_problem_by_number(frontend_id: &str) -> Result<DailyProblem, String> {
+/// the slug through a cache of that index, then use the same unauthenticated
+/// question detail query that powers the daily card.
+pub(crate) async fn fetch_problem_by_number(
+    frontend_id: &str,
+    cache_dir: &Path,
+) -> Result<DailyProblem, String> {
     let frontend_id = normalize_frontend_id(frontend_id)?;
     let client = leetcode_client()?;
+    let title_slug = SLUG_RESOLVER
+        .resolve(cache_dir, &frontend_id, Instant::now(), || {
+            fetch_problem_index(&client)
+        })
+        .await?;
+    let detail_body = post_graphql(
+        &client,
+        "questionData",
+        PROBLEM_DETAIL_QUERY,
+        json!({ "titleSlug": title_slug }),
+    )
+    .await?;
+    parse_problem_detail(&detail_body, &frontend_id)
+}
+
+async fn fetch_problem_index(client: &reqwest::Client) -> Result<BTreeMap<String, String>, String> {
     let index_response = client
         .get(LEETCODE_PROBLEM_INDEX_URL)
         .header(ACCEPT, "application/json")
@@ -81,16 +105,7 @@ pub(crate) async fn fetch_problem_by_number(frontend_id: &str) -> Result<DailyPr
             truncate(&index_body)
         ));
     }
-
-    let title_slug = parse_problem_index(&index_body, &frontend_id)?;
-    let detail_body = post_graphql(
-        &client,
-        "questionData",
-        PROBLEM_DETAIL_QUERY,
-        json!({ "titleSlug": title_slug }),
-    )
-    .await?;
-    parse_problem_detail(&detail_body, &frontend_id)
+    parse_problem_index(&index_body)
 }
 
 pub(super) fn leetcode_client() -> Result<reqwest::Client, String> {

@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 use crate::models::DailyProblem;
 
@@ -34,7 +35,9 @@ pub(crate) fn parse_daily_problem(body: &str) -> Result<DailyProblem, String> {
     parse_question_metadata(question, date, link)
 }
 
-pub(crate) fn parse_problem_index(body: &str, frontend_id: &str) -> Result<String, String> {
+/// Maps every normalized frontend number to its title slug. The first usable entry
+/// for a number wins.
+pub(crate) fn parse_problem_index(body: &str) -> Result<BTreeMap<String, String>, String> {
     let response: Value = serde_json::from_str(body)
         .map_err(|error| format!("LeetCode returned invalid problem index JSON: {error}"))?;
     let problems = response
@@ -42,24 +45,26 @@ pub(crate) fn parse_problem_index(body: &str, frontend_id: &str) -> Result<Strin
         .and_then(Value::as_array)
         .ok_or_else(|| "LeetCode problem index is missing stat_status_pairs".to_string())?;
 
-    problems
+    let mut slugs = BTreeMap::new();
+    let stats = problems
         .iter()
-        .filter_map(|entry| entry.get("stat").and_then(Value::as_object))
-        .find_map(|stat| {
-            let number = stat
-                .get("frontend_question_id")
-                .or_else(|| stat.get("questionFrontendId"))
-                .and_then(value_to_string)?;
-            if normalize_frontend_id(&number).ok().as_deref() != Some(frontend_id) {
-                return None;
-            }
-            stat.get("question__title_slug")
-                .or_else(|| stat.get("titleSlug"))
-                .and_then(Value::as_str)
-                .filter(|slug| !slug.trim().is_empty())
-                .map(str::to_string)
-        })
-        .ok_or_else(|| format!("LeetCode problem #{frontend_id} was not found"))
+        .filter_map(|entry| entry.get("stat").and_then(Value::as_object));
+    for stat in stats {
+        let number = stat
+            .get("frontend_question_id")
+            .or_else(|| stat.get("questionFrontendId"))
+            .and_then(value_to_string)
+            .and_then(|number| normalize_frontend_id(&number).ok());
+        let slug = stat
+            .get("question__title_slug")
+            .or_else(|| stat.get("titleSlug"))
+            .and_then(Value::as_str)
+            .filter(|slug| !slug.trim().is_empty());
+        if let (Some(number), Some(slug)) = (number, slug) {
+            slugs.entry(number).or_insert_with(|| slug.to_string());
+        }
+    }
+    Ok(slugs)
 }
 
 pub(crate) fn parse_problem_detail(

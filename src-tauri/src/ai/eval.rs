@@ -132,7 +132,10 @@ fn eval_fetch() {
             std::thread::sleep(FETCH_GAP);
         }
         fetched_any = true;
-        match tauri::async_runtime::block_on(crate::leetcode::fetch_problem_by_number(number)) {
+        match tauri::async_runtime::block_on(crate::leetcode::fetch_problem_by_number(
+            number,
+            &input.cache_dir,
+        )) {
             Ok(problem) => write_json(&path, &problem),
             Err(error) => {
                 // A site that refused one request is not asked again for the rest.

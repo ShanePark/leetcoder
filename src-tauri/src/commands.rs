@@ -11,6 +11,7 @@ use crate::repository;
 use crate::runner;
 use crate::watcher;
 use std::sync::Arc;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
@@ -85,8 +86,15 @@ pub async fn fetch_daily_problem() -> Result<DailyProblem, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub async fn fetch_problem_by_number(frontend_id: String) -> Result<DailyProblem, String> {
-    leetcode::fetch_problem_by_number(&frontend_id).await
+pub async fn fetch_problem_by_number(
+    app: tauri::AppHandle,
+    frontend_id: String,
+) -> Result<DailyProblem, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("Could not locate the app cache directory: {error}"))?;
+    leetcode::fetch_problem_by_number(&frontend_id, &cache_dir).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
