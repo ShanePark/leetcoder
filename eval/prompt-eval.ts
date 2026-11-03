@@ -93,6 +93,20 @@ interface GradeItem {
   source: string
 }
 
+/** A further correct solution, which returns a different valid answer from the examples' output. */
+interface Alternative {
+  name: string
+  source: string
+}
+
+/** What one case grades on: the reference and its alternatives, as they are or spliced. */
+interface CaseSources extends GradeItem {
+  alternatives: Alternative[]
+}
+
+/** `alternative` names the alternative that failed, when the reference did not. */
+type CaseVerdict = Verdict & { alternative?: string }
+
 interface EvalCase {
   name: string
   /** The reference solution, whose `test` method asserts every example. */
@@ -100,6 +114,7 @@ interface EvalCase {
   fqcn: string
   /** The model should return no statements, because no call can be written. */
   expectEmpty: boolean
+  alternatives: Alternative[]
 }
 
 /** `eval_prepare` refuses a fixture with no content. */
@@ -180,7 +195,17 @@ async function readCase(name: string): Promise<EvalCase> {
     source,
     fqcn: fullyQualifiedClassName(source, sourcePath),
     expectEmpty: meta.expectEmpty === true,
+    alternatives: files.includes('alternatives') ? await readAlternatives(join(directory, 'alternatives')) : [],
   }
+}
+
+/** Each file declares the reference's class, so its own name is free to say what it does differently. */
+async function readAlternatives(directory: string): Promise<Alternative[]> {
+  const files = (await readdir(directory)).filter((file) => file.endsWith('.java')).sort()
+  return Promise.all(files.map(async (file) => ({
+    name: file.replace(/\.java$/, ''),
+    source: await readFile(join(directory, file), 'utf8'),
+  })))
 }
 
 function run(
@@ -320,6 +345,35 @@ async function gradeBatch(
   })
 }
 
+/**
+ * Grades every reference and alternative in one batch, and returns one verdict per case.
+ * A failed reference outranks its alternatives, so only a failure the reference does not
+ * share is reported as the alternative's.
+ */
+async function gradeCases(
+  batchDir: string,
+  javaHome: string,
+  build: JavaBuild,
+  cases: readonly CaseSources[],
+): Promise<CaseVerdict[]> {
+  const verdicts = await gradeBatch(batchDir, javaHome, build, cases.flatMap(({ id, fqcn, source, alternatives }) => [
+    { id, fqcn, source },
+    ...alternatives.map((alternative) => ({ id: `${id}/${alternative.name}`, fqcn, source: alternative.source })),
+  ]))
+  let next = 0
+  return cases.map(({ alternatives }) => {
+    const reference = verdicts[next++]
+    const failures: CaseVerdict[] = []
+    for (const { name } of alternatives) {
+      const verdict = verdicts[next++]
+      if (verdict.kind !== 'pass') {
+        failures.push({ ...verdict, alternative: name, details: [`Alternative ${name}:`, ...verdict.details] })
+      }
+    }
+    return reference.kind === 'pass' && failures.length > 0 ? failures[0] : reference
+  })
+}
+
 /** Builds the request as `src/app/ai-controller.ts` does, over the source a new file would have. */
 function buildRequest(
   problem: FixtureProblem,
@@ -358,6 +412,23 @@ function spliceStatements(
   return result.ok ? { ok: true, source: current().doc.toString() } : { ok: false, reason: result.reason }
 }
 
+/** Splices into the reference and every alternative, since all of them must accept the statements. */
+function spliceCase(
+  evalCase: EvalCase,
+  statements: readonly string[],
+  metadata: PsLibraryMetadata,
+): { ok: true; sources: CaseSources } | { ok: false; reason: string } {
+  const reference = spliceStatements(evalCase.source, statements, metadata)
+  if (!reference.ok) return reference
+  const alternatives: Alternative[] = []
+  for (const { name, source } of evalCase.alternatives) {
+    const spliced = spliceStatements(source, statements, metadata)
+    if (!spliced.ok) return { ok: false, reason: `${spliced.reason} on alternative ${name}` }
+    alternatives.push({ name, source: spliced.source })
+  }
+  return { ok: true, sources: { id: evalCase.name, fqcn: evalCase.fqcn, source: reference.source, alternatives } }
+}
+
 function blankReport(evalCase: EvalCase): CaseReport {
   return {
     name: evalCase.name,
@@ -378,13 +449,13 @@ function coverageOf(prepared: PreparedCase, statements: readonly string[]): stri
   return `${scenarios}/${examples}${scenarios < examples ? ' short' : ''}`
 }
 
-/** Settles the report unless the reply has statements to run, and then returns the source to grade. */
+/** Settles the report unless the reply has statements to run, and then returns the sources to grade. */
 function spliceGenerated(
   prepared: PreparedCase,
   generated: GenerateResult,
   report: CaseReport,
   metadata: PsLibraryMetadata,
-): string | null {
+): CaseSources | null {
   report.statements = generated.statements
   report.usage = generated.usage
   report.servedModel = generated.servedModel
@@ -417,13 +488,17 @@ function spliceGenerated(
   }
 
   report.coverage = coverageOf(prepared, generated.statements)
-  const spliced = spliceStatements(prepared.evalCase.source, generated.statements, metadata)
-  return spliced.ok ? spliced.source : fail(`rejected: ${spliced.reason}`)
+  const spliced = spliceCase(prepared.evalCase, generated.statements, metadata)
+  return spliced.ok ? spliced.sources : fail(`rejected: ${spliced.reason}`)
 }
 
-function applyVerdict(report: CaseReport, verdict: Verdict): void {
+function alternativeFailure(kind: Verdict['kind']): string {
+  return kind === 'assertion' ? 'fail: alternative rejects a valid answer' : `fail: alternative ${kind}`
+}
+
+function applyVerdict(report: CaseReport, verdict: CaseVerdict): void {
   report.passed = verdict.kind === 'pass'
-  report.result = verdict.kind
+  report.result = verdict.alternative ? alternativeFailure(verdict.kind) : verdict.kind
   report.details = verdict.kind === 'pass' ? [] : verdict.details
 }
 
@@ -518,11 +593,11 @@ it('scores the test generation prompt', async () => {
 
     // Free, and before any call, so a broken case is never charged.
     console.log(`Grading ${candidates.length} baselines...`)
-    const baselines = await gradeBatch(
+    const baselines = await gradeCases(
       join(root, 'baselines'),
       native.javaHome,
       javaBuild,
-      candidates.map(({ evalCase }) => ({ id: evalCase.name, fqcn: evalCase.fqcn, source: evalCase.source })),
+      candidates.map(({ evalCase: { name, fqcn, source, alternatives } }) => ({ id: name, fqcn, source, alternatives })),
     )
     const prepared = candidates.filter(({ evalCase, report }, index) => {
       const baseline = baselines[index]
@@ -531,7 +606,7 @@ it('scores the test generation prompt', async () => {
         report.result = 'baseline ok'
         return true
       }
-      report.result = `excluded: baseline ${baseline.kind}`
+      report.result = `excluded: ${baseline.alternative ? 'alternative ' : ''}baseline ${baseline.kind}`
       report.details = baseline.details
       if (baseline.kind === 'tool') {
         toolErrors.push(`${evalCase.name} baseline: ${baseline.details.join(' ')}`)
@@ -540,11 +615,11 @@ it('scores the test generation prompt', async () => {
     })
 
     if (dry) {
-      const items: (GradeItem & { report: CaseReport })[] = []
+      const items: (CaseSources & { report: CaseReport })[] = []
       for (const { evalCase, report } of prepared) {
-        const spliced = spliceStatements(evalCase.source, [TRIVIAL_STATEMENT], metadata)
+        const spliced = spliceCase(evalCase, [TRIVIAL_STATEMENT], metadata)
         if (spliced.ok) {
-          items.push({ id: evalCase.name, fqcn: evalCase.fqcn, source: spliced.source, report })
+          items.push({ ...spliced.sources, report })
         } else {
           report.result = `splice rejected: ${spliced.reason}`
           report.passed = false
@@ -552,11 +627,13 @@ it('scores the test generation prompt', async () => {
         }
       }
       console.log(`Grading ${items.length} spliced sources...`)
-      const verdicts = await gradeBatch(join(root, 'trivial'), native.javaHome, javaBuild, items)
+      const verdicts = await gradeCases(join(root, 'trivial'), native.javaHome, javaBuild, items)
       items.forEach(({ report }, index) => {
         const verdict = verdicts[index]
         report.passed = verdict.kind === 'pass'
-        report.result = verdict.kind === 'pass' ? 'baseline+splice+run ok' : `trivial ${verdict.kind}`
+        report.result = verdict.kind === 'pass'
+          ? 'baseline+splice+run ok'
+          : `trivial ${verdict.alternative ? 'alternative ' : ''}${verdict.kind}`
         console.log(`${report.name}: ${report.result}`)
         if (verdict.kind === 'pass') return
         report.details = verdict.details
@@ -576,24 +653,24 @@ it('scores the test generation prompt', async () => {
       }
       const results = JSON.parse(await readFile(generateOutput, 'utf8').catch(() => '[]')) as GenerateResult[]
       const byId = new Map(results.map((result) => [result.id, result]))
-      const items: (GradeItem & { report: CaseReport })[] = []
+      const items: (CaseSources & { report: CaseReport })[] = []
       for (const current of prepared) {
-        const { evalCase, report } = current
+        const { report } = current
         const result = byId.get(report.name)
         if (!result) {
           report.result = 'not called'
           continue
         }
-        const source = spliceGenerated(current, result, report, metadata)
-        if (source !== null) {
-          items.push({ id: evalCase.name, fqcn: evalCase.fqcn, source, report })
+        const sources = spliceGenerated(current, result, report, metadata)
+        if (sources !== null) {
+          items.push({ ...sources, report })
         }
         if (result.wrongModel) {
           toolErrors.push(`${report.name}: wrong model, ${report.details.join(' ')} The run stopped.`)
         }
       }
       console.log(`Grading ${items.length} generated tests...`)
-      const verdicts = await gradeBatch(join(root, 'scored'), native.javaHome, javaBuild, items)
+      const verdicts = await gradeCases(join(root, 'scored'), native.javaHome, javaBuild, items)
       items.forEach(({ report }, index) => applyVerdict(report, verdicts[index]))
       for (const { report } of prepared) {
         console.log(`${report.name}: ${report.result}`)

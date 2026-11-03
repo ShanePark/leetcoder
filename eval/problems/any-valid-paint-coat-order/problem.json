@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90021",
+      "title": "Layering the Paint Coats",
+      "titleSlug": "layering-the-paint-coats",
+      "difficulty": "Medium",
+      "content": "<p>A restorer must apply <code>coats</code> coats of paint, numbered from <code>0</code> to <code>coats - 1</code>. Each entry <code>under[i] = [a, b]</code> means coat <code>a</code> must go on at some point before coat <code>b</code>.</p>\n\n<p>Return <em>an order that applies every coat exactly once and respects every entry of</em> <code>under</code>. If there are several valid orders, return <strong>any</strong> of them. The input guarantees that at least one exists.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> coats = 6, under = [[5,0],[5,2],[0,3],[2,3],[3,1],[4,1]]\n<strong>Output:</strong> [4,5,0,2,3,1]\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> coats = 5, under = [[1,0],[2,0],[3,1],[3,2],[4,3]]\n<strong>Output:</strong> [4,3,1,2,0]\n<strong>Explanation:</strong> Coats 1 and 2 could also swap places.\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= coats &lt;= 2000</code></li>\n\t<li><code>0 &lt;= under.length &lt;= 5000</code></li>\n\t<li><code>under[i].length == 2</code></li>\n\t<li><code>0 &lt;= a, b &lt; coats</code></li>\n\t<li><code>a != b</code></li>\n\t<li>No entry appears twice.</li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class Solution {\n    public int[] coatOrder(int coats, int[][] under) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

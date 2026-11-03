@@ -470,7 +470,7 @@ needs the owner's key and is the only way to confirm the end-to-end flow.
 
 ## Prompt eval
 
-`npm run eval:prompt` scores the prompt against about a dozen invented problems, one
+`npm run eval:prompt` scores the prompt against 27 invented problems, one
 per problem shape, committed under `eval/problems/`. It reuses the app's own code, so
 a pass means the app would succeed. It is separate from `npm test`, which stays free.
 
@@ -520,6 +520,21 @@ Each directory under `eval/problems/` is a case, and its name is the case's name
   solution is caught before any money is spent.
 - `meta.json`, only for a case that expects no statements: `{"expectEmpty": true}`.
 
+- `alternatives/`, optional: further complete Java files declaring the reference's
+  class, each returning a different valid answer from the examples' output. The file
+  name is free and names the alternative. Its own `test()` uses property checks and
+  must pass at baseline, so a broken alternative excludes the case before any call.
+
+Generated statements are spliced into the reference and every alternative, and all
+must compile and pass, each with its own directory and class loader in the same JVM. A
+failure only on an alternative prints as `fail: alternative rejects a valid answer`, or
+`fail: alternative compile` or `timeout`, with the alternative named in the details. A
+failed reference takes precedence.
+
+Use alternatives when the problem accepts any valid answer and its conditions fit in
+one-line statements. When they do not, such as a full ordering, leave them out: asserting
+the example's output is the accepted fallback, so the reference must output exactly the
+examples' outputs.
 Every problem is invented: the title, story, signature, and examples look like a
 LeetCode problem but are not one, and only the response form is kept. The point is
 whether the prompt writes proper tests for such a problem, which takes no real problem
