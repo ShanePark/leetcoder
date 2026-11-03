@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90015",
+      "title": "Guest Book Cleanup",
+      "titleSlug": "guest-book-cleanup",
+      "difficulty": "Easy",
+      "content": "<p>An inn keeps a guest book. Each element of <code>pages</code> is one page, listing the signatures on it from top to bottom. A forgetful guest sometimes signs the same page twice.</p>\n\n<p>Return <em>the pages in their original order, where each page keeps only the first signature of each name</em>, with the remaining signatures in their original order. A name may appear on several pages, and each page is judged alone.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> pages = [[&quot;ana&quot;,&quot;bo&quot;,&quot;ana&quot;],[&quot;cy&quot;]]\n<strong>Output:</strong> [[&quot;ana&quot;,&quot;bo&quot;],[&quot;cy&quot;]]\n<strong>Explanation:</strong> The second signature of ana is dropped from the first page.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> pages = [[&quot;Doe, Jo&quot;,&quot;Lee, Max&quot;,&quot;Doe, Jo&quot;]]\n<strong>Output:</strong> [[&quot;Doe, Jo&quot;,&quot;Lee, Max&quot;]]\n<strong>Explanation:</strong> A signature may contain a comma.\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> pages = [[&quot;kim&quot;,&quot;kim&quot;],[&quot;raj&quot;,&quot;uma&quot;,&quot;raj&quot;,&quot;kim&quot;]]\n<strong>Output:</strong> [[&quot;kim&quot;],[&quot;raj&quot;,&quot;uma&quot;,&quot;kim&quot;]]\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= pages.length &lt;= 100</code></li>\n\t<li><code>1 &lt;= pages[i].length &lt;= 50</code></li>\n\t<li>Signatures contain letters, spaces, and commas.</li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class Solution {\n    public List<List<String>> cleanPages(List<List<String>> pages) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

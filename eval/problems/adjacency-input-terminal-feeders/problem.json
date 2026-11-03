@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90016",
+      "title": "Stations Feeding a Terminal",
+      "titleSlug": "stations-feeding-a-terminal",
+      "difficulty": "Easy",
+      "content": "<p>A parcel network has stations numbered from <code>0</code> to <code>n - 1</code>. <code>routes.get(i)</code> lists the stations that station <code>i</code> forwards parcels to. A station whose list is empty is a <strong>terminal</strong>.</p>\n\n<p>Return <em>how many stations forward directly to at least one terminal</em>.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> routes = [[1,2],[2],[]]\n<strong>Output:</strong> 2\n<strong>Explanation:</strong> Station 2 is the only terminal, and stations 0 and 1 both forward to it.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> routes = [[1],[2],[3],[],[3,0]]\n<strong>Output:</strong> 2\n<strong>Explanation:</strong> Station 3 is the only terminal, and stations 2 and 4 forward to it.\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> routes = [[1],[0],[]]\n<strong>Output:</strong> 0\n<strong>Explanation:</strong> Station 2 is a terminal, but nothing forwards to it.\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= n &lt;= 1000</code></li>\n\t<li><code>0 &lt;= routes.get(i).get(j) &lt; n</code></li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class Solution {\n    public int countFeeders(List<List<Integer>> routes) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

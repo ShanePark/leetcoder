@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90017",
+      "title": "Doubling Crate Staircase",
+      "titleSlug": "doubling-crate-staircase",
+      "difficulty": "Medium",
+      "content": "<p>A warehouse has crates with the given <code>heights</code>. A <strong>staircase</strong> is a sequence of crates where each crate is at least twice as tall as the one before it.</p>\n\n<p>Using each crate at most once, return <em>the largest number of crates a staircase can contain</em>.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> heights = [5,1,2,9]\n<strong>Output:</strong> 3\n<strong>Explanation:</strong> One staircase with three crates is 1, 2, 5. No staircase uses all four.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> heights = [4,4,4]\n<strong>Output:</strong> 1\n<strong>Explanation:</strong> No crate is twice as tall as another.\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> heights = [16,3,1,8,2]\n<strong>Output:</strong> 4\n<strong>Explanation:</strong> One staircase with four crates is 1, 2, 8, 16.\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= heights.size() &lt;= 10<sup>4</sup></code></li>\n\t<li><code>1 &lt;= heights.get(i) &lt;= 10<sup>8</sup></code></li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class Solution {\n    public int tallestStaircase(List<Integer> heights) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}
