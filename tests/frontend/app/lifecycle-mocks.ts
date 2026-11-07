@@ -8,8 +8,11 @@ import type {
 
 const testMocks = vi.hoisted(() => ({
   editorInstances: [] as Array<{
+    source: string
     emitChange: (source: string) => void
     triggerProjectSearch: () => void
+    applyAiTests: (statements: readonly string[]) => unknown
+    focus: () => void
     metadataUpdates: Array<PsLibraryMetadata | null>
     revealedLocations: Array<{ line: number; column?: number | null }>
   }>,
@@ -29,13 +32,27 @@ const testMocks = vi.hoisted(() => ({
       onNavigate: (match: ProjectSearchMatch, query: string) => Promise<void>
     }
   }>,
+  overlayOptions: [] as Array<{ llmSettings?: { activate: () => void } }>,
+  settingsSections: [] as Array<string | undefined>,
+  toasts: [] as Array<{
+    message: string
+    tone: string
+    actions: ReadonlyArray<{ label: string; run: () => Promise<void> | void }>
+    dismiss: ReturnType<typeof vi.fn>
+  }>,
 }))
 
 export { testMocks }
 
-vi.mock('../../../src/editor', () => {
+vi.mock('../../../src/editor', async () => {
+  // The real stub and validation code runs against the fake document, so tests
+  // see the same accept and reject decisions as the editor.
+  const { listJavaMethodHeaders, planAiTestInsertion } = await import('../../../src/editor/ai-tests')
+  const { findBareJavaTest } = await import('../../../src/editor/test-markers')
+
   class FakeJavaEditor {
     readonly view = { state: {} }
+    source = ''
     readonly revealedLocations: Array<{ line: number; column?: number | null }> = []
     readonly metadataUpdates: Array<PsLibraryMetadata | null> = []
     private readonly callbacks: {
@@ -48,9 +65,32 @@ vi.mock('../../../src/editor', () => {
       testMocks.editorInstances.push(this)
     }
 
-    setValue(_source: string): void {}
+    setValue(source: string): void {
+      this.source = source
+    }
 
-    reloadExternalValue(_source: string): void {}
+    reloadExternalValue(source: string): void {
+      this.source = source
+    }
+
+    aiTestStub(): string {
+      return findBareJavaTest(this.source).status
+    }
+
+    aiTestContext(): { stub: string; methodHeaders: string[] } {
+      return {
+        stub: findBareJavaTest(this.source).status,
+        methodHeaders: listJavaMethodHeaders(this.source),
+      }
+    }
+
+    applyAiTests(statements: readonly string[]): ReturnType<typeof planAiTestInsertion> {
+      const plan = planAiTestInsertion(this.source, statements)
+      if (plan.ok) {
+        this.emitChange(`${this.source.slice(0, plan.from)}${plan.insert}${this.source.slice(plan.to)}`)
+      }
+      return plan
+    }
 
     focus(): void {}
 
@@ -67,6 +107,7 @@ vi.mock('../../../src/editor', () => {
     destroy(): void {}
 
     emitChange(source: string): void {
+      this.source = source
       this.callbacks.onChange?.(source)
     }
 
@@ -191,17 +232,29 @@ vi.mock('../../../src/app/pane-layout', () => ({
 
 vi.mock('../../../src/app/toast-controller', () => ({
   ToastController: class {
-    show(_message: string, _tone: string): void {}
+    show(
+      message: string,
+      tone: string,
+      actions: ReadonlyArray<{ label: string; run: () => Promise<void> | void }> = [],
+    ): { dismiss: ReturnType<typeof vi.fn>; isVisible: () => boolean } {
+      const dismiss = vi.fn()
+      testMocks.toasts.push({ message, tone, actions, dismiss })
+      return { dismiss, isVisible: () => true }
+    }
     dispose(): void {}
   },
 }))
 
 vi.mock('../../../src/app/overlay-controller', () => ({
   OverlayController: class {
-    constructor(_options: unknown) {}
+    constructor(options: { llmSettings?: { activate: () => void } }) {
+      testMocks.overlayOptions.push(options)
+    }
     render(): void {}
     setUpdatePhase(_phase: string): void {}
-    openSettingsDialog(_section?: string): void {}
+    openSettingsDialog(section?: string): void {
+      testMocks.settingsSections.push(section)
+    }
     closeAppMenu(_restoreFocus?: boolean): void {}
     handleEscape(_event: KeyboardEvent): boolean { return false }
     handleOutsidePointerDown(_event: PointerEvent): void {}
@@ -283,6 +336,9 @@ beforeEach(() => {
   testMocks.filenameMatchedPaths = []
   testMocks.testRunControllers.length = 0
   testMocks.contentSearchControllers.length = 0
+  testMocks.overlayOptions.length = 0
+  testMocks.settingsSections.length = 0
+  testMocks.toasts.length = 0
 })
 
 afterEach(() => {

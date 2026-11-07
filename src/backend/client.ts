@@ -1,6 +1,13 @@
 import type { BackendClient, Invoke, Listen } from './contracts'
 import { BackendError } from './errors'
 import {
+  normalizeAiGenerateResult,
+  normalizeAiKeySaveResult,
+  normalizeAiModelList,
+  normalizeAiStatus,
+  normalizeAiUsageSummary,
+} from './normalizers/ai'
+import {
   normalizeDailyProblem,
   normalizeUpdateBuild,
   normalizeUpdateStatus,
@@ -71,8 +78,8 @@ export function createBackendClient(
       return normalizeDailyProblem(response)
     },
 
-    async fetchProblemByNumber(frontendId) {
-      const response = await invoke<unknown>('fetch_problem_by_number', { frontendId })
+    async fetchProblemBySlug(titleSlug) {
+      const response = await invoke<unknown>('fetch_problem_by_slug', { titleSlug })
       return normalizeDailyProblem(response)
     },
 
@@ -233,6 +240,35 @@ export function createBackendClient(
     },
     async applyUpdate() {
       await invoke<unknown>('apply_update')
+    },
+
+    async aiStatus() {
+      const response = await invoke<unknown>('ai_status')
+      return normalizeAiStatus(response)
+    },
+
+    async aiSaveKey(apiKey) {
+      const response = await invoke<unknown>('ai_save_key', { apiKey })
+      return normalizeAiKeySaveResult(response)
+    },
+
+    async aiClearKey() {
+      await invoke<unknown>('ai_clear_key')
+    },
+
+    async aiListModels(refresh) {
+      const response = await invoke<unknown>('ai_list_models', { refresh })
+      return normalizeAiModelList(response)
+    },
+
+    async aiGenerateTests(request) {
+      const response = await invoke<unknown>('ai_generate_tests', { request })
+      return normalizeAiGenerateResult(response)
+    },
+
+    async aiUsage(bucketStartsMs) {
+      const response = await invoke<unknown>('ai_usage', { bucketStartsMs })
+      return normalizeAiUsageSummary(response)
     },
   }
 }

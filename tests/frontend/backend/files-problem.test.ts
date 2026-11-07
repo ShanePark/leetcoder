@@ -100,10 +100,10 @@ describe('backend client', () => {
     })
   })
 
-  it('invokes a numeric problem lookup and keeps manual results date-less', async () => {
+  it('invokes a problem lookup by slug and keeps manual results date-less', async () => {
     const invoke: Invoke = async (command, args) => {
-      expect(command).toBe('fetch_problem_by_number')
-      expect(args).toEqual({ frontendId: '1' })
+      expect(command).toBe('fetch_problem_by_slug')
+      expect(args).toEqual({ titleSlug: 'two-sum' })
       return {
         date: '',
         frontend_id: '1',
@@ -116,7 +116,7 @@ describe('backend client', () => {
       }
     }
 
-    await expect(createBackendClient(invoke).fetchProblemByNumber('1')).resolves.toEqual({
+    await expect(createBackendClient(invoke).fetchProblemBySlug('two-sum')).resolves.toEqual({
       date: '',
       frontendId: '1',
       title: 'Two Sum',

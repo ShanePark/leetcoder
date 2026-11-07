@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90025",
+      "title": "Keep the Strong Readings",
+      "titleSlug": "keep-the-strong-readings",
+      "difficulty": "Medium",
+      "content": "<p>A sensor log is an integer array <code>readings</code>. A reading is strong when it is at least <code>floor</code>.</p>\n\n<p>Move the strong readings to the front of <code>readings</code> <strong>in-place</strong>, keeping their relative order, and return <em>the number of strong readings</em> <code>k</code>.</p>\n\n<p>Only the first <code>k</code> elements of <code>readings</code> matter. It does not matter what is left beyond them.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> readings = [5,2,8,1,6], floor = 5\n<strong>Output:</strong> 3, readings = [5,8,6,_,_]\n<strong>Explanation:</strong> The first three elements are the strong readings, and <code>_</code> marks a position whose value does not matter.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> readings = [7,7], floor = 10\n<strong>Output:</strong> 0, readings = [_,_]\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> readings = [12,3,15], floor = 3\n<strong>Output:</strong> 3, readings = [12,3,15]\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= readings.length &lt;= 10<sup>4</sup></code></li>\n\t<li><code>0 &lt;= readings[i], floor &lt;= 100</code></li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class Solution {\n    public int keepStrong(int[] readings, int floor) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

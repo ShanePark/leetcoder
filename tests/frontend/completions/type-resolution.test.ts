@@ -54,6 +54,50 @@ describe('Java receiver type resolution', () => {
     )).toMatchObject({ kind: 'metadata', typeNames: ['java.lang.Object'], isStatic: false })
   })
 
+  describe.each(['ListNode', 'TreeNode'])('the helper-library name %s', (type) => {
+    const helper = `io.github.shanepark.leetcode.${type}`
+
+    it.each([
+      ['nested', (name: string) => `package example;\nclass Solution { static class ${name} { int val; } ${name} node; void test() { node.| } }`],
+      ['top-level', (name: string) => `package example;\nclass ${name} { int val; }\nclass Solution { ${name} node; void test() { node.| } }`],
+    ])('keeps a %s declaration in the file on its own package', (_label, source) => {
+      expect(resolve(source(type), 'node')).toEqual({
+        kind: 'metadata',
+        typeNames: [`example.${type}`],
+        isStatic: false,
+      })
+    })
+
+    it('keeps a declaration in the file for a static receiver', () => {
+      expect(resolve(`package example;\nclass ${type} {}\nclass Solution { void test() { ${type}.| } }`, type)).toEqual({
+        kind: 'metadata',
+        typeNames: [`example.${type}`],
+        isStatic: true,
+      })
+    })
+
+    it('resolves as a project type when nothing imports the helper', () => {
+      expect(resolve(`package example;\nclass Solution { ${type} node; void test() { node.| } }`, 'node').typeNames)
+        .toEqual([`example.${type}`])
+      expect(resolve(`class Solution { ${type} node; void test() { node.| } }`, 'node').typeNames)
+        .toEqual([`java.lang.${type}`])
+      expect(resolve(`import org.example.*;\nclass Solution { ${type} node; void test() { node.| } }`, 'node').typeNames)
+        .toEqual([`org.example.${type}`])
+    })
+
+    it('resolves to the helper once the file imports it', () => {
+      expect(resolve(`import ${helper};\nclass Solution { ${type} node; void test() { node.| } }`, 'node').typeNames)
+        .toEqual([helper])
+      expect(resolve(`import io.github.shanepark.leetcode.*;\nclass Solution { ${type} node; void test() { node.| } }`, 'node').typeNames)
+        .toEqual([helper])
+    })
+  })
+
+  it('leaves the resolution of Ps as it was', () => {
+    expect(resolve('class Solution { void test() { Ps.| } }', 'Ps')).toEqual({ kind: 'legacy', typeNames: [], isStatic: true })
+    expect(resolve('class Solution { Ps value; void test() { value.| } }', 'value').typeNames).toEqual(['io.github.shanepark.Ps'])
+  })
+
   it('does not send unresolved value chains to the metadata inspector', () => {
     expect(resolve('class Solution { void test() { Object value; value.child.| } }', 'value.child').kind).toBe('unresolved')
     expect(resolve('class Solution { void test() { Object System; System.out.| } }', 'System.out').kind).toBe('unresolved')

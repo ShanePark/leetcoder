@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90009",
+      "title": "Fold Neighboring Repeats",
+      "titleSlug": "fold-neighboring-repeats",
+      "difficulty": "Easy",
+      "content": "<p>Given the <code>head</code> of a singly linked list, replace every maximal run of consecutive equal values with a single node holding the sum of that run. A node created this way is not folded again, even if it now equals its neighbor.</p>\n\n<p>Return <em>the head of the resulting list</em>.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> head = [2,2,5,1,1,1]\n<strong>Output:</strong> [4,5,3]\n<strong>Explanation:</strong> The runs are 2,2 and 5 and 1,1,1.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> head = [3,4,3]\n<strong>Output:</strong> [3,4,3]\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> head = []\n<strong>Output:</strong> []\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li>The number of nodes in the list is in the range <code>[0, 5000]</code>.</li>\n\t<li><code>-1000 &lt;= Node.val &lt;= 1000</code></li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "/**\n * Definition for singly-linked list.\n * public class ListNode {\n *     int val;\n *     ListNode next;\n *     ListNode() {}\n *     ListNode(int val) { this.val = val; }\n *     ListNode(int val, ListNode next) { this.val = val; this.next = next; }\n * }\n */\nclass Solution {\n    public ListNode foldRepeats(ListNode head) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

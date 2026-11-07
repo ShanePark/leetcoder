@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90005",
+      "title": "Panels Clear of the Chimney Shadow",
+      "titleSlug": "panels-clear-of-the-chimney-shadow",
+      "difficulty": "Easy",
+      "content": "<p>You are given an <code>m x n</code> character grid <code>roof</code> seen from above, with the sun directly at the top edge. Each cell is one of:</p>\n\n<ul>\n\t<li><code>&#39;S&#39;</code>, a solar panel,</li>\n\t<li><code>&#39;C&#39;</code>, a chimney, or</li>\n\t<li><code>&#39;.&#39;</code>, a bare tile.</li>\n</ul>\n\n<p>A chimney shades every cell below it in the same column. Return <em>the number of solar panels that no chimney shades</em>.</p>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input:</strong> roof = [[&quot;S&quot;,&quot;C&quot;],[&quot;.&quot;,&quot;S&quot;]]\n<strong>Output:</strong> 1\n<strong>Explanation:</strong> The panel in the second column sits below the chimney, so only the panel in the first column counts.\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input:</strong> roof = [[&quot;C&quot;,&quot;S&quot;,&quot;.&quot;],[&quot;S&quot;,&quot;S&quot;,&quot;C&quot;],[&quot;S&quot;,&quot;.&quot;,&quot;S&quot;]]\n<strong>Output:</strong> 2\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input:</strong> roof = [[&quot;S&quot;],[&quot;S&quot;]]\n<strong>Output:</strong> 2\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>m == roof.length</code></li>\n\t<li><code>n == roof[i].length</code></li>\n\t<li><code>1 &lt;= m, n &lt;= 300</code></li>\n\t<li><code>roof[i][j]</code> is <code>&#39;S&#39;</code>, <code>&#39;C&#39;</code>, or <code>&#39;.&#39;</code>.</li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class Solution {\n    public int countClearPanels(char[][] roof) {\n        \n    }\n}"
+        }
+      ]
+    }
+  }
+}

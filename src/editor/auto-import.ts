@@ -1,11 +1,17 @@
 import { completionStatus } from '@codemirror/autocomplete'
-import { codeFolding, foldService, syntaxTree } from '@codemirror/language'
+import { codeFolding, ensureSyntaxTree, foldService, syntaxTree } from '@codemirror/language'
 import { EditorState } from '@codemirror/state'
 import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view'
+import type { Tree } from '@lezer/common'
 import { addJavaTypeImports, JAVA_TYPE_IMPORTS, javaIdentifierAt } from '../completions'
 import { psLibraryAvailable } from '../completions/library'
+import { JAVA_HELPER_NODE_TYPES } from '../completions/model'
 import { importBlockRange, removeUnusedJavaTypeImports } from '../java-format'
+import { AI_TESTS_USER_EVENT } from './ai-tests'
 import { minimalDocumentChange } from './editing'
+
+/** Bound on finishing the parse of a long document for one generated edit. */
+const AI_TESTS_PARSE_BUDGET_MS = 100
 
 function previousNonWhitespace(source: string, position: number): string {
   let cursor = position - 1
@@ -19,10 +25,9 @@ function nextNonWhitespace(source: string, position: number): string {
   return cursor < source.length ? source[cursor] : ''
 }
 
-function referencedJavaImportTypes(state: EditorState): Set<string> {
+function referencedJavaImportTypes(state: EditorState, tree: Tree): Set<string> {
   const source = state.doc.toString()
   const definitions = new Set<string>()
-  const tree = syntaxTree(state)
   tree.iterate({
     enter(node) {
       if (node.name === 'Definition') definitions.add(source.slice(node.from, node.to))
@@ -34,7 +39,7 @@ function referencedJavaImportTypes(state: EditorState): Set<string> {
     enter(node) {
       const name = source.slice(node.from, node.to)
       if (!JAVA_TYPE_IMPORTS[name]) return
-      if (name === 'Ps' && !psLibraryAvailable(state)) return
+      if ((name === 'Ps' || JAVA_HELPER_NODE_TYPES.has(name)) && !psLibraryAvailable(state)) return
 
       if (node.name === 'TypeName') {
         // The final component of a fully qualified type is also a TypeName.
@@ -59,8 +64,15 @@ function referencedJavaImportTypes(state: EditorState): Set<string> {
 export const javaAutoImports = EditorState.transactionFilter.of((transaction) => {
   if (!transaction.docChanged || !transaction.isUserEvent('input')) return transaction
 
+  const state = transaction.state
+  // The tree of a long document may stop short of generated statements near its
+  // end, and nothing would ask for their imports until the next edit. Typing
+  // keeps the current tree so that no keystroke waits on the parser.
+  const tree = transaction.isUserEvent(AI_TESTS_USER_EVENT)
+    ? ensureSyntaxTree(state, state.doc.length, AI_TESTS_PARSE_BUDGET_MS) ?? syntaxTree(state)
+    : syntaxTree(state)
   const source = transaction.newDoc.toString()
-  const updated = addJavaTypeImports(source, referencedJavaImportTypes(transaction.state))
+  const updated = addJavaTypeImports(source, referencedJavaImportTypes(state, tree))
   if (updated === source) return transaction
 
   return [

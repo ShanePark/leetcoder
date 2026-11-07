@@ -64,14 +64,9 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.problem-lookup-prefix {
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
+/* A fixed width, so a long URL scrolls inside the input and the header keeps its shape. */
 .problem-lookup-input {
-  width: 64px;
+  width: 150px;
   height: 26px;
   padding: 0;
   border: 0;
@@ -81,7 +76,7 @@
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 12px;
-  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
 }
 
 .problem-lookup-input::placeholder {
@@ -101,6 +96,15 @@
   width: 28px;
   height: 28px;
   padding: 0;
+}
+
+.problem-number {
+  flex: none;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .problem-title {

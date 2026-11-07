@@ -15,7 +15,9 @@ import type {
 
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type ShortcutPlatform = 'linux' | 'macos'
-export type SettingsSection = 'appearance' | 'keymap'
+/** Settings sections in navigation order; each has `#settings-<section>-nav` and `-panel`. */
+export const SETTINGS_SECTIONS = ['appearance', 'keymap', 'llm'] as const
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]
 
 export type DirectoryPicker = () => Promise<string | null>
 

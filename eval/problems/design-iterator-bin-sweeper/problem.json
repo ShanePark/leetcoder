@@ -1,0 +1,18 @@
+{
+  "data": {
+    "question": {
+      "questionFrontendId": "90027",
+      "title": "Bin Sweeper",
+      "titleSlug": "bin-sweeper",
+      "difficulty": "Medium",
+      "content": "<p>A sorting line has several bins of parcels. A sweeper visits the bins in rounds: in each round it goes through the bins in order and takes the first parcel left in each bin that still has one. Implement the <code>BinSweeper</code> class:</p>\n\n<ul>\n\t<li><code>BinSweeper(List&lt;List&lt;Integer&gt;&gt; bins)</code> Sets the sweeper up over <code>bins</code>.</li>\n\t<li><code>boolean hasNext()</code> Returns <code>true</code> if any parcel is left.</li>\n\t<li><code>int next()</code> Returns the next parcel the sweeper takes.</li>\n</ul>\n\n<p>&nbsp;</p>\n<p><strong class=\"example\">Example 1:</strong></p>\n\n<pre>\n<strong>Input</strong>\n[&quot;BinSweeper&quot;, &quot;hasNext&quot;, &quot;next&quot;, &quot;next&quot;, &quot;next&quot;, &quot;hasNext&quot;]\n[[[[8,2],[],[6]]], [], [], [], [], []]\n<strong>Output</strong>\n[null, true, 8, 6, 2, false]\n\n<strong>Explanation</strong>\nBinSweeper binSweeper = new BinSweeper([[8,2],[],[6]]);\nbinSweeper.hasNext(); // return true\nbinSweeper.next();    // return 8, the first round starts\nbinSweeper.next();    // return 6, the middle bin is empty\nbinSweeper.next();    // return 2, the second round\nbinSweeper.hasNext(); // return false\n</pre>\n\n<p><strong class=\"example\">Example 2:</strong></p>\n\n<pre>\n<strong>Input</strong>\n[&quot;BinSweeper&quot;, &quot;next&quot;, &quot;next&quot;, &quot;hasNext&quot;, &quot;next&quot;, &quot;next&quot;, &quot;hasNext&quot;]\n[[[[11],[14,16,19]]], [], [], [], [], [], []]\n<strong>Output</strong>\n[null, 11, 14, true, 16, 19, false]\n</pre>\n\n<p><strong class=\"example\">Example 3:</strong></p>\n\n<pre>\n<strong>Input</strong>\n[&quot;BinSweeper&quot;, &quot;hasNext&quot;]\n[[[[],[]]], []]\n<strong>Output</strong>\n[null, false]\n</pre>\n\n<p>&nbsp;</p>\n<p><strong>Constraints:</strong></p>\n\n<ul>\n\t<li><code>1 &lt;= bins.length &lt;= 100</code></li>\n\t<li><code>0 &lt;= bins[i].size() &lt;= 100</code></li>\n\t<li><code>0 &lt;= bins[i][j] &lt;= 1000</code></li>\n\t<li><code>next</code> is only called when a parcel is left.</li>\n\t<li>At most <code>10<sup>4</sup></code> calls will be made to <code>hasNext</code> and <code>next</code>.</li>\n</ul>",
+      "codeSnippets": [
+        {
+          "lang": "Java",
+          "langSlug": "java",
+          "code": "class BinSweeper {\n\n    public BinSweeper(List<List<Integer>> bins) {\n\n    }\n\n    public boolean hasNext() {\n\n    }\n\n    public int next() {\n\n    }\n}\n\n/**\n * Your BinSweeper object will be instantiated and called as such:\n * BinSweeper obj = new BinSweeper(bins);\n * boolean param_1 = obj.hasNext();\n * int param_2 = obj.next();\n */"
+        }
+      ]
+    }
+  }
+}

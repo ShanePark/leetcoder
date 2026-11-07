@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod commands;
 mod git;
 mod java_library;
@@ -31,6 +32,9 @@ pub fn run() {
         )
         .manage(watcher::RepositoryWatcher::default())
         .setup(|app| {
+            if let Ok(log_dir) = app.path().app_log_dir() {
+                leetcode::set_request_log_dir(log_dir);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
                 // The updater can terminate the process without a normal exit event.
@@ -52,7 +56,7 @@ pub fn run() {
             commands::open_repository_permission_settings,
             commands::validate_project,
             commands::fetch_daily_problem,
-            commands::fetch_problem_by_number,
+            commands::fetch_problem_by_slug,
             commands::list_problem_files,
             commands::search_project,
             commands::inspect_ps_library,
@@ -78,6 +82,12 @@ pub fn run() {
             update::check_for_update,
             update::build_update,
             update::apply_update,
+            ai::ai_status,
+            ai::ai_save_key,
+            ai::ai_clear_key,
+            ai::ai_list_models,
+            ai::ai_generate_tests,
+            ai::ai_usage,
         ])
         .build(tauri::generate_context!())
         .expect("error while running leetcoder")

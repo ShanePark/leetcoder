@@ -1,5 +1,8 @@
+import { javaLanguage } from '@codemirror/lang-java'
 import { syntaxTree } from '@codemirror/language'
 import type { EditorState } from '@codemirror/state'
+
+type JavaSyntaxNode = ReturnType<typeof syntaxTree>['topNode']
 
 const JAVA_IDENTIFIER_START = /^(?:[$_]|\p{ID_Start})$/u
 const JAVA_IDENTIFIER_PART = /^(?:[$\p{ID_Continue}])$/u
@@ -21,7 +24,7 @@ function isTestAnnotation(annotation: string): boolean {
 
 function testMethodNameAndAnnotation(
   source: string,
-  method: ReturnType<typeof syntaxTree>['topNode'],
+  method: JavaSyntaxNode,
 ): { methodName: string; annotationFrom: number } | null {
   const modifiers = method.getChild('Modifiers')
   let annotationFrom: number | null = null
@@ -63,7 +66,7 @@ export function findJavaTestMethodAt(
 ): string | null {
   const source = state.doc.toString()
   const boundedPosition = Math.max(0, Math.min(position, source.length))
-  let node: ReturnType<typeof syntaxTree>['topNode'] | null = syntaxTree(state)
+  let node: JavaSyntaxNode | null = syntaxTree(state)
     .resolveInner(boundedPosition, 1)
   while (node && node.name !== 'MethodDeclaration') {
     node = node.parent
@@ -111,4 +114,101 @@ export function findJavaTestMethodMarkers(state: EditorState): JavaTestMethodMar
     },
   })
   return markers.sort((left, right) => left.from - right.from)
+}
+
+/** Whether a MethodDeclaration node carries a @Test annotation. */
+export function isJavaTestMethod(source: string, method: JavaSyntaxNode): boolean {
+  return testMethodNameAndAnnotation(source, method) !== null
+}
+
+/** The text between the braces of a method body. */
+export interface JavaBodyRange {
+  from: number
+  to: number
+}
+
+/** Whether the document's `test()` can receive generated statements. */
+export type BareJavaTestLookup =
+  | { status: 'missing' }
+  | { status: 'filled' }
+  | { status: 'bare'; body: JavaBodyRange }
+
+function childNodes(node: JavaSyntaxNode): JavaSyntaxNode[] {
+  const children: JavaSyntaxNode[] = []
+  for (let child = node.firstChild; child; child = child.nextSibling) {
+    children.push(child)
+  }
+  return children
+}
+
+function methodsNamedTest(source: string, root: JavaSyntaxNode): JavaSyntaxNode[] {
+  const methods: JavaSyntaxNode[] = []
+  root.cursor().iterate((node) => {
+    if (node.name === 'MethodDeclaration'
+      && testMethodNameAndAnnotation(source, node.node)?.methodName === 'test') {
+      methods.push(node.node)
+    }
+  })
+  return methods
+}
+
+/**
+ * The Block of the only @Test method named exactly `test`. Null when there is
+ * none or several, or when the method has no body or recovery lost a brace,
+ * because then no body range can be trusted.
+ */
+export function findJavaTestBlock(source: string, root: JavaSyntaxNode): JavaSyntaxNode | null {
+  const methods = methodsNamedTest(source, root)
+  const block = methods.length === 1 ? methods[0].getChild('Block') : null
+  return block?.firstChild?.name === '{' && block.lastChild?.name === '}' ? block : null
+}
+
+/** The direct children of a Block between its braces. Comments are children too. */
+export function javaBlockStatements(block: JavaSyntaxNode): JavaSyntaxNode[] {
+  return childNodes(block).slice(1, -1)
+}
+
+/**
+ * Comments and error nodes are children of the nodes checked here, so anything
+ * beyond the exact `assertThat()` shape fails a child comparison. The one error
+ * allowed is the empty node recovery places where the template's `;` is missing.
+ */
+function isBareBlock(source: string, block: JavaSyntaxNode): boolean {
+  const statements = javaBlockStatements(block)
+  if (statements.length === 0) {
+    return true
+  }
+  if (statements.length !== 1 || statements[0].name !== 'ExpressionStatement') {
+    return false
+  }
+  const [call, terminator, ...extra] = childNodes(statements[0])
+  const terminated = !terminator
+    || terminator.name === ';'
+    || (terminator.type.isError && terminator.from === terminator.to)
+  if (call?.name !== 'MethodInvocation' || !terminated || extra.length > 0) {
+    return false
+  }
+  const [name, argumentList, ...rest] = childNodes(call)
+  return name?.name === 'MethodName'
+    && source.slice(name.from, name.to) === 'assertThat'
+    && argumentList?.name === 'ArgumentList'
+    && rest.length === 0
+    && childNodes(argumentList).map((node) => node.name).join(' ') === '( )'
+}
+
+/**
+ * Find the stub that AI test generation may fill. A bare stub is an empty body
+ * or only `assertThat()` with an optional `;`; anything else, including a
+ * comment, counts as filled. This parses `source` in full rather than reading
+ * the editor's tree, which may still be unfinished for a long document.
+ */
+export function findBareJavaTest(source: string): BareJavaTestLookup {
+  const root = javaLanguage.parser.parse(source).topNode
+  const block = findJavaTestBlock(source, root)
+  if (!block) {
+    return { status: methodsNamedTest(source, root).length > 0 ? 'filled' : 'missing' }
+  }
+  return isBareBlock(source, block)
+    ? { status: 'bare', body: { from: block.from + 1, to: block.to - 1 } }
+    : { status: 'filled' }
 }

@@ -46,6 +46,7 @@ describe('bottom panel tabs', () => {
       pickerOpen: () => false,
       macPlatform: () => false,
       invalidatePendingNavigation: () => {},
+      aiRequestPath: () => null,
     })
     const indicator = element('#git-tab-indicator')
 

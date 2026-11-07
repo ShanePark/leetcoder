@@ -65,6 +65,7 @@ claims. Choose exact files before assigning independent work.
 | Java library metadata | `src/app/{ps-library-controller,java-type-members-controller}.ts`, `src-tauri/src/java_library.rs`, `src-tauri/src/java_library/` | Metadata/member caches, classpaths, fingerprints, bounded helper inspection/processes, embedded helper sources, tests. Uses backend/completion contracts, security, Gradle/JDK tools. |
 | Git | `src-tauri/src/git.rs`, `src-tauri/src/git/` | Status, changed-path selection, diff, commit/push, bounded process capture, orchestration, tests. `path.rs` provides one status snapshot to selection/diff; commit batches existing-file staging but handles deletions per path. Uses models/security and Git. |
 | Test runner | `src-tauri/src/runner.rs`, `src-tauri/src/runner/` | Validation, JDK discovery, Gradle setup, JUnit parsing, diagnostics, process/progress/cancellation, orchestration, tests. Uses models/security and Java/Gradle/JUnit tools. |
+| AI test generation | `src/app/{ai-controller,llm-settings-controller,llm-settings-view}.ts`, `src/editor/ai-tests.ts`, `src/backend/normalizers/ai.ts`, `src-tauri/src/ai.rs`, `src-tauri/src/ai/`, `eval/` | Button flow, LLM settings tab, stub lookup and output validation, key store, model catalog, price cache, usage ledger, prompt, provider requests, prompt eval, tests. Commands and DTOs live in the native facade. See `docs/ai-test-generation.md`. |
 | Search, network, updates, watching | `src-tauri/src/{project_search,leetcode,update,watcher,security}.rs` and owned subtrees | Saved-text search, problem fetching, rebuild/update lifecycle, coalesced file watching, path/symlink containment. Uses models and feature-specific subprocess/network contracts. |
 | Styles | `src/styles.css`, `src/styles/` | One ordered CSS entry; partials own theme, base/buttons, shell/sidebar/problem/editor/panels/results/Git/update/toasts/menus/dialogs/search. Theme tokens are shared with the editor theme; import order is a cascade contract. |
 
@@ -89,8 +90,8 @@ Focused implementation trees keep distinct responsibilities behind their facades
 - `src/editor/intentions/` separates analysis/inference/rendering/planning from the
   CodeMirror menu; `src/editor/editing/` separates refactoring, JavaDoc, clipboard,
   and command behavior. Auto-import and method-call input are independent leaves.
-- Native `leetcode/` separates pooled clients/parsing/tests; `update/` separates
-  source validation, rebuild/environment setup, progress, and tests.
+- Native `leetcode/` separates pooled clients/parsing/request log/tests;
+  `update/` separates source validation, rebuild/environment setup, progress, and tests.
   `project_search/` and `commands/` retain cohesive implementation with owned tests.
   Runner process leaves separate control/registry, capture/cancellation, and marker
   progress; native Git/runner test trees separate acceptance suites by behavior.

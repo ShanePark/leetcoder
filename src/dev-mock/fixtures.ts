@@ -1,4 +1,4 @@
-import type { DailyProblem } from '../backend'
+import type { AiModel, DailyProblem } from '../backend'
 
 export const DAILY_PROBLEM: DailyProblem = {
   date: new Date().toISOString().slice(0, 10),
@@ -35,6 +35,73 @@ export const MANUAL_PROBLEM: DailyProblem = {
     }
 }`,
   content: '<p>Given an array of integers <code>nums</code> and an integer <code>target</code>, return indices of the two numbers such that they add up to <code>target</code>.</p>',
+}
+
+export const AI_MODELS: readonly AiModel[] = [
+  { id: 'claude-opus-5-5', displayName: 'Claude Opus 5.5', deprecated: false, superseded: false },
+  { id: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5', deprecated: false, superseded: false },
+  { id: 'claude-haiku-5', displayName: 'Claude Haiku 5', deprecated: false, superseded: false },
+  { id: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5', deprecated: true, superseded: true },
+]
+
+export const AI_DEFAULT_MODEL_ID = 'claude-sonnet-5-5'
+
+/** Example assertions for the methods the preview's problems and seed files declare. */
+export const AI_STATEMENTS = new Map<string, readonly string[]>([
+  ['checkDivisibility', [
+    'assertThat(checkDivisibility(99)).isTrue();',
+    'assertThat(checkDivisibility(23)).isFalse();',
+  ]],
+  ['twoSum', [
+    'assertThat(twoSum(new int[]{2, 7, 11, 15}, 9)).containsExactly(0, 1);',
+    'assertThat(twoSum(new int[]{3, 2, 4}, 6)).containsExactly(1, 2);',
+    'assertThat(twoSum(new int[]{3, 3}, 6)).containsExactly(0, 1);',
+  ]],
+])
+
+/** One preview ledger record. A null cost means no price was known for the model. */
+export interface AiUsageEntry {
+  ts: number
+  model: string
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  costUsd: number | null
+  approximate: boolean
+  refused: boolean
+}
+
+/** The record each preview generation appends. */
+export const AI_GENERATION_USAGE: Omit<AiUsageEntry, 'ts' | 'model'> = {
+  inputTokens: 1_310,
+  outputTokens: 118,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  costUsd: 0.0057,
+  approximate: false,
+  refused: false,
+}
+
+export function seedAiUsage(now: number): AiUsageEntry[] {
+  const day = 86_400_000
+  const usage = { cacheReadTokens: 0, cacheWriteTokens: 0, approximate: false, refused: false }
+  return [
+    { ...usage, ts: now, model: 'claude-sonnet-5-5', inputTokens: 1_933, outputTokens: 118, costUsd: 0.0076 },
+    { ...usage, ts: now, model: 'claude-opus-5-5', inputTokens: 2_410, outputTokens: 96, cacheReadTokens: 1_200, costUsd: 0.0361 },
+    { ...usage, ts: now, model: 'claude-haiku-5', inputTokens: 1_420, outputTokens: 20, costUsd: 0.0016 },
+    { ...usage, ts: now - day, model: 'claude-sonnet-5-5', inputTokens: 1_480, outputTokens: 132, costUsd: 0.0064 },
+    { ...usage, ts: now - 2 * day, model: 'claude-opus-5-5', inputTokens: 3_120, outputTokens: 240, costUsd: 0.0576 },
+    { ...usage, ts: now - 3 * day, model: 'claude-sonnet-5-5', inputTokens: 2_050, outputTokens: 214, costUsd: 0.0094, approximate: true },
+    { ...usage, ts: now - 5 * day, model: 'claude-haiku-5', inputTokens: 1_120, outputTokens: 96, costUsd: null },
+    { ...usage, ts: now - 6 * day, model: 'claude-sonnet-5-5', inputTokens: 1_390, outputTokens: 12, costUsd: 0, refused: true },
+    { ...usage, ts: now - 8 * day, model: 'claude-sonnet-5-5', inputTokens: 2_640, outputTokens: 310, costUsd: 0.0126 },
+    { ...usage, ts: now - 8 * day, model: 'claude-haiku-5', inputTokens: 980, outputTokens: 88, costUsd: 0.0012 },
+    { ...usage, ts: now - 11 * day, model: 'claude-opus-5-5', inputTokens: 1_760, outputTokens: 142, costUsd: 0.0243 },
+    { ...usage, ts: now - 20 * day, model: 'claude-sonnet-5-5', inputTokens: 3_300, outputTokens: 402, costUsd: 0.0160 },
+    { ...usage, ts: now - 41 * day, model: 'claude-sonnet-5-5', inputTokens: 1_900, outputTokens: 170, costUsd: 0.0082 },
+    { ...usage, ts: now - 70 * day, model: 'claude-sonnet-4-5', inputTokens: 1_640, outputTokens: 150, costUsd: null },
+  ]
 }
 
 function javaSourceFor(className: string): string {

@@ -79,9 +79,12 @@ import { leetcoderHighlight, leetcoderTheme } from './editor/theme'
 import { javaBracketMatching } from './editor/bracket-matching'
 import { insertSingleCompletion, startCompletionOrInsertSingle } from './editor/single-completion'
 import {
+  findBareJavaTest,
   findJavaTestMethodAt,
   findJavaTestMethodMarkers,
+  type BareJavaTestLookup,
 } from './editor/test-markers'
+import { applyAiTestStatements, listJavaMethodHeaders, type AiTestResult } from './editor/ai-tests'
 import {
   buildTestRunMarkers,
   failureDecorations,
@@ -187,8 +190,17 @@ export type { JavaStatementCompletion } from './editor/statement-completion'
 
 export { findJavaTestMethodAt, findJavaTestMethodMarkers }
 export type { JavaTestMethodMarker } from './editor/test-markers'
+export type { AiTestRejectionReason, AiTestResult } from './editor/ai-tests'
 export type { EditorIssue } from './editor/gutters'
 export { buildTestRunMarkers } from './editor/gutters'
+
+export type AiTestStub = BareJavaTestLookup['status']
+
+/** What AI test generation reads from the current document. */
+export interface AiTestContext {
+  stub: AiTestStub
+  methodHeaders: string[]
+}
 
 export interface EditorCallbacks {
   storage?: Storage
@@ -881,6 +893,21 @@ export class JavaEditor {
       annotations: Transaction.addToHistory.of(false),
     })
     this.foldImports()
+  }
+
+  /** Cheap enough to read on every edit, unlike the full context. */
+  aiTestStub(): AiTestStub {
+    return findBareJavaTest(this.getValue()).status
+  }
+
+  aiTestContext(): AiTestContext {
+    const source = this.getValue()
+    return { stub: findBareJavaTest(source).status, methodHeaders: listJavaMethodHeaders(source) }
+  }
+
+  /** Fill the bare `test()` stub with generated statements as one undo step. */
+  applyAiTests(statements: readonly string[]): AiTestResult {
+    return applyAiTestStatements(this.view, statements)
   }
 
   /** Collapse the leading import block, the way an IDE opens a file. */

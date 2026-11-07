@@ -90,7 +90,9 @@ export const JAVA_TYPE_IMPORTS: Readonly<Record<string, string>> = {
   LinkedHashSet: 'java.util.LinkedHashSet',
   LinkedList: 'java.util.LinkedList',
   List: 'java.util.List',
+  ListNode: 'io.github.shanepark.leetcode.ListNode',
   Map: 'java.util.Map',
+  Offset: 'org.assertj.core.data.Offset',
   PrintStream: 'java.io.PrintStream',
   PriorityQueue: 'java.util.PriorityQueue',
   Ps: 'io.github.shanepark.Ps',
@@ -98,8 +100,16 @@ export const JAVA_TYPE_IMPORTS: Readonly<Record<string, string>> = {
   Set: 'java.util.Set',
   Stack: 'java.util.Stack',
   TreeMap: 'java.util.TreeMap',
+  TreeNode: 'io.github.shanepark.leetcode.TreeNode',
   TreeSet: 'java.util.TreeSet',
 }
+
+/**
+ * Helper-library types that the source-only resolver must not assume. Solutions
+ * often declare their own, and it has no way to tell whether the library exists,
+ * so these count as the helper's only once the file imports them.
+ */
+export const JAVA_HELPER_NODE_TYPES: ReadonlySet<string> = new Set(['ListNode', 'TreeNode'])
 
 /** Inheritance groups used by the lightweight receiver resolver. */
 export const TYPE_GROUPS: Record<string, string[]> = {

@@ -2,13 +2,14 @@ import { errorMessage, type BackendClient, type DailyProblem } from '../backend'
 
 import {
   normalizeDailyProblemDateKey,
-  normalizeProblemNumber,
   nextUtcMidnightDelayMs,
+  problemSlugFromUrl,
   utcDateKey,
 } from './layout'
-import type { AppState, ProblemSelection } from './types'
+import type { AppState } from './types'
 
-const DAILY_RETRY_INTERVAL_MS = 60_000
+const DAILY_RETRY_BASE_MS = 60_000
+const DAILY_RETRY_MAX_MS = 30 * 60_000
 
 type ProblemSelectionState = Pick<
   AppState,
@@ -22,7 +23,7 @@ type ProblemSelectionState = Pick<
 
 export interface ProblemSelectionControllerBackend {
   fetchDailyProblem: BackendClient['fetchDailyProblem']
-  fetchProblemByNumber: BackendClient['fetchProblemByNumber']
+  fetchProblemBySlug: BackendClient['fetchProblemBySlug']
 }
 
 export interface ProblemSelectionControllerHooks {
@@ -38,19 +39,22 @@ export interface ProblemSelectionControllerHooks {
 export class ProblemSelectionController {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private requestId = 0
-  private draft: string | null = null
-  private lastProblemRequest: ProblemSelection = 'daily'
-  /** Remember the current daily id while a manual problem is being viewed. */
-  private latestDailyProblem: { frontendId: string; dateKey: string } | null = null
+  private draft = ''
+  /** The slug `retry` sends again, or null when the last request was for the daily problem. */
+  private lastManualSlug: string | null = null
+  /** Remember the current daily problem while a manual problem is being viewed. */
+  private latestDailyProblem: { problem: DailyProblem; dateKey: string } | null = null
+  private dailyRetryStreak = 0
+  private nextDailyRetryAt = 0
   private disposed = false
 
   constructor(private readonly hooks: ProblemSelectionControllerHooks) {}
 
-  get problemNumberDraft(): string | null {
+  get problemUrlDraft(): string {
     return this.draft
   }
 
-  setProblemNumberDraft(value: string): void {
+  setProblemUrlDraft(value: string): void {
     this.draft = value
   }
 
@@ -60,7 +64,7 @@ export class ProblemSelectionController {
     }
 
     const requestId = ++this.requestId
-    this.lastProblemRequest = 'daily'
+    this.lastManualSlug = null
     this.hooks.state.dailyLoading = true
     this.hooks.state.dailyError = null
     this.hooks.render()
@@ -93,14 +97,12 @@ export class ProblemSelectionController {
       } else {
         this.hooks.state.dailyProblem = problem
         this.hooks.state.problemSelection = 'daily'
-        this.draft = problem.frontendId
-        this.latestDailyProblem = {
-          frontendId: problem.frontendId,
-          dateKey: problemDateKey,
-        }
+        this.latestDailyProblem = { problem, dateKey: problemDateKey }
         this.hooks.state.dailyProblemDateKey = problemDateKey
         this.hooks.state.dailyRetryPending = false
         this.hooks.state.dailyError = null
+        this.dailyRetryStreak = 0
+        this.nextDailyRetryAt = 0
       }
     } catch (error) {
       if (!this.isCurrentRequest(requestId)) {
@@ -117,7 +119,7 @@ export class ProblemSelectionController {
         this.hooks.state.dailyLoading = false
         this.scheduleDailyProblemRefresh(
           this.hooks.state.dailyRetryPending
-            ? DAILY_RETRY_INTERVAL_MS
+            ? this.backOffDailyRetry()
             : nextUtcMidnightDelayMs(),
         )
         this.hooks.render()
@@ -125,28 +127,35 @@ export class ProblemSelectionController {
     }
   }
 
-  async loadProblemByNumber(value: string): Promise<void> {
+  async loadProblemFromUrl(value: string): Promise<void> {
     if (!this.isActive()) {
       return
     }
-    const problemNumber = normalizeProblemNumber(value)
-    if (!problemNumber) {
-      this.hooks.setMessage('Enter a valid LeetCode problem number.', 'error')
+    this.draft = value
+    const slug = problemSlugFromUrl(value)
+    if (!slug) {
+      this.hooks.setMessage(
+        'Paste a LeetCode problem URL, such as https://leetcode.com/problems/two-sum/.',
+        'error',
+      )
       return
     }
-    if (this.hooks.state.dailyLoading) {
+    await this.loadProblemBySlug(slug)
+  }
+
+  private async loadProblemBySlug(slug: string): Promise<void> {
+    if (!this.isActive() || this.hooks.state.dailyLoading) {
       return
     }
 
     const requestId = ++this.requestId
-    this.lastProblemRequest = 'manual'
-    this.draft = problemNumber
+    this.lastManualSlug = slug
     this.hooks.state.dailyLoading = true
     this.hooks.state.dailyError = null
     this.hooks.render()
 
     try {
-      const problem = await this.hooks.backend.fetchProblemByNumber(problemNumber)
+      const problem = await this.hooks.backend.fetchProblemBySlug(slug)
       if (!this.isCurrentRequest(requestId)) {
         return
       }
@@ -155,18 +164,16 @@ export class ProblemSelectionController {
       this.hooks.state.dailyProblemDateKey = null
       this.hooks.state.dailyRetryPending = false
       this.hooks.state.dailyError = null
+      this.draft = ''
     } catch (error) {
       if (!this.isCurrentRequest(requestId)) {
         return
       }
-      // Keep the currently displayed problem intact when a lookup fails.
-      if (this.hooks.state.dailyProblem && this.draft === problemNumber) {
-        this.draft = this.hooks.state.dailyProblem.frontendId
-      }
+      // The displayed problem stays intact when a lookup fails, and so does the pasted text.
       const message = errorMessage(error)
       this.hooks.state.dailyRetryPending = false
       this.hooks.state.dailyError = message
-      this.hooks.setMessage(`Could not load problem #${problemNumber}: ${message}`, 'error')
+      this.hooks.setMessage(`Could not load ${slug}: ${message}`, 'error')
     } finally {
       if (this.isCurrentRequest(requestId)) {
         this.hooks.state.dailyLoading = false
@@ -177,8 +184,8 @@ export class ProblemSelectionController {
   }
 
   retry(): void {
-    if (this.lastProblemRequest === 'manual') {
-      void this.loadProblemByNumber(this.draft ?? '')
+    if (this.lastManualSlug !== null) {
+      void this.loadProblemBySlug(this.lastManualSlug)
       return
     }
     void this.loadDailyProblem(true)
@@ -188,17 +195,23 @@ export class ProblemSelectionController {
     if (!this.isActive()) {
       return
     }
-    this.draft = null
+    this.draft = ''
     this.hooks.state.problemSelection = 'daily'
-    this.hooks.state.dailyProblemDateKey = null
-    void this.loadDailyProblem(true)
-  }
-
-  refreshSelectedProblem(): void {
-    if (this.hooks.state.problemSelection === 'manual' && this.hooks.state.dailyProblem) {
-      void this.loadProblemByNumber(this.hooks.state.dailyProblem.frontendId)
+    // The daily problem stays the same for a whole UTC day, so going back sends nothing.
+    const latest = this.latestDailyProblem
+    if (latest?.dateKey === utcDateKey()) {
+      this.requestId += 1
+      this.lastManualSlug = null
+      this.hooks.state.dailyProblem = latest.problem
+      this.hooks.state.dailyProblemDateKey = latest.dateKey
+      this.hooks.state.dailyRetryPending = false
+      this.hooks.state.dailyError = null
+      this.hooks.state.dailyLoading = false
+      this.scheduleDailyProblemRefresh()
+      this.hooks.render()
       return
     }
+    this.hooks.state.dailyProblemDateKey = null
     void this.loadDailyProblem(true)
   }
 
@@ -215,6 +228,13 @@ export class ProblemSelectionController {
       || !this.hooks.state.dailyProblem
       || this.hooks.state.dailyProblemDateKey !== currentDateKey
     ) {
+      // Window returns land here too. The due time outlives dailyRetryPending,
+      // which a failed manual lookup clears, so it is what gates the request.
+      const remainingMs = this.nextDailyRetryAt - Date.now()
+      if (remainingMs > 0) {
+        this.scheduleDailyProblemRefresh(remainingMs)
+        return
+      }
       void this.loadDailyProblem()
       return
     }
@@ -226,7 +246,7 @@ export class ProblemSelectionController {
     if (this.hooks.state.problemSelection === 'daily') {
       return this.hooks.state.dailyProblemDateKey === currentDateKey
     }
-    return this.latestDailyProblem?.frontendId === problem.frontendId
+    return this.latestDailyProblem?.problem.frontendId === problem.frontendId
       && this.latestDailyProblem.dateKey === currentDateKey
   }
 
@@ -244,6 +264,13 @@ export class ProblemSelectionController {
     this.disposed = true
     this.requestId += 1
     this.clearScheduledRefresh()
+  }
+
+  private backOffDailyRetry(): number {
+    const delayMs = Math.min(DAILY_RETRY_BASE_MS * 2 ** this.dailyRetryStreak, DAILY_RETRY_MAX_MS)
+    this.dailyRetryStreak += 1
+    this.nextDailyRetryAt = Date.now() + delayMs
+    return delayMs
   }
 
   private scheduleDailyProblemRefresh(delayMs = nextUtcMidnightDelayMs()): void {

@@ -64,6 +64,18 @@ with `Ctrl`.
 - Commit only changes made for the current task.
 - Treat pre-existing changes as user-owned. Never discard, overwrite, stage, or commit unrelated work.
 
+## LeetCode requests
+
+Requests to leetcode.com leave from the owner's network, and a block breaks the app's problem lookup and can put the owner's account at risk.
+
+- This covers every route: scripts, tests, `curl`, web fetches, browsers, and app flows. Relaunching the app, including `npm run rebuild`, sends the daily problem request.
+- The app appends each request and its result to `leetcode-requests.log` in its log directory (`~/.local/share/com.shane.leetcoder/logs/` on Linux, `~/Library/Logs/com.shane.leetcoder/` on macOS). Read it instead of sending a request to check the status.
+- Before any real request, weigh whether it is needed and whether its volume or pattern could look automated or excessive. Say what will be sent, how many requests, and why cached data, fixtures, or the dev mock will not do. If in doubt, ask the owner first.
+- Send requests one at a time, at least 10 seconds apart. Cache every result and never request the same thing twice.
+- A run of more than 5 requests needs the owner's approval first. Never crawl or fetch problem data in bulk.
+- Automated tests and checks must not contact LeetCode.
+- On a 403, a 429, or a bot challenge, stop at once. Do not retry, recheck the status, or try another endpoint or client. Report it and let the owner decide. Never bypass a bot check.
+
 ## Desktop verification and installation
 
 - Frontend-only checks (`npm run build`) do not update the desktop application launched from the Dock.
@@ -75,7 +87,10 @@ with `Ctrl`.
 ## Rust/Tauri build artifacts
 
 - The default Rust development profile keeps line tables for this crate and omits debug information from dependencies. Use the opt-in `debugging` profile (`cargo build --profile debugging`, or the equivalent Tauri command) when full debug information is required.
-- Agent-run `cargo check`, `cargo test`, `cargo build`, and disposable Tauri verification must use a task-specific temporary `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL=0`. Remove that temporary target directory after verification so checks do not accumulate in `src-tauri/target`.
+- Agent-run `cargo check`, `cargo test`, `cargo build`, and disposable Tauri verification must use a task-specific temporary `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL=0`, so checks do not accumulate in `src-tauri/target`. An empty target directory rebuilds every dependency, so reuse one directory across the whole task, including between subagents, and remove it when the task ends, not after each command.
+- Agent-run builds must leave the machine usable. Run cargo as `CARGO_BUILD_JOBS=4 nice -n 10 cargo ...`. Run the rebuild as `CARGO_BUILD_JOBS=4 npm run rebuild`, without `nice`, because the relaunched app would inherit it.
+- Run one heavy command at a time across all agents: cargo, `npm test`, Gradle, and evals. Check `uptime` first and wait if the load already exceeds the core count.
+- Run only the checks a change can affect, and skip Rust checks when no Rust changed. Do not repeat the full suite after each step of a larger piece of work.
 - Keep the persistent `src-tauri/target` directory for interactive development only. Do not run `cargo clean` after every command; clean persistent artifacts deliberately when they are stale or no longer needed.
 - Production rebuilds that must install the desktop app are an intentional exception: run `npm run rebuild` with its persistent target path because the rebuild script installs the bundle from `src-tauri/target/release/bundle`. Preserve that path for the required rebuild/install workflow.
 
@@ -86,4 +101,4 @@ with `Ctrl`.
 - Shared contracts and wiring have one owner at a time: `src/backend/contracts.ts`, `src/app/types.ts`, `src-tauri/src/models.rs`, Tauri command registration, public barrels, and the ordered `src/styles.css` imports. Agents may read these files in parallel; contract changes are integrated sequentially with their consumers and tests.
 - Prefer parallel work on independent leaf modules and their owned tests. Keep `src/app.ts`, `src/editor.ts`, `src/backend.ts`, native command wiring, and native facade modules as integration boundaries unless the assigned owner is explicitly changing that boundary.
 - Preserve frontend public facades, native command names, serialized DTO shapes, event names, and the shortcut policy while moving implementation code. Shortcut definitions remain owned by `src/shortcuts.ts` with matching editor event handling.
-- After leaf checks, the integrator runs `npm run typecheck`, `npm test`, `npm run build`, and the Rust format/test/check commands. Source changes also require `npm run rebuild` before reporting desktop behavior as verified.
+- After leaf checks, the integrator runs `npm run typecheck`, `npm test`, `npm run build`, and the Rust format/test/check commands once, when the work is finished, one at a time. Source changes also require `npm run rebuild` before reporting desktop behavior as verified.

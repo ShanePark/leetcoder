@@ -1,7 +1,7 @@
 import type { Completion } from '@codemirror/autocomplete'
 
 import { applyJavaTypeText } from './imports'
-import { JAVA_TYPE_IMPORTS, JAVA_TYPES, TYPE_GROUPS, type JavaSymbol } from './model'
+import { JAVA_HELPER_NODE_TYPES, JAVA_TYPE_IMPORTS, JAVA_TYPES, TYPE_GROUPS, type JavaSymbol } from './model'
 import { baseType, simpleTypeName } from './source'
 import { parameterNameAndType } from './source/symbols'
 
@@ -116,6 +116,14 @@ function localConstructorTypes(masked: string): ConstructorType[] {
   return types
 }
 
+/**
+ * The import a completion adds itself. A helper type's is left to `javaAutoImports`,
+ * which runs on the completion's transaction and knows whether the library exists.
+ */
+function directImport(typeName: string): string | undefined {
+  return JAVA_HELPER_NODE_TYPES.has(typeName) ? undefined : JAVA_TYPE_IMPORTS[typeName]
+}
+
 function constructorCompletion(type: ConstructorType, boost: number | undefined): Completion {
   const label = type.generic ? `${type.name}<>` : type.name
   return {
@@ -124,8 +132,8 @@ function constructorCompletion(type: ConstructorType, boost: number | undefined)
     detail: type.detail,
     ...(boost === undefined ? {} : { boost }),
     apply: type.arrayOnly
-      ? applyJavaTypeText(JAVA_TYPE_IMPORTS[type.name], label)
-      : applyJavaTypeText(JAVA_TYPE_IMPORTS[type.name], `${label}()`, label.length + 1),
+      ? applyJavaTypeText(directImport(type.name), label)
+      : applyJavaTypeText(directImport(type.name), `${label}()`, label.length + 1),
   }
 }
 
@@ -177,7 +185,7 @@ export function javaConstructorCompletions(masked: string, newFrom: number, symb
       label: arrayType,
       type: 'class',
       boost: 50,
-      apply: applyJavaTypeText(JAVA_TYPE_IMPORTS[elementBase], arrayType, baseType(expected).length + 1),
+      apply: applyJavaTypeText(directImport(elementBase), arrayType, baseType(expected).length + 1),
     })
   }
   return options

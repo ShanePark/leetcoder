@@ -26,6 +26,51 @@ describe('Java auto imports', () => {
     expect(insert(unavailable)).not.toContain('import io.github.shanepark.Ps;')
   })
 
+  it.each([
+    ['TreeNode', 'TreeNode.of(1, 2)', 'io.github.shanepark.leetcode.TreeNode'],
+    ['TreeNode', 'new TreeNode(1)', 'io.github.shanepark.leetcode.TreeNode'],
+    ['ListNode', 'ListNode.of(1, 2)', 'io.github.shanepark.leetcode.ListNode'],
+  ])('imports %s from %s only when the helper library is available', (_type, code, qualified) => {
+    const source = 'class Solution { Object values = ; }'
+    const cursor = source.indexOf(';')
+    const base = EditorState.create({ doc: source, extensions: [java(), javaAutoImports, psLibraryExtension] })
+    const available = base.update({ effects: setPsLibraryMetadata.of({
+      fingerprint: 'fixture',
+      methods: [{ name: 'parse', returnType: 'java.lang.Object', parameters: [] }],
+    }) }).state
+    const insert = (state: EditorState) => state.update({
+      changes: { from: cursor, insert: code },
+      userEvent: 'input.complete',
+    }).state.doc.toString()
+
+    expect(insert(base)).not.toContain(`import ${qualified};`)
+    expect(insert(available)).toContain(`import ${qualified};`)
+  })
+
+  describe.each(['ListNode', 'TreeNode'])('a file declaring its own %s', (type) => {
+    it.each([
+      ['a nested class', (name: string) => `class Solution { static class ${name} {} Object values = ; }`],
+      ['a top-level class', (name: string) => `class ${name} {}\nclass Solution { Object values = ; }`],
+      ['a record', (name: string) => `class Solution { record ${name}(int val) {} Object values = ; }`],
+      ['an interface', (name: string) => `class Solution { interface ${name} {} Object values = ; }`],
+    ])('does not import the helper over %s', (_label, source) => {
+      const doc = source(type)
+      const state = EditorState.create({ doc, extensions: [java(), javaAutoImports, psLibraryExtension] })
+        .update({ effects: setPsLibraryMetadata.of({
+          fingerprint: 'fixture',
+          methods: [{ name: 'parse', returnType: 'java.lang.Object', parameters: [] }],
+        }) }).state
+      for (const code of [`new ${type}()`, `${type}.of(1)`]) {
+        const updated = state.update({
+          changes: { from: doc.indexOf(' = ;') + 3, insert: code },
+          userEvent: 'input.complete',
+        }).state.doc.toString()
+        expect(updated).toContain(code)
+        expect(updated).not.toContain('import ')
+      }
+    })
+  })
+
   it('adds imports while a declaration is typed character by character', () => {
     const source = 'class Solution {\n    void test() {\n        |\n    }\n}'
     const cursor = source.indexOf('|')

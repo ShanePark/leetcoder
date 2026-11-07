@@ -6,6 +6,16 @@
  * `src/backend/`.
  */
 export type {
+  AiGenerateRequest,
+  AiGenerateResult,
+  AiKeySaveResult,
+  AiModel,
+  AiModelList,
+  AiStatus,
+  AiModelUsage,
+  AiUsageBucket,
+  AiUsageSummary,
+  AiUsageTotals,
   BackendClient,
   DailyProblem,
   GitCommitResult,

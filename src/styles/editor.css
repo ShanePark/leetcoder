@@ -133,6 +133,21 @@
   background: transparent;
 }
 
+.ai-generate-button {
+  flex: none;
+  width: 24px;
+  height: 24px;
+}
+
+.ai-generate-button:not(:disabled) {
+  color: var(--accent);
+}
+
+.ai-generate-button[aria-busy='true']:disabled {
+  color: var(--accent);
+  opacity: 1;
+}
+
 .file-heading {
   display: flex;
   align-items: center;

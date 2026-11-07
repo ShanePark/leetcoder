@@ -2,14 +2,15 @@ import { SHORTCUT_SECTIONS, formatShortcut, platformBindings } from '../shortcut
 import { iconFor } from '../icons'
 import { updateActionPresentation } from '../update-progress'
 import type { UpdatePhase } from '../update-controller'
-import type {
-  FileContextMenuState,
-  GitChangedFile,
-  GitContextMenuState,
-  ProblemFileEntry,
-  SettingsSection,
-  ShortcutPlatform,
-  ThemeMode,
+import {
+  SETTINGS_SECTIONS,
+  type FileContextMenuState,
+  type GitChangedFile,
+  type GitContextMenuState,
+  type ProblemFileEntry,
+  type SettingsSection,
+  type ShortcutPlatform,
+  type ThemeMode,
 } from './types'
 import { clampContextMenuPosition, macShortcutDialogLabel } from './layout'
 import { discardGitChangesWarningMessage } from './file-helpers'
@@ -123,18 +124,15 @@ export function renderSettingsDialog(root: HTMLElement, options: SettingsDialogR
     return
   }
   dialog.hidden = !options.open
-  const appearanceNav = requiredElement<HTMLButtonElement>(root, '#settings-appearance-nav')
-  const keymapNav = requiredElement<HTMLButtonElement>(root, '#settings-keymap-nav')
-  const appearancePanel = requiredElement<HTMLElement>(root, '#settings-appearance-panel')
-  const keymapPanel = requiredElement<HTMLElement>(root, '#settings-keymap-panel')
-  const appearanceSelected = options.section === 'appearance'
-  for (const [tab, selected] of [[appearanceNav, appearanceSelected], [keymapNav, !appearanceSelected]] as const) {
+  for (const section of SETTINGS_SECTIONS) {
+    const selected = section === options.section
+    const tab = requiredElement<HTMLButtonElement>(root, `#settings-${section}-nav`)
     tab.classList.toggle('is-active', selected)
     tab.setAttribute('aria-selected', String(selected))
     tab.tabIndex = selected ? 0 : -1
+    requiredElement<HTMLElement>(root, `#settings-${section}-panel`).hidden = !selected
   }
-  appearancePanel.hidden = !appearanceSelected
-  keymapPanel.hidden = appearanceSelected
+  const keymapPanel = requiredElement<HTMLElement>(root, '#settings-keymap-panel')
   const linuxTab = requiredElement<HTMLButtonElement>(root, '#shortcuts-linux-tab')
   const macosTab = requiredElement<HTMLButtonElement>(root, '#shortcuts-macos-tab')
   const mac = options.platform === 'macos'

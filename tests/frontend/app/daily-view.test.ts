@@ -65,6 +65,7 @@ class FakeElement {
   rel = ''
   inputMode = ''
   pattern = ''
+  placeholder = ''
   autocomplete = ''
   spellcheck = false
   selectionStart: number | null = 0
@@ -232,7 +233,7 @@ function model(overrides: Partial<DailyProblemViewModel> = {}): DailyProblemView
     dailyLoading: false,
     dailyError: null,
     problemSelection: 'daily',
-    problemNumberDraft: '1',
+    problemUrlDraft: '',
     viewingToday: true,
     dailyDescriptionOpen: false,
     ...overrides,
@@ -295,21 +296,21 @@ describe('createDailyProblemView', () => {
     renderer(model())
     const input = header.querySelector('.problem-lookup-input')!
     input.focus()
-    input.value = '12'
+    input.value = 'leetcode.com/problems/two-sum'
     input.selectionStart = 1
     input.selectionEnd = 2
 
-    renderer(model({ problemNumberDraft: '12', problemSelection: 'manual' }))
+    renderer(model({ problemUrlDraft: 'leetcode.com/problems/two-sum', problemSelection: 'manual' }))
 
     const nextInput = header.querySelector('.problem-lookup-input')!
     expect(nextInput).not.toBe(input)
-    expect(nextInput.value).toBe('12')
+    expect(nextInput.value).toBe('leetcode.com/problems/two-sum')
     expect(nextInput.focusCount).toBe(1)
     expect(nextInput.selectionStart).toBe(1)
     expect(nextInput.selectionEnd).toBe(2)
   })
 
-  it('distinguishes an empty draft from the null draft fallback value', () => {
+  it('shows the problem number as plain text beside a blank URL input', () => {
     const header = new FakeElement()
     const description = new FakeElement()
     const resizeHandle = new FakeElement()
@@ -317,14 +318,51 @@ describe('createDailyProblemView', () => {
       { header, description, resizeHandle },
       callbacks(),
     )
-    renderer(model({ problemNumberDraft: null }))
-    const fallbackInput = header.querySelector('.problem-lookup-input')
+    renderer(model())
 
-    renderer(model({ problemNumberDraft: '' }))
-    const emptyInput = header.querySelector('.problem-lookup-input')
+    expect(header.querySelector('.problem-number')?.textContent).toBe('#1')
+    const input = header.querySelector('.problem-lookup-input')!
+    expect(input.value).toBe('')
+    expect(input.placeholder).toBe('Paste problem URL')
+    expect(input.getAttribute('aria-label')).toBe('LeetCode problem URL')
+    expect(input.inputMode).toBe('')
+    expect(input.pattern).toBe('')
+  })
 
-    expect(emptyInput).not.toBe(fallbackInput)
-    expect(emptyInput?.value).toBe('')
+  it('shows no number and still offers the URL input while no problem is loaded', () => {
+    const header = new FakeElement()
+    const description = new FakeElement()
+    const resizeHandle = new FakeElement()
+    const renderer = createDailyProblemView(
+      { header, description, resizeHandle },
+      callbacks(),
+    )
+    renderer(model({ problem: null, existingFile: null }))
+
+    expect(header.querySelector('.problem-number')).toBeNull()
+    expect(header.querySelector('.problem-lookup-input')).not.toBeNull()
+  })
+
+  it('submits a pasted URL exactly as it was pasted', () => {
+    const header = new FakeElement()
+    const description = new FakeElement()
+    const resizeHandle = new FakeElement()
+    const callbacksRef = callbacks()
+    const renderer = createDailyProblemView(
+      { header, description, resizeHandle },
+      callbacksRef,
+    )
+    renderer(model())
+    const pasted = ' https://leetcode.com/problems/minimum-moves-to-equal-array-elements-iii/description/ '
+    const input = header.querySelector('.problem-lookup-input')!
+    input.value = pasted
+    input.dispatch('input')
+    const preventDefault = vi.fn()
+    header.querySelector('.problem-lookup')!.dispatch('submit', { preventDefault })
+
+    expect(callbacksRef.onLookupInput).toHaveBeenCalledWith(pasted)
+    expect(callbacksRef.onLookupSubmit).toHaveBeenCalledWith(pasted)
+    expect(preventDefault).toHaveBeenCalledOnce()
   })
 
   it('keeps dynamic input handlers attached to the latest callbacks', () => {
@@ -339,8 +377,8 @@ describe('createDailyProblemView', () => {
     renderer(model())
 
     const input = header.querySelector('.problem-lookup-input')!
-    input.value = '42'
+    input.value = 'leetcode.com/problems/42'
     input.dispatch('input')
-    expect(firstCallbacks.onLookupInput).toHaveBeenCalledWith('42')
+    expect(firstCallbacks.onLookupInput).toHaveBeenCalledWith('leetcode.com/problems/42')
   })
 })

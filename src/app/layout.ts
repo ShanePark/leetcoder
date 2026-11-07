@@ -294,4 +294,10 @@ export function normalizeProblemNumber(value: string): string | null {
   return withoutLeadingZeroes.length > 0 ? withoutLeadingZeroes : null
 }
 
+/** The title slug of a pasted LeetCode problem URL, or null for anything else. */
+export function problemSlugFromUrl(value: string): string | null {
+  const match = /^(?:https?:\/\/)?(?:www\.)?leetcode\.com\/problems\/([a-z0-9-]+)(?:[/?#].*)?$/.exec(value.trim())
+  return match ? match[1] : null
+}
+
 export type { SettingsSection, ShortcutPlatform, ThemeMode }

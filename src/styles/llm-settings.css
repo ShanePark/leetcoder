@@ -1,0 +1,325 @@
+/* ---------------------------------------------------------------- */
+/* LLM settings                                                      */
+/* ---------------------------------------------------------------- */
+
+/* Usage takes the height the fixed sections leave. Only a window too short for
+   its floor scrolls the panel. The gutter keeps a scrollbar off the text, and
+   sits in the content padding so the sections still line up with the heading. */
+.llm-settings-panel {
+  margin-right: -12px;
+  padding-right: 12px;
+  overflow-y: auto;
+}
+
+.llm-settings-section {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.llm-settings-section .shortcuts-group-title {
+  margin: 0;
+}
+
+.llm-usage-section {
+  flex: 1 1 0;
+  min-height: 258px;
+}
+
+.llm-key-label-row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.llm-key-label-row .llm-link {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.llm-key-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.llm-key-row > .rename-file-input,
+.llm-key-status,
+.llm-key-field {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.llm-key-field {
+  position: relative;
+}
+
+.llm-key-field .rename-file-input {
+  padding-right: 32px;
+}
+
+.llm-key-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.llm-key-row .rename-file-input::placeholder {
+  color: var(--text-faint);
+}
+
+.llm-key-row .primary-button,
+.llm-key-row .secondary-button {
+  flex: 0 0 auto;
+}
+
+.llm-model-select {
+  font-family: var(--font-sans);
+}
+
+.llm-model-select:disabled {
+  color: var(--text-faint);
+}
+
+.llm-notes {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.llm-notes:empty {
+  display: none;
+}
+
+.llm-message {
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.llm-message.is-success {
+  color: var(--green);
+}
+
+.llm-message.is-warning {
+  color: var(--amber);
+}
+
+.llm-message.is-error {
+  color: var(--red);
+}
+
+.llm-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.llm-usage-heading,
+.llm-usage-controls,
+.llm-usage-axis {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.llm-usage-heading .llm-link {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.llm-usage-controls[hidden] {
+  display: none;
+}
+
+.llm-usage-controls .shortcuts-platform-tab {
+  min-width: 56px;
+}
+
+.llm-usage-all-time {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.llm-usage-body {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.llm-usage-body > * {
+  flex: 0 0 auto;
+}
+
+.llm-usage-headline {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.llm-usage-label,
+.llm-usage-detail {
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.llm-usage-detail {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.llm-usage-cost {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+
+.llm-usage-chart {
+  display: flex;
+  height: 56px;
+  align-items: stretch;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* The whole column is the hit target, taller and wider than the mark inside it. */
+.llm-usage-bar {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 0;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 6px 0 0;
+  border: 0;
+  border-radius: 2px 2px 0 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.llm-usage-bar:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.llm-usage-bar-mark {
+  display: block;
+  width: 100%;
+  max-width: 18px;
+  border-radius: 4px 4px 0 0;
+  background: var(--accent);
+  opacity: 0.35;
+  transition: opacity 120ms ease;
+}
+
+.llm-usage-bar:hover .llm-usage-bar-mark {
+  opacity: 0.6;
+}
+
+.llm-usage-bar[aria-pressed="true"] .llm-usage-bar-mark {
+  opacity: 1;
+}
+
+.llm-usage-bar-mark.is-empty {
+  height: 2px;
+  border-radius: 0;
+  background: var(--border-strong);
+  opacity: 1;
+}
+
+.llm-usage-bar[aria-pressed="true"] .llm-usage-bar-mark.is-empty {
+  background: var(--accent);
+}
+
+.llm-usage-axis {
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+/* Fixed columns are the fallback where nested grids are unavailable. */
+.llm-usage-models {
+  display: grid;
+  min-height: 44px;
+  grid-template-columns: minmax(0, 1fr) 64px auto auto;
+  column-gap: 10px;
+  align-content: start;
+  margin: 2px -12px 0 0;
+  padding: 0 12px 0 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.llm-usage-body > .llm-usage-models {
+  flex: 1 1 0;
+}
+
+.llm-usage-model {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) 64px 72px 96px;
+  grid-template-columns: subgrid;
+  align-items: center;
+  min-height: 22px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.llm-usage-model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-usage-share {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+
+.llm-usage-share-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.llm-usage-model-requests,
+.llm-usage-model-cost {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.llm-usage-model-requests {
+  color: var(--text-faint);
+}
+
+@media (max-height: 700px) {
+  .llm-settings-panel {
+    gap: 12px;
+  }
+}
