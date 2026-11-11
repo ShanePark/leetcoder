@@ -50,6 +50,7 @@ const stubSource = javaSource('        assertThat()')
 const filledSource = javaSource('        assertThat(twoSum(new int[] {1}, 1)).isEmpty();')
 const testOnlySource = 'package easy;\n\npublic class Q1TwoSum {\n    @Test\n    public void test() {\n        assertThat()\n    }\n}\n'
 const noTestSource = 'package easy;\n\npublic class Q1TwoSum {\n    public void twoSum() {\n    }\n}\n'
+const classlessSource = 'package easy;\n'
 const statements = ['assertThat(twoSum(new int[]{2, 7}, 9)).containsExactly(0, 1);']
 
 const otherFile: ProblemFileEntry = {
@@ -152,9 +153,9 @@ describe('AI test generation button', () => {
     expect(testMocks.settingsSections).toEqual(['llm'])
   })
 
-  it('makes no call and says why when test() is missing', async () => {
+  it('makes no call and says why when the file has neither test() nor a class', async () => {
     const backend = configuredBackend()
-    await openStub(backend, noTestSource)
+    await openStub(backend, classlessSource)
 
     await clickAndSettle()
 
@@ -163,16 +164,20 @@ describe('AI test generation button', () => {
     expect(lastToast()?.message).toContain('has no test() method')
   })
 
-  it('makes no call and says why when test() is already filled', async () => {
+  it.each([
+    ['filled', filledSource],
+    ['missing', noTestSource],
+  ])('opens the failing case dialog instead of calling when test() is %s', async (_case, source) => {
     const backend = configuredBackend()
-    await openStub(backend, filledSource)
+    await openStub(backend, source)
 
-    await clickAndSettle()
+    button().dispatch('click')
 
-    expect(backend.fetchProblemBySlug).not.toHaveBeenCalled()
+    expect(dom.root.querySelector<FakeElement>('#ai-case-dialog').hidden).toBe(false)
+    expect(dom.root.querySelector<FakeElement>('#ai-case-file').textContent).toBe('Q1TwoSum.java')
+    expect(backend.aiStatus).not.toHaveBeenCalled()
     expect(backend.aiGenerateTests).not.toHaveBeenCalled()
-    expect(lastToast()?.message).toContain('already has code')
-    expect(editor().source).toBe(filledSource)
+    expect(editor().source).toBe(source)
   })
 
   it('fills the stub, marks the file dirty, and sends only the allowed fields', async () => {
@@ -628,7 +633,7 @@ describe('AI test generation button', () => {
 
     it('does not take focus when no call was made or the call failed', async () => {
       const backend = configuredBackend()
-      await openStub(backend, filledSource)
+      await openStub(backend, classlessSource)
       const focus = focusSpy()
       await clickAndSettle()
 
@@ -670,7 +675,7 @@ describe('AI test generation button', () => {
 
     it('does not reload when no paid call was made', async () => {
       const backend = configuredBackend()
-      await openStub(backend, filledSource)
+      await openStub(backend, classlessSource)
 
       await clickAndSettle()
 
@@ -755,8 +760,8 @@ describe('AI test generation button', () => {
       expect(button().hidden).toBe(true)
     })
 
-    it('stays hidden when test() is filled or missing', async () => {
-      for (const source of [filledSource, noTestSource]) {
+    it('stays hidden when the file has no class to add a test to', async () => {
+      for (const source of [classlessSource, '']) {
         const backend = configuredBackend()
         await openStub(backend, source)
         expect(button().hidden).toBe(true)
@@ -766,22 +771,27 @@ describe('AI test generation button', () => {
 
     it('follows edits to test()', async () => {
       await openStub(configuredBackend())
-      expect(button().hidden).toBe(false)
+      expect(button().title).toBe('Generate tests for Q1TwoSum.java with AI')
 
       editor().emitChange(filledSource)
+      expect(button().title).toBe('Add a failing case to Q1TwoSum.java as a new test with AI')
+
+      editor().emitChange(classlessSource)
       expect(button().hidden).toBe(true)
 
       editor().emitChange(stubSource)
       expect(button().hidden).toBe(false)
+      expect(button().title).toBe('Generate tests for Q1TwoSum.java with AI')
     })
 
-    it('hides once a fill succeeds', async () => {
+    it('switches to adding a case once a fill succeeds', async () => {
       await openStub(configuredBackend())
 
       await clickAndSettle()
 
       expect(editor().source).not.toBe(stubSource)
-      expect(button().hidden).toBe(true)
+      expect(button().hidden).toBe(false)
+      expect(button().title).toBe('Add a failing case to Q1TwoSum.java as a new test with AI')
     })
 
     it('keeps showing progress after switching away from the requested file', async () => {
@@ -803,6 +813,195 @@ describe('AI test generation button', () => {
       await vi.waitFor(() => {
         expect(button().hidden).toBe(true)
       })
+    })
+  })
+
+  describe('failing case', () => {
+    const dialog = (): FakeElement => dom.root.querySelector<FakeElement>('#ai-case-dialog')
+    const caseInput = (): FakeElement => dom.root.querySelector<FakeElement>('#ai-case-input')
+    const caseFile = (): FakeElement => dom.root.querySelector<FakeElement>('#ai-case-file')
+    const pasted = 'a =\n388168\nUse Testcase\nOutput\n1\nExpected\n84755163318'
+
+    function submitCase(text: string): ReturnType<typeof vi.fn> {
+      caseInput().value = text
+      const preventDefault = vi.fn()
+      dom.root.querySelector<FakeElement>('#ai-case-form').dispatch('submit', { preventDefault })
+      return preventDefault
+    }
+
+    it('shows for any file of the loaded problem with a class, filled test() included', async () => {
+      const backend = configuredBackend()
+      vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
+      await openStub(backend, filledSource)
+
+      expect(button().hidden).toBe(false)
+      expect(button().disabled).toBe(false)
+      expect(button().dataset.icon).toBe('sparkles')
+      expect(button().title).toBe('Add a failing case to Q1TwoSum.java as a new test with AI')
+
+      editor().emitChange('')
+      expect(button().hidden).toBe(true)
+      editor().emitChange(noTestSource)
+      expect(button().hidden).toBe(false)
+
+      await selectFile(otherFile)
+      expect(button().hidden).toBe(true)
+    })
+
+    it('switches the one button between filling test() and adding a case', async () => {
+      const backend = configuredBackend()
+      await openStub(backend)
+
+      expect(button().title).toBe('Generate tests for Q1TwoSum.java with AI')
+      button().dispatch('click')
+      await vi.waitFor(() => {
+        expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+      })
+      expect(vi.mocked(backend.aiGenerateTests).mock.calls[0][0]).not.toHaveProperty('failingCase')
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
+
+      expect(button().hidden).toBe(false)
+      expect(button().title).toBe('Add a failing case to Q1TwoSum.java as a new test with AI')
+      expect(caseFile().textContent).toBe('')
+      button().dispatch('click')
+      expect(dialog().hidden).toBe(false)
+      expect(caseFile().textContent).toBe('Q1TwoSum.java')
+      expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+    })
+
+    it('stays hidden when the loaded problem has no description', async () => {
+      const backend = configuredBackend()
+      vi.mocked(backend.fetchDailyProblem).mockResolvedValue(loaded({ ...problemOne, content: null }))
+      await openStub(backend, filledSource)
+
+      expect(button().hidden).toBe(true)
+    })
+
+    it('opens the dialog without sending anything, and cancel sends nothing either', async () => {
+      const backend = configuredBackend()
+      await openStub(backend, filledSource)
+      vi.mocked(backend.aiStatus).mockClear()
+
+      button().dispatch('click')
+      expect(dialog().hidden).toBe(false)
+      expect(dom.root.querySelector<FakeElement>('#ai-case-file').textContent).toBe('Q1TwoSum.java')
+
+      dom.root.querySelector<FakeElement>('#cancel-ai-case').dispatch('click')
+      expect(dialog().hidden).toBe(true)
+      expect(backend.aiStatus).not.toHaveBeenCalled()
+      expect(backend.aiGenerateTests).not.toHaveBeenCalled()
+    })
+
+    it('sends nothing for an empty paste and keeps the dialog open', async () => {
+      const backend = configuredBackend()
+      await openStub(backend, filledSource)
+      button().dispatch('click')
+
+      expect(submitCase('  \n ')).toHaveBeenCalledOnce()
+
+      expect(dialog().hidden).toBe(false)
+      expect(backend.aiGenerateTests).not.toHaveBeenCalled()
+      expect(lastToast()).toMatchObject({ message: 'Paste the failing case first.', tone: 'error' })
+    })
+
+    it('sends the trimmed case on confirm and adds test2() after test()', async () => {
+      const backend = configuredBackend()
+      await openStub(backend, filledSource)
+      button().dispatch('click')
+
+      expect(submitCase(`\n${pasted}\n\n`)).toHaveBeenCalledOnce()
+      expect(dialog().hidden).toBe(true)
+      await vi.waitFor(() => {
+        expect(lastToast()).toMatchObject({ message: 'Added test2() to Q1TwoSum.java.', tone: 'success' })
+      })
+
+      expect(vi.mocked(backend.aiGenerateTests).mock.calls[0][0]).toMatchObject({
+        failingCase: pasted,
+        methodHeaders: ['public int[] twoSum(int[] nums, int target)'],
+      })
+      expect(editor().source).toContain(
+        `    @Test\n    public void test2() {\n        ${statements[0]}\n    }\n}\n`,
+      )
+      expect(editor().source).toContain('assertThat(twoSum(new int[] {1}, 1)).isEmpty();')
+      expect(appState().dirty).toBe(true)
+      expect(button().hidden).toBe(false)
+    })
+
+    it('sends no failingCase field from the examples button', async () => {
+      const backend = configuredBackend()
+      await openStub(backend)
+
+      await clickAndSettle()
+
+      expect(vi.mocked(backend.aiGenerateTests).mock.calls[0][0]).not.toHaveProperty('failingCase')
+    })
+
+    it('runs one request at a time', async () => {
+      const backend = configuredBackend()
+      const generation = deferred<AiGenerateResult>()
+      vi.mocked(backend.aiGenerateTests).mockReturnValue(generation.promise)
+      await openStub(backend, filledSource)
+      button().dispatch('click')
+      submitCase(pasted)
+      await vi.waitFor(() => {
+        expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+      })
+
+      expect(button().attributes.get('aria-busy')).toBe('true')
+      expect(button().dataset.icon).toBe('loader')
+      expect(button().title).toBe('Adding a failing case to Q1TwoSum.java…')
+      button().dispatch('click')
+      expect(dialog().hidden).toBe(true)
+
+      generation.resolve(okResult)
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
+      expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+      expect(button().disabled).toBe(false)
+      expect(button().dataset.icon).toBe('sparkles')
+    })
+
+    it('discards the result when the file changes mid-request', async () => {
+      const backend = configuredBackend()
+      const generation = deferred<AiGenerateResult>()
+      vi.mocked(backend.aiGenerateTests).mockReturnValue(generation.promise)
+      vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
+      await openStub(backend, filledSource)
+      button().dispatch('click')
+      submitCase(pasted)
+      await vi.waitFor(() => {
+        expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+      })
+
+      const otherSource = filledSource.replaceAll('Q1TwoSum', 'Q9Palindrome')
+      vi.mocked(backend.readProblemFile).mockResolvedValue(otherSource)
+      await selectFile(otherFile)
+      const apply = vi.spyOn(editor(), 'applyAiCaseTest')
+
+      generation.resolve(okResult)
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
+
+      expect(apply).not.toHaveBeenCalled()
+      expect(editor().source).toBe(otherSource)
+      expect(lastToast()?.message).toContain('Q1TwoSum.java is no longer the active file, so the result was discarded')
+    })
+
+    it('rejects statements that would leave the new method and changes nothing', async () => {
+      const backend = configuredBackend()
+      vi.mocked(backend.aiGenerateTests).mockResolvedValue({ ...okResult, statements: ['foo bar baz();'] })
+      await openStub(backend, filledSource)
+      button().dispatch('click')
+      submitCase(pasted)
+
+      await vi.waitFor(() => {
+        expect(lastToast()?.message).toContain('The result was rejected because')
+      })
+      expect(editor().source).toBe(filledSource)
     })
   })
 
@@ -839,19 +1038,19 @@ describe('AI controller helpers', () => {
 
   it('never names a shortcut in the button title', () => {
     for (const presentation of [
-      aiButtonPresentation('src/Q1TwoSum.java', null, false, problemOne, 'bare'),
-      aiButtonPresentation('src/Q1TwoSum.java', 'src/Q1TwoSum.java', false, problemOne, 'bare'),
-      aiButtonPresentation('src/Q1TwoSum.java', null, true, problemOne, 'bare'),
-      aiButtonPresentation('src/Q1TwoSum.kt', null, false, problemOne, 'bare'),
-      aiButtonPresentation(null, null, false, problemOne, 'bare'),
+      aiButtonPresentation('src/Q1TwoSum.java', null, null, false, problemOne, 'bare', false),
+      aiButtonPresentation('src/Q1TwoSum.java', 'src/Q1TwoSum.java', 'examples', false, problemOne, 'bare', false),
+      aiButtonPresentation('src/Q1TwoSum.java', null, null, true, problemOne, 'bare', false),
+      aiButtonPresentation('src/Q1TwoSum.kt', null, null, false, problemOne, 'bare', false),
+      aiButtonPresentation(null, null, null, false, problemOne, 'bare', false),
     ]) {
       expect(presentation.title).not.toMatch(/Alt\+|Ctrl\+|⌘/)
     }
-    expect(aiButtonPresentation('src/Q1TwoSum.java', null, true, problemOne, 'bare')).toMatchObject({
+    expect(aiButtonPresentation('src/Q1TwoSum.java', null, null, true, problemOne, 'bare', false)).toMatchObject({
       hidden: false,
       disabled: true,
     })
-    expect(aiButtonPresentation('src/Q1TwoSum.kt', null, false, problemOne, 'bare').hidden).toBe(true)
+    expect(aiButtonPresentation('src/Q1TwoSum.kt', null, null, false, problemOne, 'bare', false).hidden).toBe(true)
   })
 
   it('formats no signatures without library metadata', () => {
@@ -872,10 +1071,11 @@ describe('AI controller helpers', () => {
         aiGenerateTests: () => generation.promise,
         currentTarget: () => current,
         headerProblem: () => problemOne,
-        readContext: () => ({ stub: 'bare', methodHeaders: ['int f()'] }),
+        readContext: () => ({ stub: 'bare', methodHeaders: ['int f()'], canAddCase: true }),
         selectedModelId: () => null,
         psSignatures: () => [],
         applyStatements,
+        applyCaseStatements: vi.fn(),
         focusEditor,
       },
       { requestChanged: () => {}, showMessage, showMissingKey: () => {}, generationFinished },

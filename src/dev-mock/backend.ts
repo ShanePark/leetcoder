@@ -383,7 +383,9 @@ function createMockAi(): MockAi {
 function mockAiStatements(request: AiGenerateRequest): string[] {
   const signature = request.entryPoint ?? request.methodHeaders[0] ?? ''
   const method = /(\w+)\s*\(/.exec(signature)?.[1] ?? 'solve'
-  return [...(AI_STATEMENTS.get(method) ?? [`assertThat(${method}()).isNotNull();`])]
+  const statements = AI_STATEMENTS.get(method) ?? [`assertThat(${method}()).isNotNull();`]
+  // A failing case is a single case, so it gets a single statement.
+  return request.failingCase === undefined ? [...statements] : statements.slice(0, 1)
 }
 
 function sumAiUsage(entries: readonly AiUsageEntry[]): AiUsageTotals {

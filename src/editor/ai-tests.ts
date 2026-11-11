@@ -1,4 +1,5 @@
 import { javaLanguage } from '@codemirror/lang-java'
+import { EditorSelection } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
 import type { SyntaxNode, Tree } from '@lezer/common'
 import {
@@ -28,6 +29,7 @@ export type AiTestRejectionReason =
   | 'syntax-error'
   | 'not-one-statement'
   | 'outside-test-body'
+  | 'class-missing'
 
 export interface AiTestRejection {
   ok: false
@@ -43,6 +45,9 @@ export interface AiTestPlan {
 }
 
 export type AiTestResult = AiTestPlan | AiTestRejection
+
+/** One insertion of a new test method, named so the user can find it. */
+export type AiCaseTestResult = (AiTestPlan & { methodName: string }) | AiTestRejection
 
 const OPENING_BRACKET: Readonly<Record<string, string>> = { ')': '(', ']': '[', '}': '{' }
 
@@ -158,12 +163,13 @@ export function checkAiTestCandidate(
   source: string,
   body: JavaBodyRange,
   insert: string,
+  methodName = 'test',
 ): AiTestRejectionReason | null {
   const before = source.slice(0, body.from)
   const after = source.slice(body.to)
   const candidate = `${before}${insert}${after}`
   const candidateTree = javaLanguage.parser.parse(candidate)
-  const block = findJavaTestBlock(candidate, candidateTree.topNode)
+  const block = findJavaTestBlock(candidate, candidateTree.topNode, methodName)
   if (!block || block.from !== body.from - 1 || block.to !== body.from + insert.length + 1) {
     return 'outside-test-body'
   }
@@ -238,6 +244,121 @@ export function applyAiTestStatements(view: EditorView, statements: readonly str
   if (plan.ok) {
     view.dispatch({
       changes: { from: plan.from, to: plan.to, insert: plan.insert },
+      userEvent: AI_TESTS_USER_EVENT,
+    })
+  }
+  return plan
+}
+
+/** Where a new test method goes, and how it is written. */
+export interface AiCaseTestSlot {
+  methodName: string
+  /** Right after the last @Test method, or after the class's last member. */
+  at: number
+  /** Blank line, annotation, header, and opening brace, as inserted at `at`. */
+  head: string
+}
+
+function directChildren(node: SyntaxNode): SyntaxNode[] {
+  const children: SyntaxNode[] = []
+  for (let child = node.firstChild; child; child = child.nextSibling) children.push(child)
+  return children
+}
+
+function lineIndent(source: string, position: number): string {
+  const lineStart = source.lastIndexOf('\n', position - 1) + 1
+  return /^[\t ]*/.exec(source.slice(lineStart))?.[0] ?? ''
+}
+
+function methodName(source: string, method: SyntaxNode): string | null {
+  const definition = method.getChild('Definition')
+  return definition ? source.slice(definition.from, definition.to) : null
+}
+
+/**
+ * Find where a failing case's test method goes: the class of the last @Test
+ * method among top-level classes, or else the first top-level class. The name
+ * is one past the highest of `test` (1) and `test<digits>` among the class's
+ * methods, at least `test2`. Indentation and modifiers follow the last @Test
+ * method. Null when no top-level class has an intact body.
+ */
+export function findAiCaseTestSlot(source: string): AiCaseTestSlot | null {
+  const root = javaLanguage.parser.parse(source).topNode
+  const bodies = directChildren(root)
+    .filter((node) => node.name === 'ClassDeclaration')
+    .map((node) => node.getChild('ClassBody'))
+    .filter((body): body is SyntaxNode => body?.firstChild?.name === '{' && body.lastChild?.name === '}')
+  const testsOf = (body: SyntaxNode): SyntaxNode[] => directChildren(body)
+    .filter((node) => node.name === 'MethodDeclaration' && isJavaTestMethod(source, node))
+  const body = [...bodies].reverse().find((candidate) => testsOf(candidate).length > 0) ?? bodies[0]
+  if (!body) {
+    return null
+  }
+
+  const members = directChildren(body).slice(1, -1)
+  const numbers = members
+    .filter((node) => node.name === 'MethodDeclaration')
+    .map((node) => /^test(\d*)$/.exec(methodName(source, node) ?? ''))
+    .map((match) => (match ? Number(match[1] || '1') : 0))
+  const name = `test${Math.max(1, ...numbers) + 1}`
+
+  const lastTest = testsOf(body).at(-1)
+  const anchor = lastTest ?? members.at(-1)
+  const indent = anchor
+    ? lineIndent(source, anchor.from)
+    : `${lineIndent(source, body.from)}    `
+  // A @Test method always has Modifiers, since they hold the annotation.
+  const modifiers = lastTest
+    ? directChildren(lastTest.getChild('Modifiers')!)
+      .filter((node) => !['MarkerAnnotation', 'Annotation', 'LineComment', 'BlockComment'].includes(node.name))
+      .map((node) => source.slice(node.from, node.to))
+    : ['public']
+  const header = [...modifiers, 'void', `${name}()`].join(' ')
+  return {
+    methodName: name,
+    at: anchor?.to ?? body.from + 1,
+    head: `${anchor ? '\n\n' : '\n'}${indent}@Test\n${indent}${header} {`,
+  }
+}
+
+/**
+ * Decide how to add a new test method holding `statements`. The method is
+ * placed with an empty body first, and the body is then checked exactly like
+ * a fill of `test()`, so the statements cannot reach outside the new method.
+ */
+export function planAiCaseTestInsertion(source: string, statements: readonly string[]): AiCaseTestResult {
+  const slot = findAiCaseTestSlot(source)
+  if (!slot) {
+    return { ok: false, reason: 'class-missing' }
+  }
+  const invalid = validateAiTestStatements(statements)
+  if (invalid) {
+    return { ok: false, reason: invalid }
+  }
+  const withMethod = `${source.slice(0, slot.at)}${slot.head}}${source.slice(slot.at)}`
+  const bodyFrom = slot.at + slot.head.length
+  const body = { from: bodyFrom, to: bodyFrom }
+  const insert = formatAiTestBody(withMethod, body, statements)
+  const rejected = checkAiTestCandidate(withMethod, body, insert, slot.methodName)
+  return rejected
+    ? { ok: false, reason: rejected }
+    : { ok: true, from: slot.at, to: slot.at, insert: `${slot.head}${insert}}`, methodName: slot.methodName }
+}
+
+/**
+ * Add the new test method in one transaction, as `applyAiTestStatements` does,
+ * and put the cursor on its first statement so it is in view and the run-test-
+ * at-cursor shortcut targets it.
+ */
+export function applyAiCaseTestStatements(view: EditorView, statements: readonly string[]): AiCaseTestResult {
+  const plan = planAiCaseTestInsertion(view.state.doc.toString(), statements)
+  if (plan.ok) {
+    const firstLine = plan.insert.indexOf('\n', plan.insert.indexOf('{')) + 1
+    const firstStatement = firstLine + /^[\t ]*/.exec(plan.insert.slice(firstLine))![0].length
+    view.dispatch({
+      changes: { from: plan.from, to: plan.to, insert: plan.insert },
+      selection: EditorSelection.cursor(plan.from + firstStatement),
+      scrollIntoView: true,
       userEvent: AI_TESTS_USER_EVENT,
     })
   }

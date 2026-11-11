@@ -6,10 +6,22 @@ import {
   type PsLibraryMetadata,
 } from '../backend'
 import { declaresJavaSolutionConstructor, extractJavaMethodSignature } from '../domain'
-import type { AiTestContext, AiTestRejectionReason, AiTestResult, AiTestStub } from '../editor'
+import type {
+  AiCaseTestResult,
+  AiTestContext,
+  AiTestRejectionReason,
+  AiTestResult,
+  AiTestStub,
+} from '../editor'
 import type { AppIcon } from '../icons'
 import { normalizeProblemNumber } from './layout'
 import { sourceBasename } from './path-helpers'
+
+/** What a request writes: the examples into `test()`, or one failing case into a new method. */
+export type AiRequestKind = 'examples' | 'case'
+
+/** Longer pasted text is refused before any request, as native code does. */
+export const MAX_AI_FAILING_CASE_LENGTH = 32_768
 
 /** The open document a request belongs to. */
 export interface AiTarget {
@@ -27,6 +39,7 @@ export interface AiControllerApi
   selectedModelId: () => string | null
   psSignatures: () => string[]
   applyStatements: (statements: readonly string[]) => AiTestResult
+  applyCaseStatements: (statements: readonly string[]) => AiCaseTestResult
   /** Called once statements are in the document. */
   focusEditor: () => void
 }
@@ -42,7 +55,10 @@ export interface AiControllerUi {
 export interface AiController {
   /** The file a request is running for, or null while idle. */
   readonly requestPath: string | null
+  readonly requestKind: AiRequestKind | null
   generate: () => Promise<void>
+  /** Add one pasted failing case to the open file as a new test method. */
+  generateCase: (failingCase: string) => Promise<void>
   dispose: () => void
 }
 
@@ -73,6 +89,12 @@ const REJECTION_REASONS: Readonly<Record<AiTestRejectionReason, string>> = {
   'syntax-error': 'the statements were not valid Java',
   'not-one-statement': 'a line did not hold exactly one statement',
   'outside-test-body': 'the statements would change code outside test()',
+  'class-missing': 'the file has no class to add a test method to',
+}
+
+const CASE_REJECTION_REASONS: Partial<Record<AiTestRejectionReason, string>> = {
+  'no-statements': 'the model returned no statements, so the case may lack an input or Expected value, or need an API this app cannot build',
+  'outside-test-body': 'the statements would change code outside the new test method',
 }
 
 /** The problem number of a Java `Q<number>...` source file. */
@@ -81,45 +103,86 @@ export function aiProblemNumber(path: string | null): string | null {
   return match ? normalizeProblemNumber(match[1]) : null
 }
 
-/** Whether a click could send a request: the file's problem is loaded with its description and test() is empty. */
-function canFill(path: string | null, problem: DailyProblem | null, stub: AiTestStub): boolean {
+/** Whether the open file's problem is loaded with its description, so a click could send a request. */
+function problemReady(path: string | null, problem: DailyProblem | null): boolean {
   const problemNumber = aiProblemNumber(path)
   return problemNumber !== null
-    && stub === 'bare'
     && problem !== null
     && normalizeProblemNumber(problem.frontendId) === problemNumber
     && Boolean(problem.content?.trim())
 }
 
+export type AiButtonMode = AiRequestKind
+
+/**
+ * What a click on the AI button does for the open file: fill a bare `test()`
+ * with the examples, or add a pasted failing case as a new test method once
+ * tests exist. Null hides the button.
+ */
+export function aiButtonMode(
+  path: string | null,
+  problem: DailyProblem | null,
+  stub: AiTestStub,
+  canAddCase: boolean,
+): AiButtonMode | null {
+  if (!problemReady(path, problem)) return null
+  if (stub === 'bare') return 'examples'
+  return canAddCase ? 'case' : null
+}
+
+const BUTTON_COPY: Readonly<Record<AiButtonMode, {
+  label: string
+  busyLabel: string
+  busyTitle: (name: string) => string
+  title: (name: string) => string
+}>> = {
+  examples: {
+    label: 'Generate tests with AI',
+    busyLabel: 'Generating tests with AI',
+    busyTitle: (name) => `Generating tests for ${name}…`,
+    title: (name) => `Generate tests for ${name} with AI`,
+  },
+  case: {
+    label: 'Add a failing case with AI',
+    busyLabel: 'Adding a failing case with AI',
+    busyTitle: (name) => `Adding a failing case to ${name}…`,
+    title: (name) => `Add a failing case to ${name} as a new test with AI`,
+  },
+}
+
+/** `requestPath` and `requestKind` describe a running request, if any. */
 export function aiButtonPresentation(
   path: string | null,
   requestPath: string | null,
+  requestKind: AiRequestKind | null,
   appBusy: boolean,
   problem: DailyProblem | null,
   stub: AiTestStub,
+  canAddCase: boolean,
 ): AiButtonPresentation {
-  const label = 'Generate tests with AI'
-  const idle = { icon: 'sparkles', busy: false, label } as const
   if (requestPath !== null) {
+    const copy = BUTTON_COPY[requestKind ?? 'examples']
     return {
       icon: 'loader',
       busy: true,
       hidden: false,
       disabled: true,
-      label: 'Generating tests with AI',
-      title: `Generating tests for ${sourceBasename(requestPath)}…`,
+      label: copy.busyLabel,
+      title: copy.busyTitle(sourceBasename(requestPath)),
     }
   }
-  if (path === null || !canFill(path, problem, stub)) {
-    return { ...idle, hidden: true, disabled: true, title: label }
+  const mode = path === null ? null : aiButtonMode(path, problem, stub, canAddCase)
+  if (path === null || mode === null) {
+    return { icon: 'sparkles', busy: false, hidden: true, disabled: true, label: BUTTON_COPY.examples.label, title: BUTTON_COPY.examples.label }
   }
+  const copy = BUTTON_COPY[mode]
   return {
-    ...idle,
+    icon: 'sparkles',
+    busy: false,
     hidden: false,
     disabled: appBusy,
-    title: appBusy
-      ? 'Available when the current operation finishes'
-      : `Generate tests for ${sourceBasename(path)} with AI`,
+    label: copy.label,
+    title: appBusy ? 'Available when the current operation finishes' : copy.title(sourceBasename(path)),
   }
 }
 
@@ -143,14 +206,16 @@ export function aiFillMayTakeFocus(root: HTMLElement, button: Element): boolean 
 
 /**
  * Run one test generation for the open file. The flag is set before anything
- * asynchronous, so a repeated click cannot pay for a second call. A file switch
- * is caught here and an edit by `applyStatements`, which re-checks the stub
- * against the document as it is when the result arrives. The button is hidden
- * unless a call could apply, but the document and the loaded problem can still
- * change while the key status is read, so `run` checks them again.
+ * asynchronous, and both kinds share it, so a repeated click cannot pay for a
+ * second call. A file switch is caught here and an edit by `applyStatements` or
+ * `applyCaseStatements`, which plan against the document as it is when the
+ * result arrives. The buttons are hidden unless a call could apply, but the
+ * document and the loaded problem can still change while the key status is
+ * read, so `run` checks them again.
  */
 export function createAiController(api: AiControllerApi, ui: AiControllerUi): AiController {
   let requestPath: string | null = null
+  let requestKind: AiRequestKind | null = null
   let disposed = false
 
   const isOpen = (target: AiTarget): boolean => {
@@ -161,12 +226,17 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
   }
 
   /** The current document's context, or null with a message when a call could not apply. */
-  const fillableContext = (target: AiTarget, name: string): AiTestContext | null => {
+  const fillableContext = (target: AiTarget, name: string, kind: AiRequestKind): AiTestContext | null => {
     if (!isOpen(target)) {
       ui.showMessage(`${name} is no longer the active file, so no request was sent.`, 'info')
       return null
     }
     const context = api.readContext()
+    if (kind === 'case') {
+      if (context.canAddCase) return context
+      ui.showMessage(`${name} has no class to add a test method to. No request was sent.`, 'error')
+      return null
+    }
     if (context.stub === 'missing') {
       ui.showMessage(`${name} has no test() method to fill. No request was sent.`, 'error')
       return null
@@ -195,7 +265,19 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     return null
   }
 
-  const finish = (target: AiTarget, name: string, result: AiGenerateResult): void => {
+  /** Apply the statements, naming what changed, or say why they were rejected. */
+  const apply = (kind: AiRequestKind, name: string, statements: readonly string[]): { done: string } | { rejected: string } => {
+    if (kind === 'case') {
+      const added = api.applyCaseStatements(statements)
+      return added.ok
+        ? { done: `Added ${added.methodName}() to ${name}.` }
+        : { rejected: CASE_REJECTION_REASONS[added.reason] ?? REJECTION_REASONS[added.reason] }
+    }
+    const filled = api.applyStatements(statements)
+    return filled.ok ? { done: `Filled test() in ${name}.` } : { rejected: REJECTION_REASONS[filled.reason] }
+  }
+
+  const finish = (target: AiTarget, name: string, kind: AiRequestKind, result: AiGenerateResult): void => {
     const notice = result.fellBack
       ? ` The selected model is unavailable, so ${result.servedModel} was used.`
       : ''
@@ -220,20 +302,26 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
       )
       return
     }
-    const applied = api.applyStatements(result.statements)
-    if (applied.ok) {
+    const applied = apply(kind, name, result.statements)
+    if ('done' in applied) {
       // Only the error tone stays until dismissed, and a substituted model must not be missed.
-      ui.showMessage(`Filled test() in ${name}.${notice}`, result.fellBack ? 'error' : 'success')
+      ui.showMessage(`${applied.done}${notice}`, result.fellBack ? 'error' : 'success')
       api.focusEditor()
       return
     }
     ui.showMessage(
-      `The result was rejected because ${REJECTION_REASONS[applied.reason]}. ${name} was not changed. ${STILL_CHARGED}${notice}`,
+      `The result was rejected because ${applied.rejected}. ${name} was not changed. ${STILL_CHARGED}${notice}`,
       'error',
     )
   }
 
-  const run = async (target: AiTarget, name: string, problemNumber: string): Promise<void> => {
+  const run = async (
+    target: AiTarget,
+    name: string,
+    problemNumber: string,
+    failingCase: string | null,
+  ): Promise<void> => {
+    const kind: AiRequestKind = failingCase === null ? 'examples' : 'case'
     let action = 'read the API key status'
     try {
       const { configured } = await api.aiStatus()
@@ -242,13 +330,14 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         ui.showMissingKey()
         return
       }
-      const context = fillableContext(target, name)
+      const context = fillableContext(target, name, kind)
       if (!context) return
 
       const problem = loadedProblem(problemNumber)
       if (!problem) return
       if (!problem.content?.trim()) {
-        ui.showMessage(`Problem #${problemNumber} has no description to read examples from.`, 'error')
+        const purpose = kind === 'case' ? 'send with the case' : 'read examples from'
+        ui.showMessage(`Problem #${problemNumber} has no description to ${purpose}.`, 'error')
         return
       }
       const javaSnippet = problem.javaSnippet?.trim() ? problem.javaSnippet : null
@@ -271,12 +360,30 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         javaSnippet,
         methodHeaders: context.methodHeaders,
         psSignatures: api.psSignatures(),
+        ...(failingCase === null ? {} : { failingCase }),
       }).finally(() => {
         if (!disposed) ui.generationFinished()
       })
-      if (!disposed) finish(target, name, result)
+      if (!disposed) finish(target, name, kind, result)
     } catch (error) {
       if (!disposed) ui.showMessage(`Could not ${action}: ${errorMessage(error)}`, 'error')
+    }
+  }
+
+  const start = async (failingCase: string | null): Promise<void> => {
+    if (disposed || requestPath !== null) return
+    const target = api.currentTarget()
+    const problemNumber = aiProblemNumber(target.path)
+    if (target.path === null || problemNumber === null) return
+    requestPath = target.path
+    requestKind = failingCase === null ? 'examples' : 'case'
+    ui.requestChanged()
+    try {
+      await run(target, sourceBasename(target.path), problemNumber, failingCase)
+    } finally {
+      requestPath = null
+      requestKind = null
+      if (!disposed) ui.requestChanged()
     }
   }
 
@@ -284,20 +391,11 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     get requestPath() {
       return requestPath
     },
-    async generate() {
-      if (disposed || requestPath !== null) return
-      const target = api.currentTarget()
-      const problemNumber = aiProblemNumber(target.path)
-      if (target.path === null || problemNumber === null) return
-      requestPath = target.path
-      ui.requestChanged()
-      try {
-        await run(target, sourceBasename(target.path), problemNumber)
-      } finally {
-        requestPath = null
-        if (!disposed) ui.requestChanged()
-      }
+    get requestKind() {
+      return requestKind
     },
+    generate: () => start(null),
+    generateCase: (failingCase) => start(failingCase),
     dispose() {
       disposed = true
     },

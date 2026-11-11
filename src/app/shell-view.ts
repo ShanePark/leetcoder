@@ -14,11 +14,13 @@ export interface ShellViewOptions {
 }
 
 export function renderShellView(root: HTMLElement, options: ShellViewOptions): void {
+  const label = (id: string): string => shortcutLabel(id, options.macPlatform)
   root.innerHTML = `
     <div class="app-shell">
       <header class="app-header">
         <div class="app-header-start">
           <button id="app-menu-button" class="icon-button app-menu-button" type="button" aria-label="Open application menu" aria-haspopup="menu" aria-expanded="false" title="Application menu"></button>
+          <button id="sidebar-toggle" class="icon-button sidebar-toggle-button keytip-anchor" type="button" aria-controls="sidebar" aria-pressed="true" aria-label="Problems" title="Problems (${label('toggle-sidebar')})"><span class="keytip" aria-hidden="true">${label('toggle-sidebar')}</span></button>
           <button id="choose-repository" class="repo-chip" type="button">
             <span id="repo-path" class="repo-chip-label">Choose repository</span>
           </button>
@@ -27,7 +29,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         <div id="daily-header" class="daily-header" role="group" aria-label="Today's problem"></div>
       </header>
       <main class="workspace">
-        <aside class="sidebar" aria-label="Problem files">
+        <aside id="sidebar" class="sidebar" aria-label="Problem files">
           <div class="sidebar-heading">
             <span class="micro-label">Problems</span>
             <span id="file-count" class="sidebar-count"></span>
@@ -104,8 +106,8 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         ><span aria-hidden="true"></span></div>
         <div class="bottom-panel-tabs">
           <div class="bottom-panel-tab-list" role="tablist" aria-label="Bottom panel">
-            <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests</button>
-            <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git<span id="git-tab-indicator" class="bottom-panel-tab-indicator" role="img" aria-label="Uncommitted or unpushed changes" title="Uncommitted or unpushed changes" hidden></span></button>
+            <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests<span class="keytip" aria-hidden="true">${label('show-tests-panel')}</span></button>
+            <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git<span id="git-tab-indicator" class="bottom-panel-tab-indicator" role="img" aria-label="Uncommitted or unpushed changes" title="Uncommitted or unpushed changes" hidden></span><span class="keytip" aria-hidden="true">${label('show-git-panel')}</span></button>
           </div>
           <div class="bottom-panel-actions" role="group" aria-label="Test actions">
             <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">${shortcutLabel('run-test-at-cursor', options.macPlatform)}</kbd></span>
@@ -154,8 +156,8 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
           <div class="git-commit-bar">
             <label class="sr-only" for="git-commit-message">Commit message</label>
             <input id="git-commit-message" type="text" autocomplete="off" spellcheck="false">
-            <button id="git-commit" class="secondary-button" type="button">Commit</button>
-            <button id="git-commit-push" class="primary-button" type="button">Commit &amp; Push</button>
+            <button id="git-commit" class="secondary-button" type="button">Commit <kbd id="git-commit-shortcut">${label('git-commit')}</kbd></button>
+            <button id="git-commit-push" class="primary-button" type="button">Commit &amp; Push <kbd id="git-commit-push-shortcut">${label('git-commit-push')}</kbd></button>
           </div>
         </section>
       </section>
@@ -355,6 +357,18 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
           <div class="discard-git-actions">
             <button id="cancel-discard-git" class="text-button" type="button">Cancel</button>
             <button id="confirm-discard-git" class="primary-button discard-git-confirm" type="submit">Discard Changes</button>
+          </div>
+        </form>
+      </div>
+      <div id="ai-case-dialog" class="dialog-backdrop" hidden>
+        <form id="ai-case-form" class="rename-file-dialog ai-case-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-case-title" aria-describedby="ai-case-message">
+          <h2 id="ai-case-title" class="rename-file-title">Add failing case</h2>
+          <p id="ai-case-message" class="discard-git-message">Paste the inputs and Expected value of a failed submission. They become a new test method in <code id="ai-case-file"></code>.</p>
+          <label class="sr-only" for="ai-case-input">Failing case</label>
+          <textarea id="ai-case-input" class="rename-file-input ai-case-input" rows="10" autocomplete="off" spellcheck="false" placeholder="nums =&#10;[2,7,11,15]&#10;target =&#10;9&#10;Expected&#10;[0,1]"></textarea>
+          <div class="rename-file-actions">
+            <button id="cancel-ai-case" class="text-button" type="button">Cancel</button>
+            <button id="confirm-ai-case" class="primary-button" type="submit">Add Test</button>
           </div>
         </form>
       </div>

@@ -1,4 +1,4 @@
-import { aiButtonPresentation } from './ai-controller'
+import { aiButtonPresentation, type AiButtonPresentation, type AiRequestKind } from './ai-controller'
 import type { AppState } from './types'
 import { gitFileName, hasPendingGitWork } from './git-helpers'
 import { updateGitCommitControls as updateGitCommitControlsView } from './git-view'
@@ -13,7 +13,9 @@ interface ShellControlsViewOptions {
   macPlatform: () => boolean
   invalidatePendingNavigation: () => void
   aiRequestPath: () => string | null
+  aiRequestKind: () => AiRequestKind | null
   aiTestStub: () => AiTestStub
+  aiCaseTestAvailable: () => boolean
 }
 
 /** Update shell controls directly without rebuilding focused editor or Git inputs. */
@@ -96,15 +98,21 @@ export class ShellControlsView {
     this.updateGitCommitControls()
   }
 
+  /** The AI button, whose action follows the open file; see `aiButtonMode`. */
   updateAiButton(): void {
-    const button = this.element<HTMLButtonElement>('#ai-generate-tests')
-    const presentation = aiButtonPresentation(
+    this.renderAiButton('#ai-generate-tests', aiButtonPresentation(
       this.state.selectedPath,
       this.options.aiRequestPath(),
+      this.options.aiRequestKind(),
       this.state.busy,
       this.state.dailyProblem,
       this.options.aiTestStub(),
-    )
+      this.options.aiCaseTestAvailable(),
+    ))
+  }
+
+  private renderAiButton(selector: string, presentation: AiButtonPresentation): void {
+    const button = this.element<HTMLButtonElement>(selector)
     if (button.dataset.icon !== presentation.icon) {
       button.dataset.icon = presentation.icon
       button.replaceChildren(iconFor(presentation.icon, presentation.busy ? 'button-icon is-spinning' : 'button-icon'))

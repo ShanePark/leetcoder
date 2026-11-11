@@ -5,12 +5,14 @@ import type {
   ProjectSearchMatch,
   PsLibraryMetadata,
 } from '../../../src/backend'
+import type { WorkspaceShortcutId } from '../../../src/shortcuts'
 
 const testMocks = vi.hoisted(() => ({
   editorInstances: [] as Array<{
     source: string
     emitChange: (source: string) => void
     triggerProjectSearch: () => void
+    triggerWorkspaceShortcut: (id: WorkspaceShortcutId) => void
     applyAiTests: (statements: readonly string[]) => unknown
     focus: () => void
     metadataUpdates: Array<PsLibraryMetadata | null>
@@ -32,6 +34,10 @@ const testMocks = vi.hoisted(() => ({
       onNavigate: (match: ProjectSearchMatch, query: string) => Promise<void>
     }
   }>,
+  paneLayouts: [] as Array<{
+    sidebarCollapsed: boolean
+    setSidebarCollapsed: ReturnType<typeof vi.fn>
+  }>,
   overlayOptions: [] as Array<{ llmSettings?: { activate: () => void } }>,
   settingsSections: [] as Array<string | undefined>,
   toasts: [] as Array<{
@@ -47,7 +53,12 @@ export { testMocks }
 vi.mock('../../../src/editor', async () => {
   // The real stub and validation code runs against the fake document, so tests
   // see the same accept and reject decisions as the editor.
-  const { listJavaMethodHeaders, planAiTestInsertion } = await import('../../../src/editor/ai-tests')
+  const {
+    findAiCaseTestSlot,
+    listJavaMethodHeaders,
+    planAiCaseTestInsertion,
+    planAiTestInsertion,
+  } = await import('../../../src/editor/ai-tests')
   const { findBareJavaTest } = await import('../../../src/editor/test-markers')
 
   class FakeJavaEditor {
@@ -58,9 +69,14 @@ vi.mock('../../../src/editor', async () => {
     private readonly callbacks: {
       onChange?: (source: string) => void
       onSearchProject?: () => void
+      onWorkspaceShortcut?: (id: WorkspaceShortcutId) => void
     }
 
-    constructor(_parent: HTMLElement, callbacks: { onChange?: (source: string) => void; onSearchProject?: () => void }) {
+    constructor(_parent: HTMLElement, callbacks: {
+      onChange?: (source: string) => void
+      onSearchProject?: () => void
+      onWorkspaceShortcut?: (id: WorkspaceShortcutId) => void
+    }) {
       this.callbacks = callbacks
       testMocks.editorInstances.push(this)
     }
@@ -77,15 +93,28 @@ vi.mock('../../../src/editor', async () => {
       return findBareJavaTest(this.source).status
     }
 
-    aiTestContext(): { stub: string; methodHeaders: string[] } {
+    aiCaseTestAvailable(): boolean {
+      return findAiCaseTestSlot(this.source) !== null
+    }
+
+    aiTestContext(): { stub: string; methodHeaders: string[]; canAddCase: boolean } {
       return {
         stub: findBareJavaTest(this.source).status,
         methodHeaders: listJavaMethodHeaders(this.source),
+        canAddCase: findAiCaseTestSlot(this.source) !== null,
       }
     }
 
     applyAiTests(statements: readonly string[]): ReturnType<typeof planAiTestInsertion> {
       const plan = planAiTestInsertion(this.source, statements)
+      if (plan.ok) {
+        this.emitChange(`${this.source.slice(0, plan.from)}${plan.insert}${this.source.slice(plan.to)}`)
+      }
+      return plan
+    }
+
+    applyAiCaseTest(statements: readonly string[]): ReturnType<typeof planAiCaseTestInsertion> {
+      const plan = planAiCaseTestInsertion(this.source, statements)
       if (plan.ok) {
         this.emitChange(`${this.source.slice(0, plan.from)}${plan.insert}${this.source.slice(plan.to)}`)
       }
@@ -113,6 +142,10 @@ vi.mock('../../../src/editor', async () => {
 
     triggerProjectSearch(): void {
       this.callbacks.onSearchProject?.()
+    }
+
+    triggerWorkspaceShortcut(id: WorkspaceShortcutId): void {
+      this.callbacks.onWorkspaceShortcut?.(id)
     }
   }
 
@@ -222,12 +255,20 @@ vi.mock('../../../src/app/tabs-view', () => ({
 }))
 
 vi.mock('../../../src/app/pane-layout', () => ({
-  createPaneLayoutController: vi.fn(() => ({
-    apply: vi.fn(),
-    applyDailyDescriptionHeight: vi.fn(),
-    applyGitFileListWidth: vi.fn(),
-    destroy: vi.fn(),
-  })),
+  createPaneLayoutController: vi.fn(() => {
+    const layout = {
+      sidebarCollapsed: false,
+      setSidebarCollapsed: vi.fn((collapsed: boolean) => {
+        layout.sidebarCollapsed = collapsed
+      }),
+      apply: vi.fn(),
+      applyDailyDescriptionHeight: vi.fn(),
+      applyGitFileListWidth: vi.fn(),
+      destroy: vi.fn(),
+    }
+    testMocks.paneLayouts.push(layout)
+    return layout
+  }),
 }))
 
 vi.mock('../../../src/app/toast-controller', () => ({
@@ -336,6 +377,7 @@ beforeEach(() => {
   testMocks.filenameMatchedPaths = []
   testMocks.testRunControllers.length = 0
   testMocks.contentSearchControllers.length = 0
+  testMocks.paneLayouts.length = 0
   testMocks.overlayOptions.length = 0
   testMocks.settingsSections.length = 0
   testMocks.toasts.length = 0

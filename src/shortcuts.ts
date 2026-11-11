@@ -41,6 +41,14 @@ export interface ShortcutKeyEvent {
 
 export type RunShortcutId = 'run-test-at-cursor' | 'run-test'
 
+/** App-level shortcuts that act on tool windows and Git wherever focus is. */
+export type WorkspaceShortcutId =
+  | 'toggle-sidebar'
+  | 'show-tests-panel'
+  | 'show-git-panel'
+  | 'git-commit'
+  | 'git-commit-push'
+
 export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
   {
     title: 'Editing',
@@ -100,6 +108,21 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
       // Alt+/ is the physical Linux twin of Cmd+/ (toggle comment). Keep the
       // shortcut list on a shifted chord so the two actions remain distinct.
       { id: 'show-shortcuts', bindings: ['Shift-Mod-/', 'Shift-Alt-/'], description: 'Show this shortcut list' },
+    ],
+  },
+  {
+    title: 'Tool windows',
+    entries: [
+      { id: 'toggle-sidebar', bindings: ['Mod-1', 'Alt-1'], description: 'Show or hide Problems' },
+      { id: 'show-tests-panel', bindings: ['Mod-4', 'Alt-4'], description: 'Show Tests' },
+      { id: 'show-git-panel', bindings: ['Mod-9', 'Alt-9'], description: 'Show Git' },
+    ],
+  },
+  {
+    title: 'Git',
+    entries: [
+      { id: 'git-commit', bindings: ['Mod-k', 'Alt-k'], description: 'Commit, or focus the commit message' },
+      { id: 'git-commit-push', bindings: ['Mod-Alt-k'], description: 'Commit and push, or focus the commit message' },
     ],
   },
 ]
@@ -192,14 +215,23 @@ export function platformShortcutBindings(id: string, macPlatform: boolean): read
   return platformBindings(entry, macPlatform)
 }
 
+/**
+ * The physical key code for a letter or digit binding. Alt/Option can compose
+ * these keys into another character, so Alt chords also match on `event.code`.
+ */
+function physicalKeyCode(key: string | undefined): string | null {
+  if (key && /^[a-z]$/i.test(key)) return `Key${key.toUpperCase()}`
+  if (key && /^[0-9]$/.test(key)) return `Digit${key}`
+  return null
+}
+
 function matchesShortcutBinding(event: ShortcutKeyEvent, binding: string): boolean {
   const parts = binding.split('-')
   const key = parts.pop()
-  const physicalKeyCode = key && /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : null
   const keyMatches = key && (
     event.key.toLowerCase() === key.toLowerCase()
     || (key === ',' && event.code === 'Comma')
-    || (event.altKey && event.code === physicalKeyCode)
+    || (event.altKey && event.code === physicalKeyCode(key))
   )
   if (!keyMatches) {
     return false
@@ -226,20 +258,20 @@ export function isFileSearchShortcut(event: ShortcutKeyEvent, macPlatform: boole
 /** Match the platform-specific shortcut that searches the open project. */
 export function isProjectSearchShortcut(event: ShortcutKeyEvent, macPlatform: boolean): boolean {
   return shortcutBindings('search-project')
-    .some((binding) => matchesProjectSearchBinding(event, binding, macPlatform))
+    .some((binding) => matchesPlatformBinding(event, binding, macPlatform))
 }
 
-function matchesProjectSearchBinding(
+/** Match a binding with `Mod` resolved to Cmd on macOS and Ctrl elsewhere. */
+function matchesPlatformBinding(
   event: ShortcutKeyEvent,
   binding: string,
   macPlatform: boolean,
 ): boolean {
   const parts = binding.split('-')
   const key = parts.pop()
-  const physicalKeyCode = key && /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : null
   const keyMatches = key && (
     event.key.toLowerCase() === key.toLowerCase()
-    || (event.altKey && event.code === physicalKeyCode)
+    || (event.altKey && event.code === physicalKeyCode(key))
   )
   if (!keyMatches) {
     return false
@@ -250,6 +282,42 @@ function matchesProjectSearchBinding(
     && event.altKey === modifiers.has('Alt')
     && event.metaKey === (modifiers.has('Cmd') || (hasMod && macPlatform))
     && event.ctrlKey === (modifiers.has('Ctrl') || (hasMod && !macPlatform))
+}
+
+const WORKSPACE_SHORTCUTS: readonly WorkspaceShortcutId[] = [
+  'toggle-sidebar',
+  'show-tests-panel',
+  'show-git-panel',
+  'git-commit',
+  'git-commit-push',
+]
+
+/**
+ * Identify a tool-window or Git shortcut from a keyboard event, using the
+ * chord this platform advertises: Cmd on macOS, Alt elsewhere, and the
+ * platform-independent `Mod-Alt-` commit-and-push chord on both.
+ */
+export function workspaceShortcutAction(
+  event: ShortcutKeyEvent,
+  macPlatform: boolean,
+): WorkspaceShortcutId | null {
+  return WORKSPACE_SHORTCUTS.find((id) => (
+    platformShortcutBindings(id, macPlatform)
+      .some((binding) => matchesPlatformBinding(event, binding, macPlatform))
+  )) ?? null
+}
+
+/** The modifier this platform's labels advertise: Cmd on macOS, Alt elsewhere. */
+export function advertisedModifierKey(macPlatform: boolean): 'Meta' | 'Alt' {
+  return macPlatform ? 'Meta' : 'Alt'
+}
+
+/** A press of the advertised modifier with no other modifier held. */
+export function isAdvertisedModifierPress(event: ShortcutKeyEvent, macPlatform: boolean): boolean {
+  return event.key === advertisedModifierKey(macPlatform)
+    && !event.shiftKey
+    && !event.ctrlKey
+    && (macPlatform ? !event.altKey : !event.metaKey)
 }
 
 /** Identify one of the fixed Ctrl run chords from a keyboard event. */

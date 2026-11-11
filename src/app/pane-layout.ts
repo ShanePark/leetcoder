@@ -19,7 +19,9 @@ import {
   readBottomPanelHeight,
   readDailyDescriptionHeight,
   readGitFileListWidth,
+  readSidebarCollapsed,
   readSidebarWidth,
+  SIDEBAR_COLLAPSED_KEY,
   SIDEBAR_WIDTH_KEY,
   windowHeight,
 } from './layout'
@@ -47,6 +49,7 @@ export class PaneLayoutController {
   private gitSplitterStartX: number | null = null
   private gitSplitterStartWidth: number | null = null
   private sidebarWidth: number
+  private sidebarCollapsedState: boolean
   private sidebarSplitterStartX: number | null = null
   private sidebarSplitterStartWidth: number | null = null
   private dailyDescriptionHeight: number
@@ -237,6 +240,7 @@ export class PaneLayoutController {
     this.bottomPanelHeight = readBottomPanelHeight(this.storage)
     this.gitFileListWidth = readGitFileListWidth(this.storage)
     this.sidebarWidth = readSidebarWidth(this.storage)
+    this.sidebarCollapsedState = readSidebarCollapsed(this.storage)
     this.dailyDescriptionHeight = readDailyDescriptionHeight(this.storage)
     this.bindEvents()
   }
@@ -251,6 +255,21 @@ export class PaneLayoutController {
 
   get sidebarWidthValue(): number {
     return this.sidebarWidth
+  }
+
+  get sidebarCollapsed(): boolean {
+    return this.sidebarCollapsedState
+  }
+
+  /** Hide the problem-files pane so the editor takes its width, or restore it. */
+  setSidebarCollapsed(collapsed: boolean): void {
+    if (collapsed === this.sidebarCollapsedState) {
+      return
+    }
+    this.sidebarCollapsedState = collapsed
+    this.handleSidebarSplitterPointerUp()
+    this.applySidebarWidth()
+    this.storage?.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? 'collapsed' : 'expanded')
   }
 
   get dailyDescriptionHeightValue(): number {
@@ -328,6 +347,12 @@ export class PaneLayoutController {
     const splitter = this.query<HTMLElement>('#sidebar-splitter')
     splitter?.setAttribute('aria-valuenow', String(width))
     splitter?.setAttribute('aria-valuemax', String(maxSidebarWidth(this.sidebarWorkspaceWidth())))
+    const collapsed = this.sidebarCollapsedState
+    workspace?.classList.toggle('is-sidebar-collapsed', collapsed)
+    const sidebar = this.query<HTMLElement>('.sidebar')
+    if (sidebar) sidebar.hidden = collapsed
+    if (splitter) splitter.hidden = collapsed
+    this.query<HTMLElement>('#sidebar-toggle')?.setAttribute('aria-pressed', String(!collapsed))
   }
 
   /** Apply only the daily-problem description height. */

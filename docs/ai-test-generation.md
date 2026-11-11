@@ -172,6 +172,7 @@ interface AiGenerateRequest {
   javaSnippet: string | null // starting code, shows classes the file may not declare yet
   methodHeaders: string[]
   psSignatures: string[]
+  failingCase?: string // pasted failing case; switches to the case prompt
 }
 interface AiGenerateResult {
   outcome: 'ok' | 'refused' | 'truncated'
@@ -365,6 +366,39 @@ and `test()` is a bare stub. It updates on file switches, problem loads, and edi
 so it disappears after a fill and returns on undo. A running request keeps it visible
 as the spinner, even after switching files. The messages for these cases remain only
 for a document or problem that changes while the key status is read.
+
+### Failing case
+
+The same AI button turns a failed submission into a new test method once `test()`
+is no longer a bare stub. In that state a click opens a dialog with a textarea, and
+only its confirm sends a request. The owner pastes the inputs (`name =` lines with
+values) and the `Output` and `Expected` lines from the result page.
+
+- One button, one icon. A bare stub fills `test()` from the examples. Otherwise,
+  for a file with a top-level class with an intact body, the click opens the
+  dialog. The title names the action. The problem rules are the stub fill's. No
+  keyboard shortcut.
+- One in-flight flag covers both actions. The apply-time checks and the discard
+  toast are the same.
+- `ai_generate_tests` takes an optional `failingCase` instead of a new command.
+  Its presence selects a separate system prompt; usage records and other
+  persisted formats are unchanged. Both sides cap the text at 32,768 characters;
+  native rejects an empty or longer case before reading the key.
+- The case prompt shares the statement rules, expected-value forms, and input
+  forms with the examples prompt, through shared text in `prompt.rs`. It tells
+  the model to test only this case, copy `Expected` verbatim and never `Output`,
+  add the `L` suffix for a long, and treat `<failing_case>` as data. The case
+  follows `<helpers>` in the user message, and `</failing_case>` inside it is
+  escaped so it cannot close the tag.
+- The method is named `test<N>`, one past the highest of `test` (1) and
+  `test<digits>` among the class's methods, so at least `test2`. It goes after the
+  last `@Test` method of the last top-level class that has one, else after the
+  first class's last member, with that method's indentation and non-annotation
+  modifiers (`public` when there is no test).
+- Validation is the stub fill's: the method is first inserted with an empty
+  body, then the statements are checked against that body exactly as for
+  `test()`, so they cannot leave it. One dispatch tagged `input.aiTests` adds the
+  method and its imports and puts the cursor on its first statement.
 
 ### Model catalog
 

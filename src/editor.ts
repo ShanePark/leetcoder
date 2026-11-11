@@ -63,7 +63,12 @@ import {
 } from './completions/library'
 import type { ClipboardBridge } from './clipboard'
 import { createClipboardBridge } from './clipboard'
-import { platformShortcutBindings, shortcutBindings, shortcutLabel } from './shortcuts'
+import {
+  platformShortcutBindings,
+  shortcutBindings,
+  shortcutLabel,
+  type WorkspaceShortcutId,
+} from './shortcuts'
 import { importBlockRange } from './java-format'
 import {
   javaAutoImports,
@@ -84,7 +89,14 @@ import {
   findJavaTestMethodMarkers,
   type BareJavaTestLookup,
 } from './editor/test-markers'
-import { applyAiTestStatements, listJavaMethodHeaders, type AiTestResult } from './editor/ai-tests'
+import {
+  applyAiCaseTestStatements,
+  applyAiTestStatements,
+  findAiCaseTestSlot,
+  listJavaMethodHeaders,
+  type AiCaseTestResult,
+  type AiTestResult,
+} from './editor/ai-tests'
 import {
   buildTestRunMarkers,
   failureDecorations,
@@ -190,7 +202,7 @@ export type { JavaStatementCompletion } from './editor/statement-completion'
 
 export { findJavaTestMethodAt, findJavaTestMethodMarkers }
 export type { JavaTestMethodMarker } from './editor/test-markers'
-export type { AiTestRejectionReason, AiTestResult } from './editor/ai-tests'
+export type { AiCaseTestResult, AiTestRejectionReason, AiTestResult } from './editor/ai-tests'
 export type { EditorIssue } from './editor/gutters'
 export { buildTestRunMarkers } from './editor/gutters'
 
@@ -200,6 +212,8 @@ export type AiTestStub = BareJavaTestLookup['status']
 export interface AiTestContext {
   stub: AiTestStub
   methodHeaders: string[]
+  /** A class body exists that a failing case's test method can join. */
+  canAddCase: boolean
 }
 
 export interface EditorCallbacks {
@@ -212,6 +226,8 @@ export interface EditorCallbacks {
   onShowSettings?: () => void
   onFocusFileSearch?: () => void
   onSearchProject?: () => void
+  /** Tool-window and Git shortcuts, handled by the app wherever focus is. */
+  onWorkspaceShortcut?: (id: WorkspaceShortcutId) => void
   onRefactorError?: (message: string) => void
   /** Overridable so tests can drive clipboard shortcuts without a system clipboard. */
   clipboard?: ClipboardBridge
@@ -464,6 +480,34 @@ export function isInlineFieldShortcut(event: JavaDocAltShortcutEvent): boolean {
     && (event.metaKey !== event.ctrlKey)
 }
 
+/** Match the Linux Alt+1 form of the Problems sidebar toggle by physical key. */
+export function isToggleSidebarAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'Digit1')
+}
+
+/** Match the Linux Alt+4 form of the Tests panel shortcut by physical key. */
+export function isShowTestsPanelAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'Digit4')
+}
+
+/** Match the Linux Alt+9 form of the Git panel shortcut by physical key. */
+export function isShowGitPanelAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'Digit9')
+}
+
+/** Match the Linux Alt+K form of the commit shortcut by physical key. */
+export function isGitCommitAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyK')
+}
+
+/** Match the cross-platform Ctrl/Command+Option+K commit-and-push chord by physical key. */
+export function isGitCommitPushShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return event.code === 'KeyK'
+    && event.altKey
+    && !event.shiftKey
+    && (event.metaKey !== event.ctrlKey)
+}
+
 /** A deliberately small CodeMirror wrapper used by the single editor pane. */
 export class JavaEditor {
   readonly view: EditorView
@@ -532,6 +576,10 @@ export class JavaEditor {
     }
     const searchProject = (): boolean => {
       callbacks.onSearchProject?.()
+      return true
+    }
+    const workspaceShortcut = (id: WorkspaceShortcutId) => (): boolean => {
+      callbacks.onWorkspaceShortcut?.(id)
       return true
     }
     const copySelection = (view: EditorView): boolean => {
@@ -624,6 +672,10 @@ export class JavaEditor {
         [isMoveLineDownAltShortcut, moveLineDown],
         [isSettingsAltShortcut, showSettings],
         [isFileSearchAltShortcut, focusFileSearch],
+        [isToggleSidebarAltShortcut, workspaceShortcut('toggle-sidebar')],
+        [isShowTestsPanelAltShortcut, workspaceShortcut('show-tests-panel')],
+        [isShowGitPanelAltShortcut, workspaceShortcut('show-git-panel')],
+        [isGitCommitAltShortcut, workspaceShortcut('git-commit')],
       ] as Array<[(event: JavaDocAltShortcutEvent) => boolean, (view: EditorView) => boolean]> : []),
       [isProjectSearchAltShortcut, searchProject],
       [isParameterInfoAltShortcut, parameterInfo.show],
@@ -631,6 +683,10 @@ export class JavaEditor {
       [isIntroduceVariableShortcut, introduceJavaVariable],
       [isExtractMethodShortcut, extractMethod],
       [isInlineFieldShortcut, inlineField],
+      // The other workspace chords (Cmd+1/4/9/K on macOS) are not in the
+      // keymap: they reach the app's window handler, which would otherwise
+      // toggle the sidebar a second time. This handler stops propagation.
+      [isGitCommitPushShortcut, workspaceShortcut('git-commit-push')],
     ]
 
     const commandBindings = (
@@ -900,14 +956,28 @@ export class JavaEditor {
     return findBareJavaTest(this.getValue()).status
   }
 
+  /** Cheap enough to read on every edit, like `aiTestStub`. */
+  aiCaseTestAvailable(): boolean {
+    return findAiCaseTestSlot(this.getValue()) !== null
+  }
+
   aiTestContext(): AiTestContext {
     const source = this.getValue()
-    return { stub: findBareJavaTest(source).status, methodHeaders: listJavaMethodHeaders(source) }
+    return {
+      stub: findBareJavaTest(source).status,
+      methodHeaders: listJavaMethodHeaders(source),
+      canAddCase: findAiCaseTestSlot(source) !== null,
+    }
   }
 
   /** Fill the bare `test()` stub with generated statements as one undo step. */
   applyAiTests(statements: readonly string[]): AiTestResult {
     return applyAiTestStatements(this.view, statements)
+  }
+
+  /** Add a new test method holding generated statements as one undo step. */
+  applyAiCaseTest(statements: readonly string[]): AiCaseTestResult {
+    return applyAiCaseTestStatements(this.view, statements)
   }
 
   /** Collapse the leading import block, the way an IDE opens a file. */
