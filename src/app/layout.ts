@@ -24,6 +24,7 @@ export const VIEWPORT_MARGIN = 8
 export const BOTTOM_PANEL_HEIGHT_KEY = 'leetcoder.bottom-panel-height'
 export const GIT_FILE_LIST_WIDTH_KEY = 'leetcoder.git-file-list-width'
 export const SIDEBAR_WIDTH_KEY = 'leetcoder.sidebar-width'
+export const SIDEBAR_COLLAPSED_KEY = 'leetcoder.sidebar-collapsed'
 export const DAILY_DESCRIPTION_HEIGHT_KEY = 'leetcoder.daily-description-height'
 export const THEME_MODE_KEY = 'leetcoder.theme-mode'
 
@@ -227,6 +228,10 @@ export function readSidebarWidth(storage: Storage | undefined): number {
   const value = storage?.getItem(SIDEBAR_WIDTH_KEY)
   const parsed = value ? Number(value) : DEFAULT_SIDEBAR_WIDTH
   return clampSidebarWidth(Number.isFinite(parsed) ? parsed : DEFAULT_SIDEBAR_WIDTH)
+}
+
+export function readSidebarCollapsed(storage: Storage | undefined): boolean {
+  return storage?.getItem(SIDEBAR_COLLAPSED_KEY) === 'collapsed'
 }
 
 export function readDailyDescriptionHeight(storage: Storage | undefined): number {

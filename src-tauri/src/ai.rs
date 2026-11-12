@@ -27,6 +27,8 @@ const PRICES_URL: &str =
 const PROVIDER_ID: &str = "anthropic";
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_USAGE_BUCKETS: usize = 64;
+/// Far above any input that fits in a statement the frontend accepts.
+const MAX_FAILING_CASE_CHARS: usize = 32_768;
 
 static PRICE_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -78,6 +80,10 @@ pub(crate) struct AiGenerateRequest {
     pub java_snippet: Option<String>,
     pub method_headers: Vec<String>,
     pub ps_signatures: Vec<String>,
+    /// A failing case pasted from the judge. When present, the statements test
+    /// only this case, for a new test method, instead of the examples.
+    #[serde(default)]
+    pub failing_case: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,11 +244,26 @@ fn record_usage(
     }
 }
 
+fn check_failing_case(case: &str) -> Result<(), String> {
+    if case.trim().is_empty() {
+        return Err("Paste a failing case first.".to_string());
+    }
+    if case.chars().count() > MAX_FAILING_CASE_CHARS {
+        return Err(format!(
+            "The failing case is longer than {MAX_FAILING_CASE_CHARS} characters."
+        ));
+    }
+    Ok(())
+}
+
 async fn generate_tests(
     base_url: &str,
     paths: &AiPaths,
     request: &AiGenerateRequest,
 ) -> Result<AiGenerateResult, String> {
+    if let Some(case) = &request.failing_case {
+        check_failing_case(case)?;
+    }
     let key = key_store::load(&paths.config)?
         .ok_or_else(|| "Add an API key in the LLM settings first.".to_string())?;
 

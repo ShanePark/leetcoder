@@ -4,6 +4,7 @@ import {
   BOTTOM_PANEL_HEIGHT_KEY,
   DAILY_DESCRIPTION_HEIGHT_KEY,
   GIT_FILE_LIST_WIDTH_KEY,
+  SIDEBAR_COLLAPSED_KEY,
   SIDEBAR_WIDTH_KEY,
   MIN_BOTTOM_PANEL_HEIGHT,
   MIN_DAILY_DESCRIPTION_HEIGHT,
@@ -55,6 +56,10 @@ class FakeElement extends FakeEventTarget {
       this.classList.values.delete(name)
     },
     contains: (name: string): boolean => this.classList.values.has(name),
+    toggle: (name: string, force: boolean): void => {
+      if (force) this.classList.values.add(name)
+      else this.classList.values.delete(name)
+    },
   }
   hidden = false
   clientWidth = 0
@@ -199,6 +204,40 @@ describe('PaneLayoutController', () => {
     expect(elements.sidebarSplitter.attributes.get('aria-valuenow')).toBe('280')
     expect(elements.description.style.values.get('--daily-description-height')).toBe('240px')
     expect(elements.descriptionHandle.attributes.get('aria-valuenow')).toBe('240')
+  })
+
+  it('collapses the sidebar, reflects it on the header toggle, keeps its width, and persists the state', () => {
+    const elements = createRoot()
+    const sidebar = elements.root.register('.sidebar')
+    const toggle = elements.root.register('#sidebar-toggle')
+    const storage = new MemoryStorage()
+    storage.setItem(SIDEBAR_WIDTH_KEY, '300')
+    const controller = new PaneLayoutController(elements.root as unknown as HTMLElement, { storage: storage as unknown as Storage })
+    controller.apply()
+
+    expect(controller.sidebarCollapsed).toBe(false)
+    expect(sidebar.hidden).toBe(false)
+    expect(toggle.attributes.get('aria-pressed')).toBe('true')
+
+    controller.setSidebarCollapsed(true)
+    expect(controller.sidebarCollapsed).toBe(true)
+    expect(elements.workspace.classList.contains('is-sidebar-collapsed')).toBe(true)
+    expect(sidebar.hidden).toBe(true)
+    expect(elements.sidebarSplitter.hidden).toBe(true)
+    expect(toggle.attributes.get('aria-pressed')).toBe('false')
+    expect(storage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('collapsed')
+
+    const restored = new PaneLayoutController(elements.root as unknown as HTMLElement, { storage: storage as unknown as Storage })
+    expect(restored.sidebarCollapsed).toBe(true)
+    restored.setSidebarCollapsed(false)
+    expect(elements.workspace.classList.contains('is-sidebar-collapsed')).toBe(false)
+    expect(sidebar.hidden).toBe(false)
+    expect(elements.sidebarSplitter.hidden).toBe(false)
+    expect(toggle.attributes.get('aria-pressed')).toBe('true')
+    expect(elements.workspace.style.values.get('--sidebar-width')).toBe('300px')
+    expect(storage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('expanded')
+    controller.destroy()
+    restored.destroy()
   })
 
   it('reclamps dimensions to resized workspaces and persists changed values', () => {

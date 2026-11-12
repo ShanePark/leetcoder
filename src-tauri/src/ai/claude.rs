@@ -448,14 +448,21 @@ pub(super) fn request_body(model_id: &str, effort_low: bool, request: &AiGenerat
     if effort_low {
         output_config["effort"] = json!("low");
     }
-    // The breakpoint ends the prefix that every request shares. Per-request text
-    // belongs in `messages`, after it: anything earlier would miss the cache.
+    let helpers_available = !request.ps_signatures.is_empty();
+    let system = if request.failing_case.is_some() {
+        prompt::case_system_prompt(helpers_available)
+    } else {
+        prompt::system_prompt(helpers_available)
+    };
+    // The breakpoint ends the prefix that every request of one mode shares.
+    // Per-request text belongs in `messages`, after it: anything earlier would
+    // miss the cache.
     json!({
         "model": model_id,
         "max_tokens": MAX_OUTPUT_TOKENS,
         "system": [{
             "type": "text",
-            "text": prompt::system_prompt(!request.ps_signatures.is_empty()),
+            "text": system,
             "cache_control": { "type": "ephemeral" },
         }],
         "messages": [{ "role": "user", "content": prompt::user_message(request) }],

@@ -18,9 +18,13 @@ import {
   isFileSearchShortcut,
   isProjectSearchShortcut,
   isSettingsShortcut,
+  advertisedModifierKey,
+  isAdvertisedModifierPress,
   runShortcutAction,
   shortcutHints,
   shortcutLabel,
+  workspaceShortcutAction,
+  type WorkspaceShortcutId,
 } from './shortcuts'
 import {
   createUpdateController,
@@ -47,6 +51,8 @@ import { ProblemSelectionController } from './app/problem-selection-controller'
 import { DocumentController } from './app/document-controller'
 import { FileOperationsController } from './app/file-operations-controller'
 import { FileDialogController } from './app/file-dialog-controller'
+import { AiCaseDialog } from './app/ai-case-dialog'
+import { sourceBasename } from './app/path-helpers'
 import { RepositoryController } from './app/repository-controller'
 import { RepositoryAccessController } from './app/repository-access-controller'
 import { ProjectContentSearchController } from './app/project-search-controller'
@@ -63,7 +69,7 @@ import {
 import { TestRunController } from './app/test-run-controller'
 import { ToastController } from './app/toast-controller'
 import { LlmSettingsController, readSelectedLlmModel } from './app/llm-settings-controller'
-import { aiFillMayTakeFocus, createAiController, psSignatures, type AiController } from './app/ai-controller'
+import { aiButtonMode, aiFillMayTakeFocus, createAiController, psSignatures, type AiController } from './app/ai-controller'
 import { OverlayController } from './app/overlay-controller'
 import {
   renderGitPanel as renderGitPanelView,
@@ -95,6 +101,8 @@ import type {
 } from './app/types'
 const APP_VERSION = '0.1.0'
 const DAILY_DESCRIPTION_KEY = 'leetcoder.daily-description'
+/** How long the advertised modifier must be held alone before keytips show. */
+const KEYTIP_DELAY_MS = 350
 
 /** The desktop application's single-window state and DOM orchestration. */
 export class LeetcoderApp {
@@ -145,12 +153,14 @@ export class LeetcoderApp {
   private readonly psLibraryController: PsLibraryController
   private psLibraryMetadata: PsLibraryMetadata | null = null
   private readonly aiController: AiController
+  private readonly aiCaseDialog: AiCaseDialog
   private readonly llmSettings: LlmSettingsController
   private readonly javaTypeMembersController: JavaTypeMembersController
   private readonly dailyProblemView: DailyProblemViewRenderer
   private readonly problemSelectionController: ProblemSelectionController
   private readonly appListeners: Array<() => void> = []
   private destroyed = false
+  private keytipTimer: ReturnType<typeof setTimeout> | null = null
   private dailyDescriptionOpen = false
   private readonly gitController: GitController
   private readonly paneLayout: PaneLayoutController
@@ -169,14 +179,22 @@ export class LeetcoderApp {
       return
     }
     const editorTarget = event.target instanceof Node && this.element('#editor').contains(event.target)
+    const workspaceAction = workspaceShortcutAction(event, currentIsMacPlatform())
+    if (workspaceAction) {
+      // The editor stops propagation for the Alt forms it handles itself, so
+      // whatever arrives here runs exactly once.
+      event.preventDefault()
+      this.runWorkspaceShortcut(workspaceAction)
+      return
+    }
     if (isProjectSearchShortcut(event, currentIsMacPlatform())) {
       event.preventDefault()
-      this.fileExplorer.focusFileSearch()
+      this.focusFileSearch()
       return
     }
     if (isFileSearchShortcut(event, currentIsMacPlatform())) {
       event.preventDefault()
-      this.fileExplorer.focusFileSearch()
+      this.focusFileSearch()
       return
     }
     if (isSettingsShortcut(event, currentIsMacPlatform())) {
@@ -235,6 +253,51 @@ export class LeetcoderApp {
     }
   }
 
+  /**
+   * Keytips show once the advertised modifier has been held alone for a
+   * moment, so chords and modifier-clicks never flash them. Any other key or
+   * a pointer press hides them. The modifier's keyup never arrives when the
+   * window loses focus mid-chord (Alt+Tab), so blur and any visibility change
+   * hide them too. Keys and pointers are watched in the capture phase because
+   * the editor stops propagation of the chords it handles.
+   */
+  private readonly handleKeytipKeydown = (event: KeyboardEvent): void => {
+    if (!isAdvertisedModifierPress(event, currentIsMacPlatform())) {
+      this.hideKeytips()
+      return
+    }
+    // A held modifier auto-repeats; keep the first press's timer.
+    if (this.keytipTimer !== null || this.keytipsShown()) {
+      return
+    }
+    this.keytipTimer = setTimeout(() => {
+      this.keytipTimer = null
+      this.element<HTMLElement>('.app-shell').classList.add('is-modifier-held')
+    }, KEYTIP_DELAY_MS)
+  }
+
+  private readonly handleKeytipKeyup = (event: KeyboardEvent): void => {
+    if (event.key === advertisedModifierKey(currentIsMacPlatform())) {
+      this.hideKeytips()
+    }
+  }
+
+  private readonly hideKeytips = (): void => {
+    this.clearKeytipTimer()
+    this.element<HTMLElement>('.app-shell').classList.remove('is-modifier-held')
+  }
+
+  private keytipsShown(): boolean {
+    return this.element<HTMLElement>('.app-shell').classList.contains('is-modifier-held')
+  }
+
+  private clearKeytipTimer(): void {
+    if (this.keytipTimer !== null) {
+      clearTimeout(this.keytipTimer)
+      this.keytipTimer = null
+    }
+  }
+
   private readonly handleWindowFocus = (): void => {
     this.handleAppVisibilityReturn()
   }
@@ -244,6 +307,7 @@ export class LeetcoderApp {
   }
 
   private readonly handleVisibilityChange = (): void => {
+    this.hideKeytips()
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
       this.gitController.clearScheduledRefresh()
       this.problemSelectionController.clearScheduledRefresh()
@@ -267,7 +331,7 @@ export class LeetcoderApp {
       event.preventDefault()
       return
     }
-    if (this.overlay.handleEscape(event)) {
+    if (this.overlay.handleEscape(event) || this.aiCaseDialog.handleEscape(event)) {
       return
     }
     this.fileDialogs.handleEscape(event)
@@ -434,10 +498,13 @@ export class LeetcoderApp {
         this.overlay.openSettingsDialog('appearance')
       },
       onFocusFileSearch: () => {
-        this.fileExplorer.focusFileSearch()
+        this.focusFileSearch()
       },
       onSearchProject: () => {
-        this.fileExplorer.focusFileSearch()
+        this.focusFileSearch()
+      },
+      onWorkspaceShortcut: (id) => {
+        this.runWorkspaceShortcut(id)
       },
       onRefactorError: (message) => this.setMessage(message, 'error'),
       requestJavaTypeMembers: typeof this.backend.inspectJavaTypeMembers === 'function'
@@ -560,8 +627,10 @@ export class LeetcoderApp {
         selectedModelId: () => readSelectedLlmModel(this.storage),
         psSignatures: () => psSignatures(this.psLibraryMetadata),
         applyStatements: (statements) => this.editor.applyAiTests(statements),
+        applyCaseStatements: (statements) => this.editor.applyAiCaseTest(statements),
         focusEditor: () => {
-          if (aiFillMayTakeFocus(this.root, this.element<HTMLElement>('#ai-generate-tests'))) this.editor.focus()
+          const button = this.element<HTMLElement>('#ai-generate-tests')
+          if (aiFillMayTakeFocus(this.root, button)) this.editor.focus()
         },
       },
       {
@@ -578,7 +647,16 @@ export class LeetcoderApp {
       macPlatform: currentIsMacPlatform,
       invalidatePendingNavigation: () => this.documentController.invalidatePendingNavigation(),
       aiRequestPath: () => this.aiController.requestPath,
+      aiRequestKind: () => this.aiController.requestKind,
       aiTestStub: () => this.editor.aiTestStub(),
+      aiCaseTestAvailable: () => this.editor.aiCaseTestAvailable(),
+    })
+    this.aiCaseDialog = new AiCaseDialog({
+      root: this.root,
+      confirm: (failingCase) => {
+        void this.aiController.generateCase(failingCase)
+      },
+      showMessage: (message, tone) => this.setMessage(message, tone),
     })
     this.bindEvents()
     this.renderAll()
@@ -636,6 +714,7 @@ export class LeetcoderApp {
     await this.prepareToClose()
     this.destroyed = true
     this.aiController.dispose()
+    this.aiCaseDialog.dispose()
     this.projectContentSearchController.dispose()
     this.psLibraryController.dispose()
     this.javaTypeMembersController.dispose()
@@ -652,6 +731,7 @@ export class LeetcoderApp {
     for (const remove of this.appListeners.splice(0)) {
       remove()
     }
+    this.clearKeytipTimer()
     this.problemSelectionController.dispose()
     this.pauseUpdatePolling()
     this.updateProgressListenerStop?.()
@@ -689,6 +769,7 @@ export class LeetcoderApp {
     this.element<HTMLElement>('#file-search-icon').append(iconFor('search', 'search-icon'))
     this.element<HTMLButtonElement>('#run-test').prepend(iconFor('play', 'button-icon'))
     this.element<HTMLElement>('#git-branch-icon').append(iconFor('gitBranch', 'button-icon'))
+    this.element<HTMLButtonElement>('#sidebar-toggle').prepend(iconFor('panelLeft', 'button-icon'))
   }
 
   private renderEditorEmptyState(): void {
@@ -744,7 +825,20 @@ export class LeetcoderApp {
       }
     })
     this.listen(this.element<HTMLButtonElement>('#ai-generate-tests'), 'click', () => {
-      void this.aiController.generate()
+      const mode = aiButtonMode(
+        this.state.selectedPath,
+        this.state.dailyProblem,
+        this.editor.aiTestStub(),
+        this.editor.aiCaseTestAvailable(),
+      )
+      if (mode === 'case') {
+        if (this.state.selectedPath && this.aiController.requestPath === null) {
+          this.aiCaseDialog.show(sourceBasename(this.state.selectedPath))
+        }
+      } else {
+        // The controller re-checks everything, so a stale click sends nothing.
+        void this.aiController.generate()
+      }
     })
     this.listen(this.element<HTMLButtonElement>('#tests-tab'), 'click', () => {
       this.selectBottomPanelTab('tests')
@@ -792,12 +886,20 @@ export class LeetcoderApp {
     this.listen(this.element<HTMLButtonElement>('#git-commit-push'), 'click', () => {
       void this.gitController.commitSelectedFiles(true)
     })
+    this.listen(this.element<HTMLButtonElement>('#sidebar-toggle'), 'click', () => {
+      this.toggleSidebar()
+    })
     this.fileDialogs.bindEvents()
+    this.aiCaseDialog.bindEvents()
     this.listen(window, 'pointerdown', this.handleContextMenuOutside)
     this.listen(window, 'keydown', this.handleContextMenuKeydown)
     this.listen(window, 'keydown', this.handleGlobalKeydown)
     this.listen(window, 'focus', this.handleWindowFocus)
     this.listen(document, 'visibilitychange', this.handleVisibilityChange)
+    this.listen(window, 'keydown', this.handleKeytipKeydown, true)
+    this.listen(window, 'pointerdown', this.hideKeytips, true)
+    this.listen(window, 'keyup', this.handleKeytipKeyup)
+    this.listen(window, 'blur', this.hideKeytips)
   }
 
   private isAppActive(): boolean {
@@ -855,6 +957,65 @@ export class LeetcoderApp {
       && !this.state.busy && !this.state.git.loading) {
       void this.gitController.refreshStatus()
     }
+  }
+
+  private runWorkspaceShortcut(id: WorkspaceShortcutId): void {
+    if (this.gitController.commitPushInProgress) {
+      return
+    }
+    switch (id) {
+      case 'toggle-sidebar':
+        this.toggleSidebar()
+        return
+      case 'show-tests-panel':
+        this.selectBottomPanelTab('tests')
+        return
+      case 'show-git-panel':
+        this.selectBottomPanelTab('git')
+        return
+      case 'git-commit':
+      case 'git-commit-push':
+        this.commitFromShortcut(id === 'git-commit-push')
+    }
+  }
+
+  /**
+   * Follow the buttons: when one is enabled (a typed message, or the default
+   * message offered as the placeholder), Commit runs from the message field
+   * and Commit & Push from anywhere, through the button so its guards apply.
+   * Otherwise both bring the message field forward.
+   */
+  private commitFromShortcut(push: boolean): void {
+    const input = this.element<HTMLInputElement>('#git-commit-message')
+    const button = this.element<HTMLButtonElement>(push ? '#git-commit-push' : '#git-commit')
+    const inMessageField = input.ownerDocument.activeElement === input
+    if (!button.disabled && (push || inMessageField)) {
+      button.click()
+      return
+    }
+    this.selectBottomPanelTab('git')
+    input.focus()
+  }
+
+  private toggleSidebar(): void {
+    const collapse = !this.paneLayout.sidebarCollapsed
+    const active = this.root.ownerDocument.activeElement
+    const focusInSidebar = collapse && active instanceof Node
+      && this.element<HTMLElement>('.sidebar').contains(active)
+    this.paneLayout.setSidebarCollapsed(collapse)
+    if (focusInSidebar) {
+      // Hiding the focused control would drop focus to the document body.
+      if (this.state.selectedPath) this.editor.focus()
+      else this.element<HTMLButtonElement>('#sidebar-toggle').focus()
+    }
+  }
+
+  /** The search field lives in the sidebar, so a collapsed sidebar opens first. */
+  private focusFileSearch(): void {
+    if (this.paneLayout.sidebarCollapsed) {
+      this.paneLayout.setSidebarCollapsed(false)
+    }
+    this.fileExplorer.focusFileSearch()
   }
 
   /**
@@ -1078,15 +1239,17 @@ export class LeetcoderApp {
     target: Window,
     type: K,
     listener: (event: WindowEventMap[K]) => void,
+    capture?: boolean,
   ): void
   private listen(
     target: EventTarget,
     type: string,
     listener: (event: Event) => void,
+    capture = false,
   ): void {
     const bound = listener as EventListener
-    target.addEventListener(type, bound)
-    this.appListeners.push(() => target.removeEventListener(type, bound))
+    target.addEventListener(type, bound, capture)
+    this.appListeners.push(() => target.removeEventListener(type, bound, capture))
   }
 
   private element<T extends HTMLElement>(selector: string): T {

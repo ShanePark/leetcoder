@@ -242,6 +242,11 @@ export interface AiGenerateRequest {
   javaSnippet: string | null
   methodHeaders: string[]
   psSignatures: string[]
+  /**
+   * A failing case pasted from the judge. When present, the statements test only
+   * this case, for a new test method, instead of the problem's examples.
+   */
+  failingCase?: string
 }
 
 export interface AiGenerateResult {

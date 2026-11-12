@@ -30,6 +30,12 @@ const CONSTANT_NODES = new Set([
   '(', ')', '?', ':', 'true', 'false', 'LineComment', 'BlockComment',
 ])
 
+function parameterScope(parameter: Node): Node | null {
+  const callable = nearestAncestor(parameter, new Set(['MethodDeclaration', 'ConstructorDeclaration', 'LambdaExpression']))
+  return callable?.name === 'LambdaExpression' ? callable
+    : callable?.getChild('Block') ?? callable?.getChild('ConstructorBody') ?? null
+}
+
 function bindingFor(definition: Node, source: string): Binding | null {
   const parent = definition.parent
   if (!parent) return null
@@ -46,11 +52,11 @@ function bindingFor(definition: Node, source: string): Binding | null {
       scope = declaration.parent?.name === 'ForSpec' ? declaration.parent.parent
         : nearestAncestor(declaration.parent, new Set(['Block', 'SwitchBlock', 'ConstructorBody']))
       start = definition.from
+    } else if (declaration.name === 'SpreadParameter') {
+      scope = parameterScope(declaration)
     }
-  } else if (['FormalParameter', 'SpreadParameter'].includes(parent.name)) {
-    const callable = nearestAncestor(parent, new Set(['MethodDeclaration', 'ConstructorDeclaration', 'LambdaExpression']))
-    scope = callable?.name === 'LambdaExpression' ? callable
-      : callable?.getChild('Block') ?? callable?.getChild('ConstructorBody') ?? null
+  } else if (parent.name === 'FormalParameter') {
+    scope = parameterScope(parent)
   } else if (parent.name === 'ForSpec' && parent.parent?.name === 'EnhancedForStatement') {
     scope = children(parent.parent).find((node) => node.from >= parent.to) ?? null
   } else if (parent.name === 'CatchFormalParameter') {
@@ -65,7 +71,8 @@ function bindingFor(definition: Node, source: string): Binding | null {
   }
   if (!scope) return null
   const type = children(declaration).find((node) => TYPE_NODES.has(node.name))
-  return { definition, scope, start: start ?? scope.from, field, type: type ? source.slice(type.from, type.to) : null }
+  const typeText = type ? source.slice(type.from, type.to) + (declaration.name === 'SpreadParameter' ? '[]' : '') : null
+  return { definition, scope, start: start ?? scope.from, field, type: typeText }
 }
 
 function nameOf(source: string, binding: Binding): string {
@@ -106,6 +113,11 @@ function constantType(
     return member?.name === 'Identifier' ? referenceType?.(member) ?? null : null
   }
   if (node.name === 'MethodInvocation') return methodType?.(node) ?? null
+  if (node.name === 'ArrayAccess') {
+    const array = children(node)[0]
+    const arrayType = array ? constantType(source, array, referenceType, methodType)?.replace(/\s+/g, '') : null
+    return arrayType?.endsWith('[]') ? arrayType.slice(0, -2) : null
+  }
   if (node.name === 'IntegerLiteral') return /[lL]$/.test(text) ? 'long' : 'int'
   if (node.name === 'FloatingPointLiteral') return /[fF]$/.test(text) ? 'float' : 'double'
   if (node.name === 'CharacterLiteral') return 'char'
@@ -285,6 +297,8 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   ].includes(definition.parent?.name ?? '')).map((definition) => source.slice(definition.from, definition.to)))
   const imports = nodes.filter((node) => node.name === 'ImportDeclaration')
     .map((node) => source.slice(node.from, node.to).replace(/\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, ''))
+  // The JDK defines no other Math or String, so its wildcard imports cannot change those names.
+  const foreignWildcard = (imported: string): boolean => imported.endsWith('.*') && !imported.startsWith('java.')
   const inheritedNamesPossible = (node: Node): boolean => {
     for (let ancestor: Node | null = node; ancestor; ancestor = ancestor.parent) {
       if (!CLASS_BODIES.has(ancestor.name) || !ancestor.parent) continue
@@ -293,6 +307,36 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     }
     return false
   }
+  const standardMath = (receiver: string, invocation: Node): boolean => {
+    const rootName = receiver === 'java.lang.Math' ? 'java' : 'Math'
+    if (lexicalBinding(source, bindings, rootName, invocation.from) || sourceTypeNames.has(rootName)
+      || inheritedNamesPossible(invocation)) return false
+    return !imports.some((text) => {
+      if (text.startsWith('importstatic')) return text.endsWith(`.${rootName};`) || text.endsWith('.*;')
+      const imported = text.slice('import'.length, -1)
+      if (receiver === 'java.lang.Math') return imported.endsWith('.java')
+      return (imported.endsWith('.Math') && imported !== 'java.lang.Math') || foreignWildcard(imported)
+    })
+  }
+  // Only a non-zero literal divisor keeps the division from throwing wherever it is moved.
+  const unsafeDivision = (op: Node): boolean => {
+    if (op.name !== 'ArithOp' || !['/', '%'].includes(source.slice(op.from, op.to))) return false
+    const divisor = children(op.parent!).find((part) => part.from >= op.to && !['LineComment', 'BlockComment'].includes(part.name))
+    if (divisor?.name === 'FloatingPointLiteral') return false
+    return divisor?.name !== 'IntegerLiteral'
+      || !/[1-9a-f]/i.test(source.slice(divisor.from, divisor.to).replace(/^0[xb]/i, '').replace(/_/g, ''))
+  }
+  const writesTo = (binding: Binding, ignored?: (reference: Node) => boolean): boolean => nodes.some((reference) => {
+    if (!identifierReference(reference) || source.slice(reference.from, reference.to) !== nameOf(source, binding)
+      || ignored?.(reference)) return false
+    const referenceBinding = resolve(reference)
+    if (referenceBinding !== 'ambiguous' && referenceBinding?.definition.from !== binding.definition.from) return false
+    let expression = reference.parent?.name === 'FieldAccess' && children(reference.parent).at(-1)?.from === reference.from
+      ? reference.parent : reference
+    while (expression.parent?.name === 'ParenthesizedExpression') expression = expression.parent
+    return expression.parent?.name === 'UpdateExpression'
+      || (expression.parent?.name === 'AssignmentExpression' && children(expression.parent)[0]?.from === expression.from)
+  })
   const canMoveToAdjacentArgument = (): boolean => {
     if (target.field || ['String', 'java.lang.String'].includes(type)
       || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1
@@ -347,17 +391,8 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     const value = children(variableNode).find((part) => part.from > binding.definition.to && part.name !== 'AssignOp'
       && !['LineComment', 'BlockComment'].includes(part.name))
     if (!value || !children(variableNode).some((part) => part.name === 'AssignOp')
-      || descendants(value).some((part) => part.name === 'ArithOp' && ['/', '%'].includes(source.slice(part.from, part.to)))) return false
-    if (nodes.some((reference) => {
-      if (!identifierReference(reference) || source.slice(reference.from, reference.to) !== nameOf(source, binding)) return false
-      const referenceBinding = resolve(reference)
-      if (referenceBinding !== 'ambiguous' && referenceBinding?.definition.from !== binding.definition.from) return false
-      let expression = reference.parent?.name === 'FieldAccess' && children(reference.parent).at(-1)?.from === reference.from
-        ? reference.parent : reference
-      while (expression.parent?.name === 'ParenthesizedExpression') expression = expression.parent
-      return expression.parent?.name === 'UpdateExpression'
-        || (expression.parent?.name === 'AssignmentExpression' && children(expression.parent)[0]?.from === expression.from)
-    })) return false
+      || descendants(value).some(unsafeDivision)) return false
+    if (writesTo(binding)) return false
     const next = new Set(visiting).add(binding.definition.from)
     const result = stableExpression(value, next)
     if (!result) return false
@@ -382,9 +417,25 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     const binding = resolve(reference)
     return Boolean(binding && binding !== 'ambiguous' && constantResults.get(binding.definition.from))
   })
+  // Calls that only read a String or compute a standard Math result; returns their arguments.
+  const pureCallArguments = (invocation: Node): Node[] | null => {
+    const method = invocation.getChild('MethodName')
+    const argumentsNode = invocation.getChild('ArgumentList')
+    if (!method || !argumentsNode) return null
+    const name = source.slice(method.from, method.to)
+    const values = children(argumentsNode).filter((part) => !['(', ')', ',', 'LineComment', 'BlockComment'].includes(part.name))
+    const receiver = source.slice(invocation.from, method.from).replace(/\s|\.$/g, '')
+    if (['Math', 'java.lang.Math'].includes(receiver) && standardMath(receiver, invocation)) {
+      return (name === 'abs' && values.length === 1) || (['min', 'max'].includes(name) && values.length === 2) ? values : null
+    }
+    const parts = children(invocation)
+    if (parts[0]?.name !== 'Identifier' || parts[1]?.name !== '.' || !standardStringReceiver(parts[0])) return null
+    return (name === 'length' && values.length === 0) || (name === 'charAt' && values.length === 1) ? values : null
+  }
   // Reads of locals, parameters, array elements, and array lengths; evaluating them cannot change program state.
-  const effectFreeRead = (node: Node): boolean => {
+  const readsOnly = (node: Node, calls: boolean): boolean => {
     if (['LineComment', 'BlockComment'].includes(node.name)) return true
+    if (calls && node.name === 'MethodInvocation') return pureCallArguments(node)?.every((part) => readsOnly(part, calls)) ?? false
     if (node.name === 'Identifier') {
       const binding = resolve(node)
       return Boolean(binding && binding !== 'ambiguous' && !binding.field
@@ -394,10 +445,168 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
       const parts = children(node)
       const member = parts.at(-1)
       return parts.length === 3 && parts[1].name === '.' && member?.name === 'Identifier'
-        && source.slice(member.from, member.to) === 'length' && effectFreeRead(parts[0])
+        && source.slice(member.from, member.to) === 'length' && readsOnly(parts[0], calls)
     }
-    if (node.name === 'ArithOp' && ['/', '%'].includes(source.slice(node.from, node.to))) return false
-    return (CONSTANT_NODES.has(node.name) || ['ArrayAccess', '[', ']'].includes(node.name)) && children(node).every(effectFreeRead)
+    if (node.name === 'ArithOp' && ['/', '%'].includes(source.slice(node.from, node.to))) return calls && !unsafeDivision(node)
+    return (CONSTANT_NODES.has(node.name) || ['ArrayAccess', '[', ']'].includes(node.name)) && children(node).every((part) => readsOnly(part, calls))
+  }
+  const effectFreeRead = (node: Node): boolean => readsOnly(node, false)
+  const targetReferences = (): Node[] => nodes.filter((part) => identifierReference(part) && source.slice(part.from, part.to) === name
+    && resolve(part) === target)
+  const sameNode = (left: Node, right: Node): boolean => left.from === right.from && left.to === right.to && left.name === right.name
+  const nextStatementAfterDeclaration = (statement: Node): boolean => {
+    const siblings = children(declaration.parent!).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
+    return statement.parent?.from === declaration.parent?.from
+      && siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]?.from === statement.from
+  }
+  // Whatever the statement evaluates before the use must not be able to change what the moved reads see.
+  const onlyReadsBeforeUse = (reference: Node, statement: Node, isAllowed: (part: Node, parent: Node) => boolean): boolean => {
+    for (let current = reference; !sameNode(current, statement); current = current.parent!) {
+      const parent = current.parent!
+      if (!children(parent).filter((part) => part.to <= current.from).every((part) => isAllowed(part, parent))) return false
+    }
+    return true
+  }
+  const quietDeclarator = (declarator: Node): boolean => children(declarator)
+    .filter((child) => !['Definition', 'AssignOp', 'Dimension', 'LineComment', 'BlockComment'].includes(child.name))
+    .every((value) => effectFreeRead(value) || (value.name === 'ArrayCreationExpression' && !value.getChild('ArrayInitializer')
+      && children(value).filter((child) => child.name === 'Dimension').every((dimension) => children(dimension).every(effectFreeRead))))
+  const quietDeclaration = (declared: Node): boolean => children(declared).filter((part) => part.name === 'VariableDeclarator').every(quietDeclarator)
+  const allowedBeforeMovedRead = (part: Node, parent: Node): boolean => {
+    if (['(', ')', ',', '.', ';', '{', 'return', 'this', 'new', 'if', 'for', 'while', 'MethodName', 'AssignOp', 'UpdateOp', 'Definition', 'Modifiers'].includes(part.name)) return true
+    if (TYPE_NODES.has(part.name)) {
+      // Creating a source type can run its static initializer before the moved read.
+      return parent.name !== 'ObjectCreationExpression' || !sourceTypeNames.has(source.slice(part.from, part.to).split('<')[0].trim())
+    }
+    if (part.name === 'Dimension') return children(part).every(effectFreeRead)
+    if (part.name === 'LocalVariableDeclaration') return quietDeclaration(part)
+    if (part.name === 'VariableDeclarator') return sameNode(parent, declaration) || quietDeclarator(part)
+    if (parent.name === 'MethodInvocation' && part.from === parent.from) {
+      const receiver = source.slice(part.from, part.to).replace(/\s/g, '')
+      if (['Math', 'java.lang.Math'].includes(receiver) && standardMath(receiver, parent)) return true
+    }
+    return readsOnly(part, true)
+  }
+  const USE_CONTEXTS = new Set([
+    'ArgumentList', 'ArrayAccess', 'ArrayCreationExpression', 'ArrayInitializer', 'AssignmentExpression', 'BinaryExpression',
+    'CastExpression', 'Dimension', 'ExpressionStatement', 'FieldAccess', 'IfStatement', 'InstanceofExpression',
+    'LocalVariableDeclaration', 'MethodInvocation', 'ObjectCreationExpression', 'ParenthesizedExpression', 'ReturnStatement',
+    'TernaryExpression', 'UnaryExpression', 'UpdateExpression', 'VariableDeclarator',
+  ])
+  // True only when running the statement always evaluates this use.
+  const runsWithStatement = (reference: Node, statement: Node, repeatable: boolean): boolean => {
+    for (let current = reference; !sameNode(current, statement); current = current.parent!) {
+      const parent = current.parent
+      if (!parent) return false
+      if (repeatable && parent.name === 'WhileStatement') {
+        if (current.name !== 'ParenthesizedExpression') return false
+        continue
+      }
+      if (repeatable && parent.name === 'ForStatement') {
+        if (current.name !== 'ForSpec') return false
+        continue
+      }
+      if (repeatable && parent.name === 'ForSpec') {
+        // Initializer and first condition always run; the update clause does not.
+        const lastSemicolon = children(parent).filter((part) => part.name === ';').at(-1)
+        if (lastSemicolon && current.from >= lastSemicolon.to) return false
+        continue
+      }
+      if (!USE_CONTEXTS.has(parent.name)) return false
+      const first = children(parent).find((part) => !['LineComment', 'BlockComment'].includes(part.name))
+      if ((parent.name === 'TernaryExpression' || (parent.name === 'BinaryExpression' && children(parent).some((part) => part.name === 'LogicOp')))
+        && first?.from !== current.from) return false
+      if (parent.name === 'IfStatement' && current.name !== 'ParenthesizedExpression') return false
+      if (parent.name === 'AssignmentExpression') {
+        const assignOp = parent.getChild('AssignOp')
+        if (parent.parent?.name !== 'ExpressionStatement' || !assignOp || assignOp.to > current.from
+          || (!repeatable && source.slice(assignOp.from, assignOp.to) !== '=')) return false
+      }
+      if (parent.name === 'UpdateExpression' && (current.name !== 'ArrayAccess' || parent.parent?.name !== 'ExpressionStatement')) return false
+    }
+    return true
+  }
+  // Reads of a local computed by a call or a nested write stay refused, as for other dependency initializers.
+  const computedByEffect = (binding: Binding): boolean => {
+    const value = binding.definition.parent
+    return value?.name === 'VariableDeclarator' && descendants(value).some((part) =>
+      (part.name === 'MethodInvocation' && !pureCallArguments(part))
+      || ['ObjectCreationExpression', 'AssignmentExpression', 'UpdateExpression'].includes(part.name))
+  }
+  // An enclosing for header runs between iterations, never while the declaring block is active.
+  const changesDuringDeclaration = (binding: Binding): boolean => writesTo(binding, (reference) => {
+    const forSpec = nearestAncestor(reference, new Set(['ForSpec']))
+    return Boolean(forSpec?.parent?.name === 'ForStatement' && forSpec.to <= declaration.from && declaration.to <= forSpec.parent.to)
+  })
+  const canMoveReadToNextStatement = (): boolean => {
+    if (target.field || ['String', 'java.lang.String'].includes(type)
+      || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1
+      || !readsOnly(initializer, true)) return false
+    if (descendants(initializer).filter(identifierReference).some((reference) => {
+      const binding = resolve(reference)
+      return binding && binding !== 'ambiguous' && computedByEffect(binding)
+    })) return false
+    const references = targetReferences()
+    if (references.length !== 1) return false
+    let statement = references[0]
+    while (statement.parent && !sameNode(statement.parent, declaration.parent!)) statement = statement.parent
+    return nextStatementAfterDeclaration(statement) && runsWithStatement(references[0], statement, false)
+      && onlyReadsBeforeUse(references[0], statement, allowedBeforeMovedRead)
+  }
+  const immutableRead = (node: Node): boolean => {
+    if (['LineComment', 'BlockComment'].includes(node.name)) return true
+    if (node.name === 'Identifier') {
+      const binding = resolve(node)
+      if (!binding || binding === 'ambiguous' || binding.field || binding.definition.from === target.definition.from
+        || !/^(?:byte|short|int|long|float|double|char|boolean)$/.test(binding.type?.trim() ?? '')
+        || source.slice(binding.definition.to, binding.definition.parent?.to).match(/^\s*\[/)) return false
+      return !computedByEffect(binding) && !changesDuringDeclaration(binding)
+        && reliable(binding.definition) && understoodOccurrences(nameOf(source, binding), { from: binding.scope.from, to: binding.scope.to })
+    }
+    if (node.name === 'FieldAccess') {
+      const parts = children(node)
+      const member = parts.at(-1)
+      const binding = parts[0]?.name === 'Identifier' ? resolve(parts[0]) : null
+      return parts.length === 3 && member?.name === 'Identifier' && source.slice(member.from, member.to) === 'length'
+        && Boolean(binding && binding !== 'ambiguous' && !binding.field && arrayBinding(binding)
+          && reliable(binding.definition) && !writesTo(binding))
+    }
+    if (node.name === 'MethodInvocation') return pureCallArguments(node)?.every(immutableRead) ?? false
+    if (unsafeDivision(node)) return false
+    return CONSTANT_NODES.has(node.name) && children(node).every(immutableRead)
+  }
+  const arrayBinding = (binding: Binding): boolean => Boolean(binding.type?.trim().endsWith('[]'))
+    || Boolean(source.slice(binding.definition.to, binding.definition.parent?.to).match(/^\s*\[/))
+  // Array lengths and String contents cannot change, so any number of uses read the same value.
+  const canRepeatImmutableRead = (): boolean => {
+    if (target.field || ['String', 'java.lang.String'].includes(type) || !immutableRead(initializer)) return false
+    const references = targetReferences()
+    if (references.some((reference) => {
+      for (let current = reference; current.parent; current = current.parent) {
+        if (current.parent.name === 'AssignmentExpression' && children(current.parent)[0]?.from === current.from) return true
+      }
+      return false
+    })) return false
+    // A use captured by a lambda or class needs every read to stay effectively final after inlining.
+    const captured = references.some((reference) => nearestAncestor(reference, new Set(['LambdaExpression', 'ClassBody']))?.from !== nearestAncestor(variable, new Set(['LambdaExpression', 'ClassBody']))?.from)
+    if (captured && descendants(initializer).filter(identifierReference).some((reference) => {
+      const binding = resolve(reference)
+      return binding && binding !== 'ambiguous' && writesTo(binding)
+    })) return false
+    const mayThrow = descendants(initializer).some((part) => part.name === 'FieldAccess'
+      || (part.name === 'MethodInvocation' && !['Math', 'java.lang.Math'].includes(source.slice(part.from, part.getChild('MethodName')?.from ?? part.from).replace(/\s|\.$/g, ''))))
+    if (!mayThrow || references.length === 0) return true
+    // The first use must repeat the failing read before anything observable can run.
+    const first = references.reduce((earliest, reference) => reference.from < earliest.from ? reference : earliest)
+    let statement = first
+    while (statement.parent && !sameNode(statement.parent, declaration.parent!)) statement = statement.parent
+    const siblings = children(declaration.parent!).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
+    const between = siblings.slice(siblings.findIndex((part) => part.from === declaration.from) + 1, siblings.findIndex((part) => part.from === statement.from))
+    const laterDeclarators = children(declaration).filter((part) => part.name === 'VariableDeclarator' && part.from > variable.from
+      && (!sameNode(statement, declaration) || part.to <= first.from))
+    if (!between.every((part) => part.name === 'LocalVariableDeclaration' && quietDeclaration(part))
+      || !laterDeclarators.every(quietDeclarator)) return false
+    return runsWithStatement(first, statement, true) && onlyReadsBeforeUse(first, statement, allowedBeforeMovedRead)
   }
   const canMoveArrayInitializer = (): boolean => {
     if (!arrayType || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1) return false
@@ -419,8 +628,7 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     } else if (!array) return false
     if (array && !children(array).filter((part) => !['{', '}', ',', 'LineComment', 'BlockComment'].includes(part.name))
       .every((part) => stableExpression(part, new Set([target.definition.from])))) return false
-    const references = nodes.filter((part) => identifierReference(part) && source.slice(part.from, part.to) === name
-      && resolve(part) === target)
+    const references = targetReferences()
     if (references.length !== 1) return false
     const reference = references[0]
     let context: Node | null = reference
@@ -433,16 +641,27 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     const statement = context
     // Sized dimensions read runtime values, so only effect-free reads may run before the moved allocation.
     // On failure paths the allocation's exception may now follow, for example, an index exception from those reads.
-    if (sized) {
-      for (let current = reference; current.from !== statement.from || current.name !== statement.name; current = current.parent!) {
-        if (!children(current.parent!).filter((part) => part.to <= current.from).every((part) =>
-          ['(', ')', ',', '.', 'return', 'this', 'MethodName'].includes(part.name) || effectFreeRead(part))) return false
-      }
-    }
-    const siblings = children(declaration.parent!).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
+    if (sized && !onlyReadsBeforeUse(reference, statement, (part) =>
+      ['(', ')', ',', '.', 'return', 'this', 'MethodName'].includes(part.name) || effectFreeRead(part))) return false
     // A single unconditional use in the next statement keeps one allocation in the same execution path.
-    return statement.parent?.from === declaration.parent?.from
-      && siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]?.from === statement.from
+    return nextStatementAfterDeclaration(statement)
+  }
+  const standardStringReceiver = (receiver: Node): Binding | null => {
+    const binding = resolve(receiver)
+    if (!binding || binding === 'ambiguous' || binding.field || !binding.type
+      || !['String', 'java.lang.String'].includes(binding.type.trim())
+      || source.slice(binding.definition.to, binding.definition.parent?.to).match(/^\s*\[/)
+      || !reliable(binding.definition.parent!)
+      || !understoodOccurrences(nameOf(source, binding), { from: binding.scope.from, to: binding.scope.to })) return null
+    const rootName = binding.type.trim() === 'String' ? 'String' : 'java'
+    if (sourceTypeNames.has(rootName) || inheritedNamesPossible(binding.definition)
+      || imports.some((text) => {
+        if (text.startsWith('importstatic')) return text.endsWith(`.${rootName};`) || text.endsWith('.*;')
+        const imported = text.slice('import'.length, -1)
+        return rootName === 'java' ? imported.endsWith('.java')
+          : (imported.endsWith('.String') && imported !== 'java.lang.String') || foreignWildcard(imported)
+      })) return null
+    return writesTo(binding) ? null : binding
   }
   const stableStringLengthReceiver = (): Binding | null => {
     if (target.field || arrayType || initializer.name !== 'MethodInvocation'
@@ -453,31 +672,8 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     if (receiver?.name !== 'Identifier' || children(initializer)[1]?.name !== '.'
       || !method || source.slice(method.from, method.to) !== 'length'
       || !argumentsNode || children(argumentsNode).some((part) => !['(', ')', 'LineComment', 'BlockComment'].includes(part.name))) return null
-    const binding = resolve(receiver)
-    if (!binding || binding === 'ambiguous' || binding.field || !binding.type
-      || !['String', 'java.lang.String'].includes(binding.type.trim())
-      || binding.definition.parent?.name === 'SpreadParameter'
-      || source.slice(binding.definition.to, binding.definition.parent?.to).match(/^\s*\[/)
-      || !reliable(binding.definition.parent!)
-      || !understoodOccurrences(nameOf(source, binding), { from: binding.scope.from, to: binding.scope.to })) return null
-    const rootName = binding.type.trim() === 'String' ? 'String' : 'java'
-    if (sourceTypeNames.has(rootName) || inheritedNamesPossible(binding.definition)
-      || imports.some((text) => {
-        if (text.startsWith('importstatic')) return text.endsWith(`.${rootName};`) || text.endsWith('.*;')
-        const imported = text.slice('import'.length, -1)
-        return rootName === 'java' ? imported.endsWith('.java')
-          : (imported.endsWith('.String') && imported !== 'java.lang.String')
-            || (imported.endsWith('.*') && imported !== 'java.lang.*')
-      })) return null
-    if (nodes.some((reference) => {
-      if (!identifierReference(reference) || source.slice(reference.from, reference.to) !== nameOf(source, binding)) return false
-      const resolvedReference = resolve(reference)
-      if (resolvedReference !== 'ambiguous' && resolvedReference?.definition.from !== binding.definition.from) return false
-      let expression = reference
-      while (expression.parent?.name === 'ParenthesizedExpression') expression = expression.parent
-      return expression.parent?.name === 'UpdateExpression'
-        || (expression.parent?.name === 'AssignmentExpression' && children(expression.parent)[0]?.from === expression.from)
-    })) return null
+    const binding = standardStringReceiver(receiver)
+    if (!binding) return null
     const siblings = children(declaration.parent!).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
     const next = siblings[siblings.findIndex((part) => part.from === declaration.from) + 1]
     const nextVariable = next?.name === 'LocalVariableDeclaration' ? next.getChild('VariableDeclarator') : null
@@ -495,7 +691,7 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   }
   const lengthReceiver = stableStringLengthReceiver()
   const stableInitializer = Boolean(lengthReceiver) || stableExpression(initializer, new Set([target.definition.from]))
-  if (!stableInitializer && (dependencySyntaxError || !(arrayType ? canMoveArrayInitializer() : canMoveToAdjacentArgument()))) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
+  if (!stableInitializer && (dependencySyntaxError || !(arrayType ? canMoveArrayInitializer() : canMoveToAdjacentArgument() || canMoveReadToNextStatement() || canRepeatImmutableRead()))) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
   const initializerConstant = !lengthReceiver && stableInitializer && compileConstant(initializer)
   if (!initializerConstant && ['String', 'java.lang.String'].includes(type)) return { reason: 'A runtime String initializer cannot be duplicated safely.' }
   for (const reference of descendants(initializer).filter(identifierReference)) {
@@ -504,7 +700,7 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   }
   const modifiers = declaration.getChild('Modifiers')
   const modifierNames = new Set(modifiers ? children(modifiers).map((node) => node.name) : [])
-  if (descendants(initializer).some((node) => node.name === 'ArithOp' && ['/', '%'].includes(source.slice(node.from, node.to)))) {
+  if (descendants(initializer).some(unsafeDivision)) {
     return { reason: 'A division or remainder initializer cannot be proven safe.' }
   }
   const isStatic = modifierNames.has('static')
@@ -526,6 +722,13 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     return { reason: 'String variables must be final to inline safely.' }
   }
   const referenceType = (reference: Node): string | null => {
+    if (reference.parent?.name === 'FieldAccess' && children(reference.parent).at(-1)?.from === reference.from
+      && source.slice(reference.from, reference.to) === 'length') {
+      const owner = children(reference.parent)[0]
+      const ownerBinding = owner.name === 'Identifier' ? resolve(owner) : null
+      if (ownerBinding && ownerBinding !== 'ambiguous' && !ownerBinding.field && arrayBinding(ownerBinding)) return 'int'
+      return constantType(source, owner, referenceType, methodType)?.endsWith('[]') ? 'int' : null
+    }
     const binding = resolve(reference)
     if (!binding || binding === 'ambiguous'
       || source.slice(binding.definition.to, binding.definition.parent?.to).match(/^\s*\[/)) return null
@@ -541,18 +744,6 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     }
     return binding.type?.trim().replace(/^java\.lang\.String$/, 'String') ?? null
   }
-  const standardMath = (receiver: string, invocation: Node): boolean => {
-    const rootName = receiver === 'java.lang.Math' ? 'java' : 'Math'
-    if (lexicalBinding(source, bindings, rootName, invocation.from) || sourceTypeNames.has(rootName)
-      || inheritedNamesPossible(invocation)) return false
-    return !imports.some((text) => {
-      if (text.startsWith('importstatic')) return text.endsWith(`.${rootName};`) || text.endsWith('.*;')
-      const imported = text.slice('import'.length, -1)
-      if (receiver === 'java.lang.Math') return imported.endsWith('.java')
-      return (imported.endsWith('.Math') && imported !== 'java.lang.Math')
-        || (imported.endsWith('.*') && imported !== 'java.lang.*')
-    })
-  }
   const methodType = (invocation: Node): string | null => {
     const parts = children(invocation)
     const methodName = parts.find((part) => part.name === 'MethodName')
@@ -560,11 +751,11 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     const name = source.slice(methodName.from, methodName.to)
     const receiver = source.slice(invocation.from, methodName.from).trim().replace(/\.\s*$/, '').replace(/\s/g, '')
     if ((receiver === 'Math' || receiver === 'java.lang.Math') && standardMath(receiver, invocation)
-      && (name === 'min' || name === 'max')) {
+      && ['min', 'max', 'abs'].includes(name)) {
       const argumentsNode = invocation.getChild('ArgumentList')
       const arguments_ = argumentsNode ? children(argumentsNode)
         .filter((part) => EXPRESSION_NODES.has(part.name) || part.name === 'FieldAccess') : []
-      if (arguments_.length !== 2) return null
+      if (arguments_.length !== (name === 'abs' ? 1 : 2)) return null
       const unboxedMathArgument = (argument: Node): string | null => {
         const argumentType = constantType(source, argument, referenceType, methodType)
         if (!argumentType) return null
@@ -579,14 +770,17 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
           if (text.startsWith('importstatic')) return text.endsWith(`.${rootName};`) || text.endsWith('.*;')
           const imported = text.slice('import'.length, -1)
           return rootName === 'java' ? imported.endsWith('.java')
-            : (imported.endsWith(`.${wrapper}`) && imported !== `java.lang.${wrapper}`)
-              || (imported.endsWith('.*') && imported !== 'java.lang.*')
+            : (imported.endsWith(`.${wrapper}`) && imported !== `java.lang.${wrapper}`) || foreignWildcard(imported)
         })) return null
         return wrappers[wrapper]
       }
       const types = arguments_.map(unboxedMathArgument)
       if (types.some((argumentType) => !argumentType || !/^(byte|short|char|int|long|float|double)$/.test(argumentType))) return null
       return ['double', 'float', 'long'].find((numericType) => types.includes(numericType)) ?? 'int'
+    }
+    if (parts[0]?.name === 'Identifier' && parts[1]?.name === '.' && standardStringReceiver(parts[0])) {
+      if (name === 'length') return 'int'
+      if (name === 'charAt') return 'char'
     }
     const importedName = receiver || name
     if (imports.some((text) => text.startsWith('importstatic')

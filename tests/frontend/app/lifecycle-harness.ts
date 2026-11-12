@@ -115,6 +115,11 @@ export class FakeElement extends FakeEventTarget {
     this.ownerDocument.activeElement = this
   }
 
+  /** Like a button, a disabled element ignores a programmatic click. */
+  click(): void {
+    if (!this.disabled) this.dispatch('click', { target: this, currentTarget: this })
+  }
+
   select(): void {}
 
   scrollIntoView(): void {}

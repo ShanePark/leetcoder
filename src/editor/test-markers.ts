@@ -141,11 +141,11 @@ function childNodes(node: JavaSyntaxNode): JavaSyntaxNode[] {
   return children
 }
 
-function methodsNamedTest(source: string, root: JavaSyntaxNode): JavaSyntaxNode[] {
+function methodsNamedTest(source: string, root: JavaSyntaxNode, name = 'test'): JavaSyntaxNode[] {
   const methods: JavaSyntaxNode[] = []
   root.cursor().iterate((node) => {
     if (node.name === 'MethodDeclaration'
-      && testMethodNameAndAnnotation(source, node.node)?.methodName === 'test') {
+      && testMethodNameAndAnnotation(source, node.node)?.methodName === name) {
       methods.push(node.node)
     }
   })
@@ -153,12 +153,12 @@ function methodsNamedTest(source: string, root: JavaSyntaxNode): JavaSyntaxNode[
 }
 
 /**
- * The Block of the only @Test method named exactly `test`. Null when there is
+ * The Block of the only @Test method named exactly `name`. Null when there is
  * none or several, or when the method has no body or recovery lost a brace,
  * because then no body range can be trusted.
  */
-export function findJavaTestBlock(source: string, root: JavaSyntaxNode): JavaSyntaxNode | null {
-  const methods = methodsNamedTest(source, root)
+export function findJavaTestBlock(source: string, root: JavaSyntaxNode, name = 'test'): JavaSyntaxNode | null {
+  const methods = methodsNamedTest(source, root, name)
   const block = methods.length === 1 ? methods[0].getChild('Block') : null
   return block?.firstChild?.name === '{' && block.lastChild?.name === '}' ? block : null
 }

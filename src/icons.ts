@@ -23,6 +23,7 @@ import {
   Minus,
   Monitor,
   Moon,
+  PanelLeft,
   Play,
   Power,
   RefreshCw,
@@ -36,6 +37,15 @@ import {
   createElement,
   type IconNode,
 } from 'lucide'
+
+/**
+ * PanelLeft with a fill behind its left pane; CSS shows the fill while the
+ * pane it stands for is open.
+ */
+const PanelLeftToggle: IconNode = [
+  ['path', { d: 'M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4z', class: 'panel-left-fill' }],
+  ...PanelLeft,
+]
 
 /**
  * Small, tree-shakable icon surface for the editor UI. Keeping icon creation
@@ -66,6 +76,7 @@ export const appIcons = {
   menu: Menu,
   monitor: Monitor,
   moon: Moon,
+  panelLeft: PanelLeftToggle,
   play: Play,
   power: Power,
   refresh: RefreshCw,

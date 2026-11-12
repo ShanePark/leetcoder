@@ -10,7 +10,12 @@ import {
   isExtractMethodShortcut,
   isInlineFieldShortcut,
   isFileSearchAltShortcut,
+  isGitCommitAltShortcut,
+  isGitCommitPushShortcut,
   isProjectSearchAltShortcut,
+  isShowGitPanelAltShortcut,
+  isShowTestsPanelAltShortcut,
+  isToggleSidebarAltShortcut,
   isLineCutAltShortcut,
   isMoveLineDownAltShortcut,
   isMoveLineUpAltShortcut,
@@ -158,6 +163,57 @@ describe('Option shortcut matchers', () => {
     expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true, ctrlKey: true })).toBe(false)
     expect(isExtractMethodShortcut({ ...base, code: 'KeyM', metaKey: true, shiftKey: true })).toBe(false)
     expect(isExtractMethodShortcut({ ...base, code: 'KeyV', metaKey: true })).toBe(false)
+  })
+})
+
+describe('workspace shortcut matchers', () => {
+  const base = { shiftKey: false, altKey: true, metaKey: false, ctrlKey: false }
+
+  it('matches the Linux Alt tool-window and commit forms on their physical keys', () => {
+    expect(isToggleSidebarAltShortcut({ ...base, code: 'Digit1' })).toBe(true)
+    expect(isShowTestsPanelAltShortcut({ ...base, code: 'Digit4' })).toBe(true)
+    expect(isShowGitPanelAltShortcut({ ...base, code: 'Digit9' })).toBe(true)
+    expect(isGitCommitAltShortcut({ ...base, code: 'KeyK' })).toBe(true)
+    expect(isToggleSidebarAltShortcut({ ...base, code: 'Numpad1' })).toBe(false)
+    expect(isShowTestsPanelAltShortcut({ ...base, code: 'Digit4', shiftKey: true })).toBe(false)
+    expect(isShowGitPanelAltShortcut({ ...base, code: 'Digit9', metaKey: true })).toBe(false)
+    expect(isGitCommitAltShortcut({ ...base, code: 'KeyK', ctrlKey: true })).toBe(false)
+  })
+
+  it('matches commit and push on the physical K key for either primary modifier', () => {
+    expect(isGitCommitPushShortcut({ ...base, code: 'KeyK', metaKey: true })).toBe(true)
+    expect(isGitCommitPushShortcut({ ...base, code: 'KeyK', ctrlKey: true })).toBe(true)
+    expect(isGitCommitPushShortcut({ ...base, code: 'KeyK' })).toBe(false)
+    expect(isGitCommitPushShortcut({ ...base, code: 'KeyK', metaKey: true, ctrlKey: true })).toBe(false)
+    expect(isGitCommitPushShortcut({ ...base, code: 'KeyK', metaKey: true, shiftKey: true })).toBe(false)
+  })
+
+  it.each([
+    ['Linux', { key: '1', code: 'Digit1', altKey: true, metaKey: false, ctrlKey: false }, 'toggle-sidebar'],
+    ['Linux', { key: 'k', code: 'KeyK', altKey: true, metaKey: false, ctrlKey: false }, 'git-commit'],
+    ['MacIntel', { key: '˚', code: 'KeyK', altKey: true, metaKey: true, ctrlKey: false }, 'git-commit-push'],
+  ] as const)('forwards the %s chord to the app and stops it reaching the window', (platform, keys, id) => {
+    vi.stubGlobal('navigator', { platform, userAgent: '' })
+    const onWorkspaceShortcut = vi.fn()
+    const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement, { onWorkspaceShortcut })
+    const event = {
+      ...keys, shiftKey: false, preventDefault: vi.fn(), stopPropagation: vi.fn(),
+    } as unknown as KeyboardEvent
+    expect(parameterInfoMocks.handlers.some((handlers) => handlers.keydown?.(event, editor.view))).toBe(true)
+    expect(onWorkspaceShortcut).toHaveBeenCalledExactlyOnceWith(id)
+    expect(event.stopPropagation).toHaveBeenCalledOnce()
+  })
+
+  it('leaves the macOS Option+1 glyph to the editor', () => {
+    vi.stubGlobal('navigator', { platform: 'MacIntel', userAgent: '' })
+    const onWorkspaceShortcut = vi.fn()
+    const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement, { onWorkspaceShortcut })
+    const event = {
+      key: '¡', code: 'Digit1', shiftKey: false, altKey: true, metaKey: false, ctrlKey: false,
+      preventDefault: vi.fn(), stopPropagation: vi.fn(),
+    } as unknown as KeyboardEvent
+    expect(parameterInfoMocks.handlers.some((handlers) => handlers.keydown?.(event, editor.view))).toBe(false)
+    expect(onWorkspaceShortcut).not.toHaveBeenCalled()
   })
 })
 

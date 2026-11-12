@@ -78,6 +78,34 @@
   flex: none;
 }
 
+.sidebar-toggle-button {
+  flex: none;
+  width: 32px;
+  height: 32px;
+}
+
+.sidebar-toggle-button .button-icon {
+  width: 17px;
+  height: 17px;
+}
+
+.panel-left-fill {
+  fill: currentColor;
+  stroke: none;
+  opacity: 0;
+}
+
+/* Open: the glyph's left pane fills in and the button takes the accent. */
+.sidebar-toggle-button[aria-pressed='true'],
+.sidebar-toggle-button[aria-pressed='true']:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.sidebar-toggle-button[aria-pressed='true'] .panel-left-fill {
+  opacity: 0.45;
+}
+
 /* Anchored under the menu button: the shell gap and the header's 6px inset,
    then 4px below the button, which ends 36px into the 44px header. */
 .app-menu {
@@ -262,4 +290,9 @@
      --panel-gap and SIDEBAR_SPLITTER_WIDTH in app/layout.ts. */
   grid-template-columns: var(--sidebar-width, 248px) 8px minmax(0, 1fr);
   min-height: 0;
+}
+
+/* A collapsed sidebar takes its splitter with it; the editor fills the row. */
+.workspace.is-sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr);
 }

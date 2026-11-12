@@ -122,6 +122,15 @@ describe('browser preview AI generation', () => {
     expect(unknown.statements).toEqual(['assertThat(constructor()).isNotNull();'])
   })
 
+  it('answers a failing case with a single statement', async () => {
+    const backend = await configuredBackend()
+    const twoSum = { ...request, entryPoint: 'public int[] twoSum(int[] nums, int target)' }
+    const examples = await finishDelayed(backend.aiGenerateTests(twoSum))
+    const failingCase = await finishDelayed(backend.aiGenerateTests({ ...twoSum, failingCase: 'nums =\n[1]' }))
+    expect(examples.statements.length).toBeGreaterThan(1)
+    expect(failingCase.statements).toEqual(examples.statements.slice(0, 1))
+  })
+
   it('serves a pinned model and falls back when it left the list', async () => {
     const backend = await configuredBackend()
     const { models, defaultModelId } = await finishDelayed(backend.aiListModels(false))

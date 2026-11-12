@@ -106,6 +106,28 @@
 }
 
 /* ---------------------------------------------------------------- */
+/* Failing case dialog                                               */
+/* ---------------------------------------------------------------- */
+
+.ai-case-dialog {
+  width: min(520px, 100%);
+}
+
+.ai-case-dialog code {
+  font-family: var(--font-mono);
+}
+
+.rename-file-input.ai-case-input {
+  height: auto;
+  min-height: 160px;
+  max-height: 50vh;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+/* ---------------------------------------------------------------- */
 /* Discard / delete confirmation                                     */
 /* ---------------------------------------------------------------- */
 

@@ -8,12 +8,15 @@ import { psLibraryExtension, setPsLibraryMetadata } from '../../../src/completio
 import { renderJavaProblemSource } from '../../../src/domain/template'
 import { JavaEditor, javaAutoImports } from '../../../src/editor'
 import {
+  applyAiCaseTestStatements,
   applyAiTestStatements,
   checkAiTestCandidate,
+  findAiCaseTestSlot,
   formatAiTestBody,
   listJavaMethodHeaders,
   MAX_AI_TEST_STATEMENT_LENGTH,
   MAX_AI_TEST_STATEMENTS,
+  planAiCaseTestInsertion,
   planAiTestInsertion,
   validateAiTestStatements,
 } from '../../../src/editor/ai-tests'
@@ -485,5 +488,135 @@ describe('applying AI tests', () => {
     const undone = applyUndo(current())
     expect(undone.state.doc.toString()).toBe(TEMPLATE)
     expect(applyUndo(undone.state).handled).toBe(false)
+  })
+})
+
+describe('AI failing-case test method', () => {
+  const FILLED = [
+    'class Q1Example {',
+    '',
+    '    public long minimumCost(int a, int b) {',
+    '        return 0;',
+    '    }',
+    '',
+    '    @Test',
+    '    public void test() {',
+    '        assertThat(minimumCost(1, 2)).isEqualTo(3L);',
+    '    }',
+    '',
+    '}',
+    '',
+  ].join('\n')
+  const CASE = 'assertThat(minimumCost(388168, 988887)).isEqualTo(84755163318L);'
+
+  const add = (source: string, statements: string[]) => {
+    const plan = planAiCaseTestInsertion(source, statements)
+    if (!plan.ok) throw new Error(plan.reason)
+    return { methodName: plan.methodName, value: `${source.slice(0, plan.from)}${plan.insert}${source.slice(plan.to)}` }
+  }
+
+  it.each([
+    ['only test()', ['test'], 'test2'],
+    ['test() and test2()', ['test', 'test2'], 'test3'],
+    ['a gap in the numbers', ['test', 'test5', 'test3'], 'test6'],
+    ['no test() at all', ['check'], 'test2'],
+    ['names that only start with test', ['test', 'testHelper', 'test9x'], 'test2'],
+  ])('names the method one past the highest with %s', (_label, names, expected) => {
+    const methods = names.map((name) => `    @Test\n    public void ${name}() {\n        foo();\n    }`).join('\n\n')
+    expect(findAiCaseTestSlot(`class S {\n${methods}\n}\n`)?.methodName).toBe(expected)
+  })
+
+  it('counts a non-test helper named like a test so the new name never collides', () => {
+    const source = 'class S {\n    @Test\n    public void test() {}\n\n    void test4() {}\n}\n'
+    expect(findAiCaseTestSlot(source)?.methodName).toBe('test5')
+  })
+
+  it('adds the method after the last test with its indentation and modifiers', () => {
+    expect(add(FILLED, [CASE])).toEqual({
+      methodName: 'test2',
+      value: FILLED.replace(
+        '    }\n\n}\n',
+        `    }\n\n    @Test\n    public void test2() {\n        ${CASE}\n    }\n\n}\n`,
+      ),
+    })
+  })
+
+  it('follows the last test, not the last member, and copies package-private style', () => {
+    // The body is indented one step past the method, as when filling test().
+    const source = 'class S {\n  @Test void test() {\n    foo();\n  }\n  int helper() { return 1; }\n}\n'
+    expect(add(source, ['bar();', 'baz();']).value).toBe(
+      'class S {\n  @Test void test() {\n    foo();\n  }\n\n  @Test\n  void test2() {\n      bar();\n      baz();\n  }\n  int helper() { return 1; }\n}\n',
+    )
+  })
+
+  it('places a first test after the last member, or inside an empty class', () => {
+    expect(add('class S {\n    int f() { return 1; }\n}\n', ['foo();']).value).toBe(
+      'class S {\n    int f() { return 1; }\n\n    @Test\n    public void test2() {\n        foo();\n    }\n}\n',
+    )
+    expect(add('class S {}\n', ['foo();']).value).toBe(
+      'class S {\n    @Test\n    public void test2() {\n        foo();\n    }}\n',
+    )
+  })
+
+  it('reports a document without an intact top-level class', () => {
+    expect(planAiCaseTestInsertion('', [CASE])).toEqual({ ok: false, reason: 'class-missing' })
+    expect(planAiCaseTestInsertion('class S {\n    void f() {}\n', [CASE])).toEqual({ ok: false, reason: 'class-missing' })
+  })
+
+  it('adds a method whether or not the template stub is still bare', () => {
+    expect(add(TEMPLATE, [ASSERTION]).value).toContain(`    public void test2() {\n        ${ASSERTION}\n    }`)
+  })
+
+  it.each([
+    ['an extra closing brace', ['foo();', '}', 'void evil() {'], 'unbalanced-brackets'],
+    ['a member on a statement line', ['}  void evil() {'], 'unbalanced-brackets'],
+    ['a syntax error', ['foo bar baz();'], 'syntax-error'],
+    ['two statements on one line', ['foo(); bar();'], 'semicolon'],
+    ['a statement split over lines', ['if (a) b();', 'else c();'], 'not-one-statement'],
+    ['a comment', ['foo(); // x'], 'comment'],
+    ['no statements', [], 'no-statements'],
+  ])('rejects %s and keeps the statements inside the new method', (_label, statements, reason) => {
+    const plan = planAiCaseTestInsertion(FILLED, statements)
+    expect(plan.ok).toBe(false)
+    if (!plan.ok) expect(plan.reason).toBe(reason)
+  })
+
+  it('rejects statements that escape the new method even past the bracket count', () => {
+    const slot = findAiCaseTestSlot(FILLED)!
+    const withMethod = `${FILLED.slice(0, slot.at)}${slot.head}}${FILLED.slice(slot.at)}`
+    const at = slot.at + slot.head.length
+    expect(checkAiTestCandidate(withMethod, { from: at, to: at }, '\nfoo();\n}\nint evil = 1;\nvoid evil2() {\n', slot.methodName))
+      .toBe('outside-test-body')
+  })
+
+  it('adds the method in one undoable step with the cursor on its first statement', () => {
+    const state = EditorState.create({ doc: FILLED, extensions: [java(), history(), javaAutoImports] })
+    const { view, state: current } = mutableEditorView(state)
+    const dispatch = vi.spyOn(view, 'dispatch')
+    const result = applyAiCaseTestStatements(view, ['List<Integer> values = new ArrayList<>();', CASE])
+    expect(result).toMatchObject({ ok: true, methodName: 'test2' })
+    expect(dispatch).toHaveBeenCalledOnce()
+    expect(dispatch.mock.calls[0][0]).toMatchObject({ userEvent: 'input.aiTests', scrollIntoView: true })
+    const added = current().doc.toString()
+    expect(added).toContain('import java.util.List;')
+    expect(added.slice(current().selection.main.head)).toMatch(/^List<Integer> values/)
+    const undone = applyUndo(current())
+    expect(undone.state.doc.toString()).toBe(FILLED)
+    expect(applyUndo(undone.state).handled).toBe(false)
+  })
+
+  it('leaves the document alone when the plan is rejected', () => {
+    const { view, state } = mutableEditorView(javaState(FILLED))
+    expect(applyAiCaseTestStatements(view, ['foo bar baz();'])).toEqual({ ok: false, reason: 'syntax-error' })
+    expect(state().doc.toString()).toBe(FILLED)
+  })
+
+  it('tells the real editor whether a case can be added', () => {
+    expect(createEditor(FILLED).aiCaseTestAvailable()).toBe(true)
+    expect(createEditor(FILLED).aiTestContext().canAddCase).toBe(true)
+    expect(createEditor('').aiCaseTestAvailable()).toBe(false)
+    const editor = createEditor(FILLED)
+    expect(editor.applyAiCaseTest([CASE])).toMatchObject({ ok: true, methodName: 'test2' })
+    expect(editor.getValue()).toContain(`public void test2() {\n        ${CASE}\n    }`)
   })
 })
