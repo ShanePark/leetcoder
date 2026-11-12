@@ -39,6 +39,7 @@ import {
   type UpdateStatusView,
 } from './update-progress'
 import { clearGitProgressOverlay } from './app/git-progress'
+import { syncProgressOverlay } from './app/progress-overlay'
 import { LiveDiagnosticsController } from './app/live-diagnostics-controller'
 
 import {
@@ -52,6 +53,7 @@ import { DocumentController } from './app/document-controller'
 import { FileOperationsController } from './app/file-operations-controller'
 import { FileDialogController } from './app/file-dialog-controller'
 import { AiCaseDialog } from './app/ai-case-dialog'
+import { AiReviewModelDialog } from './app/ai-review-model-dialog'
 import { sourceBasename } from './app/path-helpers'
 import { RepositoryController } from './app/repository-controller'
 import { RepositoryAccessController } from './app/repository-access-controller'
@@ -59,7 +61,7 @@ import { ProjectContentSearchController } from './app/project-search-controller'
 import { PsLibraryController } from './app/ps-library-controller'
 import { JavaTypeMembersController } from './app/java-type-members-controller'
 import { FileExplorerController } from './app/file-explorer-controller'
-import { ShellControlsView } from './app/shell-controls-view'
+import { BOTTOM_PANEL_TABS, ShellControlsView } from './app/shell-controls-view'
 import {
   createFileTabsView,
   renderFileHeading as renderFileHeadingView,
@@ -68,8 +70,17 @@ import {
 } from './app/tabs-view'
 import { TestRunController } from './app/test-run-controller'
 import { ToastController } from './app/toast-controller'
-import { LlmSettingsController, readSelectedLlmModel } from './app/llm-settings-controller'
-import { aiButtonMode, aiFillMayTakeFocus, createAiController, psSignatures, type AiController } from './app/ai-controller'
+import { LlmSettingsController, readLlmResponseLanguage, readSelectedLlmModel } from './app/llm-settings-controller'
+import {
+  aiButtonMode,
+  aiFillMayTakeFocus,
+  aiReviewTestRunSelection,
+  createAiController,
+  psSignatures,
+  type AiController,
+  type StoredAiReview,
+} from './app/ai-controller'
+import { renderAiReviewPanel } from './app/ai-review-view'
 import { OverlayController } from './app/overlay-controller'
 import {
   renderGitPanel as renderGitPanelView,
@@ -96,6 +107,7 @@ import {
 import type {
   AppOptions,
   AppState,
+  BottomPanelTab,
   DirectoryPicker,
   OpenFileTab,
 } from './app/types'
@@ -154,6 +166,9 @@ export class LeetcoderApp {
   private psLibraryMetadata: PsLibraryMetadata | null = null
   private readonly aiController: AiController
   private readonly aiCaseDialog: AiCaseDialog
+  private readonly aiReviewModelDialog: AiReviewModelDialog
+  /** The last review only; a new one replaces it. */
+  private aiReview: StoredAiReview | null = null
   private readonly llmSettings: LlmSettingsController
   private readonly javaTypeMembersController: JavaTypeMembersController
   private readonly dailyProblemView: DailyProblemViewRenderer
@@ -174,7 +189,8 @@ export class LeetcoderApp {
   private readonly fileOperationsController: FileOperationsController
   private readonly projectContentSearchController: ProjectContentSearchController
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
-    if (this.gitController.commitPushInProgress) {
+    // Both show a blocking progress popup, so nothing behind it may run.
+    if (this.gitController.commitPushInProgress || this.aiController.requestPath !== null) {
       event.preventDefault()
       return
     }
@@ -331,7 +347,11 @@ export class LeetcoderApp {
       event.preventDefault()
       return
     }
-    if (this.overlay.handleEscape(event) || this.aiCaseDialog.handleEscape(event)) {
+    if (
+      this.overlay.handleEscape(event)
+      || this.aiCaseDialog.handleEscape(event)
+      || this.aiReviewModelDialog.handleEscape(event)
+    ) {
       return
     }
     this.fileDialogs.handleEscape(event)
@@ -616,7 +636,9 @@ export class LeetcoderApp {
     this.aiController = createAiController(
       {
         aiStatus: () => this.backend.aiStatus(),
-        aiGenerateTests: (request) => this.backend.aiGenerateTests(request),
+        aiListModels: (refresh) => this.backend.aiListModels(refresh),
+        aiGenerateTests: (request, onProgress) => this.backend.aiGenerateTests(request, onProgress),
+        reviewAiCode: (request, onProgress) => this.backend.reviewAiCode(request, onProgress),
         currentTarget: () => ({
           repoPath: this.state.repoPath,
           path: this.state.selectedPath,
@@ -632,12 +654,31 @@ export class LeetcoderApp {
           const button = this.element<HTMLElement>('#ai-generate-tests')
           if (aiFillMayTakeFocus(this.root, button)) this.editor.focus()
         },
+        readSource: () => this.state.selectedSource,
+        reviewTestRun: () => {
+          const source = this.testRunController.resultSource
+          return aiReviewTestRunSelection(
+            this.state.testResult,
+            source,
+            source !== null && this.testRunController.isResultSourceCurrent(source),
+            { repoPath: this.state.repoPath, path: this.state.selectedPath },
+          )
+        },
+        responseLanguage: () => readLlmResponseLanguage(this.storage),
       },
       {
         requestChanged: () => this.controlsView.updateAiButton(),
         showMessage: (message, tone) => this.setMessage(message, tone),
         showMissingKey: () => this.overlay.openSettingsDialog('llm'),
         generationFinished: () => this.llmSettings.refreshUsageIfVisible(),
+        showProgress: (state) => syncProgressOverlay(this.root, state),
+        caseAdded: () => this.aiCaseDialog.clearDraft(),
+        reviewed: (review) => {
+          this.aiReview = review
+          this.renderReviewPanel()
+          this.selectBottomPanelTab('review')
+        },
+        chooseReviewModel: (request) => this.aiReviewModelDialog.show(request),
       },
     )
     this.controlsView = new ShellControlsView({
@@ -658,7 +699,9 @@ export class LeetcoderApp {
       },
       showMessage: (message, tone) => this.setMessage(message, tone),
     })
+    this.aiReviewModelDialog = new AiReviewModelDialog({ root: this.root, storage: this.storage })
     this.bindEvents()
+    this.renderReviewPanel()
     this.renderAll()
   }
 
@@ -715,6 +758,7 @@ export class LeetcoderApp {
     this.destroyed = true
     this.aiController.dispose()
     this.aiCaseDialog.dispose()
+    this.aiReviewModelDialog.dispose()
     this.projectContentSearchController.dispose()
     this.psLibraryController.dispose()
     this.javaTypeMembersController.dispose()
@@ -840,29 +884,29 @@ export class LeetcoderApp {
         void this.aiController.generate()
       }
     })
-    this.listen(this.element<HTMLButtonElement>('#tests-tab'), 'click', () => {
-      this.selectBottomPanelTab('tests')
+    this.listen(this.element<HTMLButtonElement>('#ai-review-code'), 'click', () => {
+      // The controller checks the key and opens the model picker; only the picker sends.
+      void this.aiController.review()
     })
-    this.listen(this.element<HTMLButtonElement>('#git-tab'), 'click', () => {
-      this.selectBottomPanelTab('git')
-    })
-    for (const tab of [
-      this.element<HTMLButtonElement>('#tests-tab'),
-      this.element<HTMLButtonElement>('#git-tab'),
-    ]) {
-      this.listen(tab, 'keydown', (event) => {
-        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') {
+    BOTTOM_PANEL_TABS.forEach((tab, index) => {
+      const button = this.element<HTMLButtonElement>(`#${tab}-tab`)
+      this.listen(button, 'click', () => {
+        this.selectBottomPanelTab(tab)
+      })
+      this.listen(button, 'keydown', (event) => {
+        const last = BOTTOM_PANEL_TABS.length - 1
+        const target = event.key === 'ArrowLeft'
+          ? (index + last) % BOTTOM_PANEL_TABS.length
+          : event.key === 'ArrowRight'
+            ? (index + 1) % BOTTOM_PANEL_TABS.length
+            : event.key === 'Home' ? 0 : event.key === 'End' ? last : null
+        if (target === null) {
           return
         }
         event.preventDefault()
-        const nextTab = event.key === 'Home' || (event.key === 'ArrowLeft' && tab.id === 'git-tab')
-          ? 'tests'
-          : event.key === 'End' || (event.key === 'ArrowRight' && tab.id === 'tests-tab')
-            ? 'git'
-            : tab.id === 'tests-tab' ? 'git' : 'tests'
-        this.selectBottomPanelTab(nextTab, true)
+        this.selectBottomPanelTab(BOTTOM_PANEL_TABS[target], true)
       })
-    }
+    })
     this.listen(this.element<HTMLInputElement>('#git-select-all-checkbox'), 'change', (event) => {
       if ((event.target as HTMLInputElement).checked) this.gitController.selectAllFiles()
       else this.gitController.selectNoFiles()
@@ -891,6 +935,7 @@ export class LeetcoderApp {
     })
     this.fileDialogs.bindEvents()
     this.aiCaseDialog.bindEvents()
+    this.aiReviewModelDialog.bindEvents()
     this.listen(window, 'pointerdown', this.handleContextMenuOutside)
     this.listen(window, 'keydown', this.handleContextMenuKeydown)
     this.listen(window, 'keydown', this.handleGlobalKeydown)
@@ -936,7 +981,7 @@ export class LeetcoderApp {
     return this.documentController.flushPendingSave()
   }
 
-  private selectBottomPanelTab(tab: 'tests' | 'git', focus = false): void {
+  private selectBottomPanelTab(tab: BottomPanelTab, focus = false): void {
     this.state.bottomPanelTab = tab
     if (tab !== 'git') {
       // Stop the visible-panel poll but keep a pending stale refresh.
@@ -951,7 +996,7 @@ export class LeetcoderApp {
       this.paneLayout.applyGitFileListWidth()
     }
     if (focus) {
-      this.element<HTMLButtonElement>(tab === 'tests' ? '#tests-tab' : '#git-tab').focus()
+      this.element<HTMLButtonElement>(`#${tab}-tab`).focus()
     }
     if (tab === 'git' && this.state.repoPath && this.state.projectValid
       && !this.state.busy && !this.state.git.loading) {
@@ -1072,6 +1117,10 @@ export class LeetcoderApp {
     )
     this.paneLayout.applyGitFileListWidth()
     this.fileDialogs.renderGitContextMenu()
+  }
+
+  private renderReviewPanel(): void {
+    renderAiReviewPanel(this.element<HTMLElement>('#review-body'), this.aiReview)
   }
 
   private fileTabsModel(): FileTabsViewModel {

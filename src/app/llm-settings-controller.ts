@@ -1,4 +1,10 @@
-import { errorMessage, type AiModelList, type AiUsageSummary, type BackendClient } from '../backend'
+import {
+  errorMessage,
+  type AiModelList,
+  type AiResponseLanguage,
+  type AiUsageSummary,
+  type BackendClient,
+} from '../backend'
 import {
   renderLlmClearKeyDialog,
   renderLlmKey,
@@ -23,9 +29,32 @@ export interface LlmSettingsControllerOptions {
   storage?: Storage
 }
 
+/** Not provider-scoped: it is the user's language, whichever provider answers. */
+export const LLM_RESPONSE_LANGUAGE_STORAGE_KEY = 'leetcoder.llm-response-language'
+
+const RESPONSE_LANGUAGES: readonly AiResponseLanguage[] = ['english', 'korean']
+
+/** The language reviews are written in. English unless another supported one is stored. */
+export function readLlmResponseLanguage(storage: Storage | undefined): AiResponseLanguage {
+  const stored = storage?.getItem(LLM_RESPONSE_LANGUAGE_STORAGE_KEY)
+  return RESPONSE_LANGUAGES.find((language) => language === stored) ?? 'english'
+}
+
 /** The pinned model, or null when the catalog default should be used. */
 export function readSelectedLlmModel(storage: Storage | undefined): string | null {
   return storage?.getItem(LLM_MODEL_STORAGE_KEY) || null
+}
+
+/** The model last chosen for a review, kept apart from the test generation pin. */
+export const LLM_REVIEW_MODEL_STORAGE_KEY = 'leetcoder.llm-review-model.anthropic'
+
+/** The model last chosen for a review, or null when none was chosen yet. */
+export function readReviewLlmModel(storage: Storage | undefined): string | null {
+  return storage?.getItem(LLM_REVIEW_MODEL_STORAGE_KEY) || null
+}
+
+export function saveReviewLlmModel(storage: Storage | undefined, modelId: string): void {
+  storage?.setItem(LLM_REVIEW_MODEL_STORAGE_KEY, modelId)
 }
 
 /** Ascending local-time starts, ending with the bucket holding `now`. Weeks start on Monday. */
@@ -80,6 +109,7 @@ export class LlmSettingsController {
     this.backend = options.backend
     this.storage = options.storage
     this.bindEvents()
+    this.languageSelect().value = readLlmResponseLanguage(this.storage)
   }
 
   activate(): void {
@@ -166,6 +196,9 @@ export class LlmSettingsController {
     })
     this.listen(this.element('#llm-model-select'), 'change', () => {
       this.selectModel(this.element<HTMLSelectElement>('#llm-model-select').value)
+    })
+    this.listen(this.languageSelect(), 'change', () => {
+      this.selectResponseLanguage(this.languageSelect().value)
     })
     this.listen(this.element('#llm-refresh-models'), 'click', () => {
       if (this.configured === true && !this.modelsLoading) {
@@ -429,6 +462,15 @@ export class LlmSettingsController {
     this.renderModels()
   }
 
+  private selectResponseLanguage(value: string): void {
+    if (value === 'english') {
+      this.storage?.removeItem(LLM_RESPONSE_LANGUAGE_STORAGE_KEY)
+    } else if (RESPONSE_LANGUAGES.includes(value as AiResponseLanguage)) {
+      this.storage?.setItem(LLM_RESPONSE_LANGUAGE_STORAGE_KEY, value)
+    }
+    this.languageSelect().value = readLlmResponseLanguage(this.storage)
+  }
+
   /** Forget the list without a request, and invalidate any request in flight. */
   private resetModels(): void {
     this.modelsRequest += 1
@@ -481,6 +523,10 @@ export class LlmSettingsController {
 
   private usageTab(period: LlmUsagePeriod): HTMLButtonElement {
     return this.element<HTMLButtonElement>(`#llm-usage-${period}-tab`)
+  }
+
+  private languageSelect(): HTMLSelectElement {
+    return this.element<HTMLSelectElement>('#llm-language-select')
   }
 
   private keyInput(): HTMLInputElement {

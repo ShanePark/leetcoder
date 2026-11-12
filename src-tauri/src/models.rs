@@ -181,6 +181,15 @@ pub struct GitPushResult {
     pub branch: Option<String>,
 }
 
+/// Result of fast-forwarding the current branch to its upstream.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPullResult {
+    /// Whether the branch moved to include upstream commits.
+    pub updated: bool,
+    pub output: String,
+}
+
 /// Output from the Gradle task injected by the editor for one problem run.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

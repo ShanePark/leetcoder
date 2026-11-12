@@ -3,6 +3,12 @@ import type {
   AiKeySaveResult,
   AiModel,
   AiModelList,
+  AiModelPricing,
+  AiProgress,
+  AiRequestUsage,
+  AiReview,
+  AiReviewMissedCase,
+  AiReviewResult,
   AiStatus,
   AiUsageBucket,
   AiUsageSummary,
@@ -11,10 +17,33 @@ import type {
 import { isRecord } from './common'
 
 export function normalizeAiStatus(value: unknown): AiStatus {
-  if (!isRecord(value) || typeof value.configured !== 'boolean') {
+  if (
+    !isRecord(value)
+    || typeof value.configured !== 'boolean'
+    || !isRecord(value.provider)
+    || !isNonEmptyString(value.provider.id)
+    || !isNonEmptyString(value.provider.displayName)
+  ) {
     throw new Error('The AI status response was invalid.')
   }
-  return { configured: value.configured }
+  return {
+    configured: value.configured,
+    provider: { id: value.provider.id, displayName: value.provider.displayName },
+  }
+}
+
+/** Returns null for an event this client does not understand, which is then ignored. */
+export function normalizeAiProgress(value: unknown): AiProgress | null {
+  if (!isRecord(value)) {
+    return null
+  }
+  if (value.stage === 'requesting' && isNonEmptyString(value.model)) {
+    return { stage: 'requesting', model: value.model }
+  }
+  if (value.stage === 'received') {
+    return { stage: 'received' }
+  }
+  return null
 }
 
 export function normalizeAiKeySaveResult(value: unknown): AiKeySaveResult {
@@ -57,6 +86,25 @@ function normalizeAiModel(value: unknown): AiModel {
     displayName: value.displayName,
     deprecated: value.deprecated,
     superseded: value.superseded,
+    pricing: value.pricing === null ? null : normalizeAiModelPricing(value.pricing),
+  }
+}
+
+function normalizeAiModelPricing(value: unknown): AiModelPricing {
+  if (
+    !isRecord(value)
+    || !isNonNegativeNumber(value.inputPerMTok)
+    || !isNonNegativeNumber(value.outputPerMTok)
+    || !isNullableNonNegativeNumber(value.cacheReadPerMTok)
+    || !isNullableNonNegativeNumber(value.cacheWritePerMTok)
+  ) {
+    throw new Error('The AI model list contained invalid pricing.')
+  }
+  return {
+    inputPerMTok: value.inputPerMTok,
+    outputPerMTok: value.outputPerMTok,
+    cacheReadPerMTok: value.cacheReadPerMTok,
+    cacheWritePerMTok: value.cacheWritePerMTok,
   }
 }
 
@@ -77,6 +125,87 @@ export function normalizeAiGenerateResult(value: unknown): AiGenerateResult {
     servedModel: value.servedModel,
     fellBack: value.fellBack,
   }
+}
+
+export function normalizeAiReviewResult(value: unknown): AiReviewResult {
+  if (
+    !isRecord(value)
+    || !isAiOutcome(value.outcome)
+    || !isNonEmptyString(value.servedModel)
+    || typeof value.fellBack !== 'boolean'
+    || (value.outcome === 'ok') !== (value.review !== null)
+  ) {
+    throw new Error('The AI review response was invalid.')
+  }
+  return {
+    outcome: value.outcome,
+    review: value.review === null ? null : normalizeAiReview(value.review),
+    servedModel: value.servedModel,
+    fellBack: value.fellBack,
+    usage: normalizeAiRequestUsage(value.usage),
+  }
+}
+
+function normalizeAiRequestUsage(value: unknown): AiRequestUsage {
+  if (
+    !isRecord(value)
+    || !isNonNegativeInteger(value.inputTokens)
+    || !isNonNegativeInteger(value.outputTokens)
+    || !isNonNegativeInteger(value.cacheReadTokens)
+    || !isNonNegativeInteger(value.cacheWriteTokens)
+    || !isNullableNonNegativeNumber(value.costUsd)
+  ) {
+    throw new Error('The AI review response contained invalid usage.')
+  }
+  return {
+    inputTokens: value.inputTokens,
+    outputTokens: value.outputTokens,
+    cacheReadTokens: value.cacheReadTokens,
+    cacheWriteTokens: value.cacheWriteTokens,
+    costUsd: value.costUsd,
+  }
+}
+
+function normalizeAiReview(value: unknown): AiReview {
+  if (
+    !isRecord(value)
+    || !isAiReviewVerdict(value.verdict)
+    || typeof value.summary !== 'string'
+    || !isNullableString(value.failureCause)
+    || !isStringArray(value.issues)
+    || !Array.isArray(value.missedCases)
+    || !isRecord(value.efficiency)
+    || typeof value.efficiency.time !== 'string'
+    || typeof value.efficiency.space !== 'string'
+    || typeof value.efficiency.assessment !== 'string'
+    || !isStringArray(value.improvements)
+  ) {
+    throw new Error('The AI review response contained an invalid review.')
+  }
+  return {
+    verdict: value.verdict,
+    summary: value.summary,
+    failureCause: value.failureCause,
+    issues: value.issues,
+    missedCases: value.missedCases.map(normalizeAiReviewMissedCase),
+    efficiency: {
+      time: value.efficiency.time,
+      space: value.efficiency.space,
+      assessment: value.efficiency.assessment,
+    },
+    improvements: value.improvements,
+  }
+}
+
+function normalizeAiReviewMissedCase(value: unknown): AiReviewMissedCase {
+  if (!isRecord(value) || typeof value.input !== 'string' || typeof value.reason !== 'string') {
+    throw new Error('The AI review response contained an invalid missed case.')
+  }
+  return { input: value.input, reason: value.reason }
+}
+
+function isAiReviewVerdict(value: unknown): value is AiReview['verdict'] {
+  return value === 'correct' || value === 'incorrect' || value === 'unsure'
 }
 
 export function normalizeAiUsageSummary(value: unknown): AiUsageSummary {
@@ -166,4 +295,12 @@ function isNullableTimestamp(value: unknown): value is number | null {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function isNullableNonNegativeNumber(value: unknown): value is number | null {
+  return value === null || isNonNegativeNumber(value)
 }

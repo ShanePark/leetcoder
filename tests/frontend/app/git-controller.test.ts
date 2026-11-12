@@ -161,9 +161,11 @@ describe('GitController', () => {
   })
 
   it('reports commit-and-push phases and restores app controls', async () => {
+    const pull = deferred<unknown>()
     const commit = deferred<unknown>()
     const push = deferred<unknown>()
     const backend: GitBackendClient = {
+      pullGit: vi.fn(() => pull.promise),
       commitGit: vi.fn(() => commit.promise),
       pushGit: vi.fn(() => push.promise),
       listGitChanges: vi.fn().mockResolvedValue({ branch: 'main', changes: [] }),
@@ -184,6 +186,13 @@ describe('GitController', () => {
     expect(controller.progressLabel).toBe('Preparing commit and push…')
     expect(hooks.flushPendingSave).toHaveBeenCalled()
 
+    await Promise.resolve()
+    expect(backend.pullGit).toHaveBeenCalledWith('/repo')
+    expect(backend.commitGit).not.toHaveBeenCalled()
+    expect(controller.progressLabel).toBe('Pulling latest changes…')
+
+    pull.resolve({ updated: false, output: '' })
+    await Promise.resolve()
     await Promise.resolve()
     expect(backend.commitGit).toHaveBeenCalledWith('/repo', ['Q1.java'], 'Save Q1')
     expect(controller.progressLabel).toBe('Committing changes…')
@@ -206,8 +215,52 @@ describe('GitController', () => {
     expect(renders.at(-1)).toBe('')
   })
 
+  it('stops before committing when the branch cannot be fast-forwarded', async () => {
+    const failure = 'main has diverged from origin/main (1 local and 1 remote commits). '
+      + 'Nothing was committed; pull or rebase the branch before pushing.'
+    const backend: GitBackendClient = {
+      pullGit: vi.fn().mockRejectedValue(new Error(failure)),
+      commitGit: vi.fn(),
+      pushGit: vi.fn(),
+      listGitChanges: vi.fn().mockResolvedValue({ branch: 'main', changes: [] }),
+    }
+    const { controller, messages } = harness(backend)
+    controller.state.files = [{ path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }]
+    controller.state.selectedPaths = ['Q1.java']
+    controller.state.commitMessage = 'Save Q1'
+
+    await controller.commitSelectedFiles(true)
+
+    expect(backend.pullGit).toHaveBeenCalledWith('/repo')
+    expect(backend.commitGit).not.toHaveBeenCalled()
+    expect(backend.pushGit).not.toHaveBeenCalled()
+    expect(controller.state.error).toBe(failure)
+    expect(controller.state.commitMessage).toBe('Save Q1')
+    expect(messages).toEqual([{ message: `Could not commit changes: ${failure}`, tone: 'error' }])
+    expect(controller.state.busy).toBe(false)
+  })
+
+  it('does not pull for a plain commit', async () => {
+    const backend: GitBackendClient = {
+      pullGit: vi.fn(),
+      commitGit: vi.fn().mockResolvedValue({ commitHash: 'abc1234', message: 'Save Q1', paths: ['Q1.java'] }),
+      pushGit: vi.fn(),
+      listGitChanges: vi.fn().mockResolvedValue({ branch: 'main', changes: [] }),
+    }
+    const { controller } = harness(backend)
+    controller.state.files = [{ path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }]
+    controller.state.selectedPaths = ['Q1.java']
+
+    await controller.commitSelectedFiles(false)
+
+    expect(backend.commitGit).toHaveBeenCalled()
+    expect(backend.pullGit).not.toHaveBeenCalled()
+    expect(backend.pushGit).not.toHaveBeenCalled()
+  })
+
   it('refreshes after a push failure and preserves the actionable error', async () => {
     const backend: GitBackendClient = {
+      pullGit: vi.fn().mockResolvedValue({ updated: false, output: '' }),
       commitGit: vi.fn().mockResolvedValue({ commitHash: 'abc1234', message: 'Save Q1', paths: ['Q1.java'] }),
       pushGit: vi.fn().mockRejectedValue(new Error('remote rejected the update')),
       listGitChanges: vi.fn().mockResolvedValue({ branch: 'main', changes: [] }),

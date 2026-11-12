@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::key_store::ApiKey;
-use super::{now_ms, prompt, write_cache_file, AiGenerateRequest, AiModel, DAY_MS};
+use super::prices::PriceCache;
+use super::{
+    now_ms, prompt, write_cache_file, AiGenerateRequest, AiModel, AiReview, AiReviewRequest, DAY_MS,
+};
 
 const API_VERSION: &str = "2026-10-21";
 const MAX_OUTPUT_TOKENS: u32 = 16000;
@@ -330,7 +333,7 @@ pub(super) async fn refresh_catalog(
     store_catalog(cache_dir, models)
 }
 
-pub(super) fn listed_models(models: &[CatalogModel]) -> Vec<AiModel> {
+pub(super) fn listed_models(models: &[CatalogModel], prices: &PriceCache) -> Vec<AiModel> {
     models
         .iter()
         .filter(|model| model.is_listed())
@@ -339,6 +342,10 @@ pub(super) fn listed_models(models: &[CatalogModel]) -> Vec<AiModel> {
             display_name: model.display_name.clone(),
             deprecated: model.lifecycle == "deprecated",
             superseded: is_superseded(model, models),
+            pricing: prices
+                .models
+                .get(&model.id)
+                .map(|cached| cached.prices.into()),
         })
         .collect()
 }
@@ -425,8 +432,8 @@ pub(super) struct MessageUsage {
 }
 
 #[derive(Debug, PartialEq)]
-pub(super) enum ReplyOutcome {
-    Statements(Vec<String>),
+pub(super) enum ReplyOutcome<T> {
+    Parsed(T),
     Refused,
     Truncated,
     Invalid,
@@ -434,26 +441,26 @@ pub(super) enum ReplyOutcome {
 }
 
 #[derive(Debug, PartialEq)]
-pub(super) struct MessageReply {
+pub(super) struct MessageReply<T> {
     pub model: String,
     pub usage: MessageUsage,
     pub stop_category: Option<String>,
-    pub outcome: ReplyOutcome,
+    pub outcome: ReplyOutcome<T>,
 }
 
-pub(super) fn request_body(model_id: &str, effort_low: bool, request: &AiGenerateRequest) -> Value {
+fn message_body(
+    model_id: &str,
+    effort_low: bool,
+    system: &str,
+    user: String,
+    schema: Value,
+) -> Value {
     let mut output_config = json!({
-        "format": { "type": "json_schema", "schema": prompt::output_schema() }
+        "format": { "type": "json_schema", "schema": schema }
     });
     if effort_low {
         output_config["effort"] = json!("low");
     }
-    let helpers_available = !request.ps_signatures.is_empty();
-    let system = if request.failing_case.is_some() {
-        prompt::case_system_prompt(helpers_available)
-    } else {
-        prompt::system_prompt(helpers_available)
-    };
     // The breakpoint ends the prefix that every request of one mode shares.
     // Per-request text belongs in `messages`, after it: anything earlier would
     // miss the cache.
@@ -465,9 +472,36 @@ pub(super) fn request_body(model_id: &str, effort_low: bool, request: &AiGenerat
             "text": system,
             "cache_control": { "type": "ephemeral" },
         }],
-        "messages": [{ "role": "user", "content": prompt::user_message(request) }],
+        "messages": [{ "role": "user", "content": user }],
         "output_config": output_config,
     })
+}
+
+pub(super) fn request_body(model_id: &str, effort_low: bool, request: &AiGenerateRequest) -> Value {
+    let helpers_available = !request.ps_signatures.is_empty();
+    let system = if request.failing_case.is_some() {
+        prompt::case_system_prompt(helpers_available)
+    } else {
+        prompt::system_prompt(helpers_available)
+    };
+    message_body(
+        model_id,
+        effort_low,
+        &system,
+        prompt::user_message(request),
+        prompt::output_schema(),
+    )
+}
+
+/// A review judges correctness, so it keeps the model's default effort.
+pub(super) fn review_request_body(model_id: &str, request: &AiReviewRequest) -> Value {
+    message_body(
+        model_id,
+        false,
+        prompt::REVIEW_SYSTEM_PROMPT,
+        prompt::review_user_message(request),
+        prompt::review_output_schema(),
+    )
 }
 
 fn parse_usage(usage: Option<&Value>) -> MessageUsage {
@@ -494,14 +528,18 @@ fn parse_usage(usage: Option<&Value>) -> MessageUsage {
     }
 }
 
-fn parse_statements(content: Option<&Value>) -> Option<Vec<String>> {
+/// The JSON document the text blocks of a reply spell out.
+fn reply_document(content: Option<&Value>) -> Option<Value> {
     let text: String = content?
         .as_array()?
         .iter()
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|block| block.get("text").and_then(Value::as_str))
         .collect();
-    let document: Value = serde_json::from_str(&text).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub(super) fn parse_statements(document: &Value) -> Option<Vec<String>> {
     document
         .get("statements")?
         .as_array()?
@@ -510,14 +548,24 @@ fn parse_statements(content: Option<&Value>) -> Option<Vec<String>> {
         .collect()
 }
 
+pub(super) fn parse_review(document: &Value) -> Option<AiReview> {
+    AiReview::deserialize(document).ok()
+}
+
 /// `stop_reason` decides before any content is read: a refused or cut-off reply
 /// may not match the schema.
-pub(super) fn parse_reply(body: &Value, requested_model: &str) -> MessageReply {
+pub(super) fn parse_reply<T>(
+    body: &Value,
+    requested_model: &str,
+    parse: fn(&Value) -> Option<T>,
+) -> MessageReply<T> {
     let outcome = match body.get("stop_reason").and_then(Value::as_str) {
         Some("refusal") => ReplyOutcome::Refused,
         Some("max_tokens" | "model_context_window_exceeded") => ReplyOutcome::Truncated,
-        Some("end_turn") => parse_statements(body.get("content"))
-            .map_or(ReplyOutcome::Invalid, ReplyOutcome::Statements),
+        Some("end_turn") => reply_document(body.get("content"))
+            .as_ref()
+            .and_then(parse)
+            .map_or(ReplyOutcome::Invalid, ReplyOutcome::Parsed),
         _ => ReplyOutcome::Invalid,
     };
     MessageReply {
@@ -537,7 +585,7 @@ pub(super) fn parse_reply(body: &Value, requested_model: &str) -> MessageReply {
     }
 }
 
-fn unreadable_reply(model_id: &str, error: ApiError) -> MessageReply {
+fn unreadable_reply<T>(model_id: &str, error: ApiError) -> MessageReply<T> {
     MessageReply {
         model: model_id.to_string(),
         usage: MessageUsage::default(),
@@ -555,44 +603,36 @@ fn generation_error(error: ApiError) -> ApiError {
     }
 }
 
-pub(super) async fn send_message(
+pub(super) async fn send_message<T>(
     base_url: &str,
     key: &ApiKey,
     model_id: &str,
-    effort_low: bool,
-    request: &AiGenerateRequest,
-) -> Result<MessageReply, ApiError> {
-    send_message_within(
-        base_url,
-        key,
-        model_id,
-        effort_low,
-        request,
-        MESSAGE_TIMEOUT,
-    )
-    .await
+    body: &Value,
+    parse: fn(&Value) -> Option<T>,
+) -> Result<MessageReply<T>, ApiError> {
+    send_message_within(base_url, key, model_id, body, parse, MESSAGE_TIMEOUT).await
 }
 
 /// A 2xx may have been charged even when its body is lost, so that case comes back
 /// as a reply for the ledger rather than as an error.
-pub(super) async fn send_message_within(
+pub(super) async fn send_message_within<T>(
     base_url: &str,
     key: &ApiKey,
     model_id: &str,
-    effort_low: bool,
-    request: &AiGenerateRequest,
+    body: &Value,
+    parse: fn(&Value) -> Option<T>,
     timeout: Duration,
-) -> Result<MessageReply, ApiError> {
+) -> Result<MessageReply<T>, ApiError> {
     let client = key_client()?;
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
     let response = authorized(client.post(url).timeout(timeout), key)?
-        .json(&request_body(model_id, effort_low, request))
+        .json(body)
         .send()
         .await
         .map_err(|error| generation_error(network_error(error)))?;
     let succeeded = response.status().is_success();
     match read_success(response).await {
-        Ok(body) if body.is_object() => Ok(parse_reply(&body, model_id)),
+        Ok(body) if body.is_object() => Ok(parse_reply(&body, model_id, parse)),
         Ok(_) => Ok(unreadable_reply(model_id, ApiError::Malformed)),
         Err(error) if succeeded => Ok(unreadable_reply(model_id, generation_error(error))),
         Err(error) => Err(error),

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread;
 
-use super::{generate_tests, ledger, AiGenerateRequest, AiPaths, API_BASE_URL};
+use super::{generate_tests, ledger, AiGenerateRequest, AiPaths, AiRequestUsage, API_BASE_URL};
 use crate::leetcode::parse_problem_detail;
 use crate::models::DailyProblem;
 
@@ -55,17 +55,7 @@ struct CaseResult {
     served_model: Option<String>,
     wrong_model: bool,
     error: Option<String>,
-    usage: Option<CaseUsage>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CaseUsage {
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_write_tokens: u64,
-    cost_usd: Option<f64>,
+    usage: Option<AiRequestUsage>,
 }
 
 fn io_paths() -> Option<(PathBuf, PathBuf)> {
@@ -252,8 +242,12 @@ fn generate_case(paths: &AiPaths, case: &GenerateCase) -> CaseResult {
         data: call_data.path().to_path_buf(),
         ..paths.clone()
     };
-    let reply =
-        tauri::async_runtime::block_on(generate_tests(API_BASE_URL, &call_paths, &case.request));
+    let reply = tauri::async_runtime::block_on(generate_tests(
+        API_BASE_URL,
+        &call_paths,
+        &case.request,
+        &|_| {},
+    ));
     let usage = move_usage(call_data.path(), &paths.data);
     match reply {
         Ok(reply) => CaseResult {
@@ -279,23 +273,14 @@ fn same_model(served: &str, requested: &str) -> bool {
     served == requested || served.starts_with(&format!("{requested}-"))
 }
 
-fn move_usage(call_data: &Path, app_data: &Path) -> Option<CaseUsage> {
+fn move_usage(call_data: &Path, app_data: &Path) -> Option<AiRequestUsage> {
     let (records, _) = ledger::read(call_data).ok()?;
     let record = records.last()?;
     // A paid-for result outweighs a missing ledger line, as in the app.
     if let Err(error) = ledger::append(app_data, record) {
         eprintln!("Could not record AI usage: {error}");
     }
-    Some(CaseUsage {
-        input_tokens: record.input_tokens,
-        output_tokens: record.output_tokens,
-        cache_read_tokens: record.cache_read_tokens,
-        cache_write_tokens: record.cache_write_tokens,
-        cost_usd: record
-            .prices
-            .as_ref()
-            .and_then(|prices| ledger::cost_usd(record, prices)),
-    })
+    Some(ledger::request_usage(record))
 }
 
 /// Records each call's start and end, for checking how calls overlap.
@@ -330,7 +315,7 @@ impl CallLog {
 fn answered(case: usize) -> CaseResult {
     CaseResult {
         id: case.to_string(),
-        usage: Some(CaseUsage {
+        usage: Some(AiRequestUsage {
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,

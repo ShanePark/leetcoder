@@ -1,4 +1,4 @@
-import type { GitChangedFile, GitState } from './types'
+import type { BottomPanelTab, GitChangedFile, GitState } from './types'
 import { iconFor } from '../icons'
 import {
   defaultGitCommitMessage,
@@ -11,7 +11,7 @@ import { syncGitProgressOverlay } from './git-progress'
 import { gitDirectoryPath } from './path-helpers'
 
 export interface GitPanelViewModel {
-  bottomPanelTab: 'tests' | 'git'
+  bottomPanelTab: BottomPanelTab
   busy: boolean
   git: Readonly<GitState>
   /** Human-readable progress for a Git mutation, when one is in flight. */

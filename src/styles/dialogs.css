@@ -128,6 +128,179 @@
 }
 
 /* ---------------------------------------------------------------- */
+/* Review model picker                                               */
+/* ---------------------------------------------------------------- */
+
+.ai-review-model-dialog {
+  width: min(460px, 100%);
+  max-height: calc(100vh - 48px);
+}
+
+/* Long solution file names wrap rather than run past the dialog edge. */
+.ai-review-model-dialog code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* Whether the last test run goes along: a dot, green when it does. */
+.ai-review-model-test-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ai-review-model-test-run::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.ai-review-model-test-run[data-state='included']::before {
+  background: var(--green);
+  box-shadow: 0 0 0 3px var(--green-soft);
+}
+
+.ai-review-model-fieldset {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  margin: 6px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.ai-review-model-legend {
+  margin-bottom: 6px;
+  padding: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Same grouped-row list as the theme picker; the chosen row is tinted and checked. */
+.ai-review-model-options {
+  display: flex;
+  max-height: min(320px, 45vh);
+  flex-direction: column;
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.ai-review-model-option {
+  --ai-ink: color-mix(in srgb, var(--accent) 75%, var(--text));
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 48px;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.ai-review-model-option + .ai-review-model-option {
+  border-top: 1px solid var(--border);
+}
+
+.ai-review-model-option:hover {
+  background: var(--surface-3);
+}
+
+.ai-review-model-option:has(input:checked) {
+  background: var(--accent-soft);
+}
+
+.ai-review-model-option::after {
+  content: '';
+  width: 10px;
+  height: 5px;
+  flex: 0 0 auto;
+  margin-right: 2px;
+  border-bottom: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+  opacity: 0;
+  transform: translateY(-2px) rotate(-45deg);
+}
+
+.ai-review-model-option:has(input:checked)::after {
+  opacity: 1;
+}
+
+.ai-review-model-option:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-md);
+}
+
+.ai-review-model-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ai-review-model-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-review-model-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-review-model-option:has(input:checked) .ai-review-model-name {
+  color: var(--ai-ink);
+  font-weight: 600;
+}
+
+.ai-review-model-price {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-review-model-price.is-unknown {
+  font-style: italic;
+}
+
+.ai-review-model-empty {
+  padding: 12px 14px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-review-model-option {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------- */
 /* Discard / delete confirmation                                     */
 /* ---------------------------------------------------------------- */
 

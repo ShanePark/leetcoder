@@ -10,7 +10,7 @@ export interface AiCaseDialogOptions {
 /**
  * The dialog that takes a pasted failing case. Opening it sends nothing. The
  * text stays between openings, selected, so a retry needs no new paste and a
- * new paste replaces it.
+ * new paste replaces it. Once the case has been added, `clearDraft` empties it.
  */
 export class AiCaseDialog {
   private readonly root: HTMLElement
@@ -69,6 +69,13 @@ export class AiCaseDialog {
     event.preventDefault()
     this.close()
     return true
+  }
+
+  /** Forget the pasted case once it became a test, so the next opening starts empty. */
+  clearDraft(): void {
+    // A dialog reopened while the request ran holds the user's next paste.
+    if (this.open) return
+    this.element<HTMLTextAreaElement>('#ai-case-input').value = ''
   }
 
   dispose(): void {

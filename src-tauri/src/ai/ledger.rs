@@ -5,11 +5,14 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use super::prices::{PriceCache, Prices};
-use super::{AiModelUsage, AiUsageBucket, AiUsageSummary, AiUsageTotals};
+use super::{AiModelUsage, AiRequestUsage, AiUsageBucket, AiUsageSummary, AiUsageTotals};
 
 const LEDGER_FILE: &str = "ai-usage.jsonl";
 const RECORD_VERSION: u32 = 1;
 const OUTCOME_REFUSED: &str = "refused";
+/// What a call was for. Lines written before reviews existed are generations.
+pub(super) const KIND_TESTS: &str = "tests";
+pub(super) const KIND_REVIEW: &str = "review";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +22,8 @@ pub(super) struct UsageRecord {
     pub ts: i64,
     #[serde(default)]
     pub provider: String,
+    #[serde(default = "tests_kind")]
+    pub kind: String,
     pub model: String,
     #[serde(default)]
     pub input_tokens: u64,
@@ -46,6 +51,10 @@ pub(super) struct UsageRecord {
 
 fn record_version() -> u32 {
     RECORD_VERSION
+}
+
+fn tests_kind() -> String {
+    KIND_TESTS.to_string()
 }
 
 pub(super) fn current_version() -> u32 {
@@ -121,6 +130,20 @@ pub(super) fn cost_usd(record: &UsageRecord, prices: &Prices) -> Option<f64> {
         + class_cost(record.cache_read_tokens, prices.cache_read)?
         + class_cost(record.cache_write_tokens, prices.cache_write)?;
     (cost.is_finite() && cost >= 0.0).then_some(cost)
+}
+
+/// One record's tokens, priced at the prices stored with it.
+pub(super) fn request_usage(record: &UsageRecord) -> AiRequestUsage {
+    AiRequestUsage {
+        input_tokens: record.input_tokens,
+        output_tokens: record.output_tokens,
+        cache_read_tokens: record.cache_read_tokens,
+        cache_write_tokens: record.cache_write_tokens,
+        cost_usd: record
+            .prices
+            .as_ref()
+            .and_then(|prices| cost_usd(record, prices)),
+    }
 }
 
 fn add_record(totals: &mut AiUsageTotals, record: &UsageRecord, cost: Option<f64>) {

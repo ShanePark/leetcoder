@@ -83,7 +83,10 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
                 <span id="selected-file" class="selected-file"></span>
                 <span id="save-status" class="save-status" aria-live="polite"></span>
               </div>
-              <button id="ai-generate-tests" class="icon-button ai-generate-button" type="button" aria-label="Generate tests with AI" aria-busy="false" hidden disabled></button>
+              <div class="code-toolbar-actions">
+                <button id="ai-review-code" class="ai-action-button" type="button" aria-label="Review code with AI" title="Review code with AI" aria-busy="false" hidden disabled></button>
+                <button id="ai-generate-tests" class="ai-action-button" type="button" aria-label="Generate tests with AI" aria-busy="false" hidden disabled></button>
+              </div>
             </div>
             <div class="editor-host" id="editor-host" aria-label="Java source editor">
               <div id="editor" class="editor"></div>
@@ -93,7 +96,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         </section>
       </main>
 
-      <section id="bottom-panel" class="bottom-panel" aria-label="Run results and Git">
+      <section id="bottom-panel" class="bottom-panel" aria-label="Run results, review, and Git">
         <div
           id="bottom-panel-resize-handle"
           class="bottom-panel-resize-handle"
@@ -107,6 +110,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         <div class="bottom-panel-tabs">
           <div class="bottom-panel-tab-list" role="tablist" aria-label="Bottom panel">
             <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests<span class="keytip" aria-hidden="true">${label('show-tests-panel')}</span></button>
+            <button id="review-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="review-panel" tabindex="-1">Review</button>
             <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git<span id="git-tab-indicator" class="bottom-panel-tab-indicator" role="img" aria-label="Uncommitted or unpushed changes" title="Uncommitted or unpushed changes" hidden></span><span class="keytip" aria-hidden="true">${label('show-git-panel')}</span></button>
           </div>
           <div class="bottom-panel-actions" role="group" aria-label="Test actions">
@@ -117,6 +121,9 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         <section id="tests-panel" class="tests-panel" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">
           <div id="test-status-row" class="test-status-row"></div>
           <div id="test-body" class="test-body"></div>
+        </section>
+        <section id="review-panel" class="review-panel" role="tabpanel" aria-labelledby="review-tab" hidden>
+          <div id="review-body" class="review-body"></div>
         </section>
         <section id="git-panel" class="git-panel" role="tabpanel" aria-labelledby="git-tab" hidden>
           <div class="git-toolbar">
@@ -306,6 +313,16 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
                   </div>
                   <div id="llm-model-notes" class="llm-notes" role="status" aria-live="polite"></div>
                 </section>
+                <section class="llm-settings-section" aria-labelledby="llm-language-title">
+                  <h4 id="llm-language-title" class="shortcuts-group-title">Review language</h4>
+                  <label class="sr-only" for="llm-language-select">Review language</label>
+                  <div class="llm-key-row">
+                    <select id="llm-language-select" class="rename-file-input llm-model-select">
+                      <option value="english">English</option>
+                      <option value="korean" lang="ko">한국어</option>
+                    </select>
+                  </div>
+                </section>
                 <section class="llm-settings-section llm-usage-section" aria-labelledby="llm-usage-title">
                   <div class="llm-usage-heading">
                     <h4 id="llm-usage-title" class="shortcuts-group-title">Usage</h4>
@@ -369,6 +386,21 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
           <div class="rename-file-actions">
             <button id="cancel-ai-case" class="text-button" type="button">Cancel</button>
             <button id="confirm-ai-case" class="primary-button" type="submit">Add Test</button>
+          </div>
+        </form>
+      </div>
+      <div id="ai-review-model-dialog" class="dialog-backdrop" hidden>
+        <form id="ai-review-model-form" class="rename-file-dialog ai-review-model-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-review-model-title" aria-describedby="ai-review-model-message ai-review-model-test-run">
+          <h2 id="ai-review-model-title" class="rename-file-title">Review code</h2>
+          <p id="ai-review-model-message" class="discard-git-message">Sends <code id="ai-review-model-file"></code> and the problem description to <span id="ai-review-model-provider">the model</span> for a review.</p>
+          <p id="ai-review-model-test-run" class="ai-review-model-test-run" data-state="omitted"></p>
+          <fieldset class="ai-review-model-fieldset">
+            <legend class="ai-review-model-legend">Model</legend>
+            <div id="ai-review-model-list" class="ai-review-model-options"></div>
+          </fieldset>
+          <div class="rename-file-actions">
+            <button id="cancel-ai-review-model" class="text-button" type="button">Cancel</button>
+            <button id="confirm-ai-review-model" class="primary-button" type="submit">Review</button>
           </div>
         </form>
       </div>

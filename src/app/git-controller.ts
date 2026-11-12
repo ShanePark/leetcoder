@@ -490,8 +490,9 @@ export class GitController {
       this.hooks.renderPanel()
       return
     }
+    const pullMethod = this.backend.pullGit
     const pushMethod = this.backend.pushGit
-    if (pushAfterCommit && !pushMethod) {
+    if (pushAfterCommit && (!pullMethod || !pushMethod)) {
       this.state.error = 'Not available in this build'
       this.hooks.renderPanel()
       return
@@ -516,6 +517,16 @@ export class GitController {
     try {
       if (!(await this.hooks.flushPendingSave()) || !this.isCurrentOperation(token)) {
         return
+      }
+      // Bring the branch up to date first so the new commit fast-forwards
+      // the upstream; a pull failure stops before anything is committed.
+      if (pushAfterCommit && pullMethod) {
+        this.setOperationLabel(token, 'Pulling latest changes…')
+        this.hooks.renderPanel()
+        await pullMethod(repoPath)
+        if (!this.isCurrentOperation(token)) {
+          return
+        }
       }
       this.setOperationLabel(token, 'Committing changes…')
       this.hooks.renderPanel()

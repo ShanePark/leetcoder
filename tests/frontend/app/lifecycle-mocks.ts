@@ -6,6 +6,7 @@ import type {
   PsLibraryMetadata,
 } from '../../../src/backend'
 import type { WorkspaceShortcutId } from '../../../src/shortcuts'
+import type { ProgressOverlayState } from '../../../src/app/progress-overlay'
 
 const testMocks = vi.hoisted(() => ({
   editorInstances: [] as Array<{
@@ -40,6 +41,8 @@ const testMocks = vi.hoisted(() => ({
   }>,
   overlayOptions: [] as Array<{ llmSettings?: { activate: () => void } }>,
   settingsSections: [] as Array<string | undefined>,
+  /** Every progress popup update, with null for removal. */
+  progressOverlays: [] as Array<ProgressOverlayState | null>,
   toasts: [] as Array<{
     message: string
     tone: string
@@ -199,6 +202,14 @@ vi.mock('../../../src/live-diagnostics', () => ({
 
 vi.mock('../../../src/app/shell-view', () => ({
   renderShellView: vi.fn(),
+}))
+
+// The fake document has no selector support, so the popup only records its states.
+vi.mock('../../../src/app/progress-overlay', () => ({
+  syncProgressOverlay: vi.fn((_root: unknown, state: ProgressOverlayState | null) => {
+    testMocks.progressOverlays.push(state)
+  }),
+  clearProgressOverlay: vi.fn(),
 }))
 
 vi.mock('../../../src/app/files-view', () => ({
@@ -380,6 +391,7 @@ beforeEach(() => {
   testMocks.paneLayouts.length = 0
   testMocks.overlayOptions.length = 0
   testMocks.settingsSections.length = 0
+  testMocks.progressOverlays.length = 0
   testMocks.toasts.length = 0
 })
 

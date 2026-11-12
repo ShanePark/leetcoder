@@ -33,12 +33,13 @@ code, and OAuth scaffolding.
 | D4 | The button only fills a bare stub, and is hidden for anything else. | Cannot destroy written tests or spend money by accident. Undo restores the stub, so regenerating still works. |
 | D5 | The button follows the open file, not the displayed problem, and appears only when the two match and the problem has its description. | The header can show problem A while file B is open. The button sends no LeetCode request, so without that description it has nothing to read examples from. |
 | D6 | No model IDs or prices are hardcoded in the app. | Both change over time. Requested by the owner. |
-| D7 | No provider trait yet. Plain functions return neutral types, and the facade gains a `match` with the second provider. Persisted formats are fixed now. | Frontend and native ship in one binary, so code can change freely later. Only stored data is expensive to change. Native async trait methods are not dyn-compatible, so a trait would add cost with one implementation. |
+| D7 | No provider trait yet. The `AiProvider` enum (one variant today) names the provider: its `id` scopes persisted data and its `display_name` reaches the UI through `AiStatus.provider` (`AiProviderInfo`). Plain functions return neutral types, and the facade gains a `match` on `AiProvider` with the second provider. Persisted formats are fixed now. | Frontend and native ship in one binary, so code can change freely later. Only stored data is expensive to change. Native async trait methods are not dyn-compatible, so a trait would add cost with one implementation. UI copy reads the provider's name instead of hardcoding it. |
 | D8 | Send only: problem `content`, non-test method headers from the current document, the snippet signature to identify the entry point, `Ps` signatures, and fixed helper examples. No method bodies, path, repository name, or Git data. | The solution body is unnecessary and could bias expected values. Headers from the document survive a renamed method. |
 | D9 | `effort` is `low` where the model supports it, confirmed by measuring a sample with a real key during implementation. | Sample calls spend real money, so they need the owner's approval. |
 | D10 | Prices come from the LiteLLM JSON only. See [Price source](#price-source). | Structured and current. The other sources add risk or nothing today. |
 | D11 | The button sits in `.code-toolbar`, not the daily header. | It acts on the open file. The header can track another problem and disappears while loading or after a failed fetch. This replaces the owner's first idea, by the owner's choice. |
 | D12 | No refusal fallback. A refusal shows a message and leaves the buffer untouched. | This workload is unlikely to be refused, a dynamic model list cannot tell which models accept the `fallbacks` parameter, and per-attempt pricing adds complexity. |
+| D13 | Code review deliberately sends the whole open source file and, when it was run on exactly that source, the latest test results. D8 still holds for test generation. | A review is about the solution itself, so it cannot work from headers. Results from older source would describe code that no longer exists. No path, repository name, or Git data is sent. |
 
 ## Verified facts (2026-11-03)
 
@@ -151,11 +152,13 @@ commands.
 | `ai_save_key` (`aiSaveKey`) | `apiKey` | `AiKeySaveResult`. A 401 is an error and the key is not saved. |
 | `ai_clear_key` (`aiClearKey`) | none | nothing |
 | `ai_list_models` (`aiListModels`) | `refresh` | `AiModelList` |
-| `ai_generate_tests` (`aiGenerateTests`) | `request` | `AiGenerateResult` |
+| `ai_generate_tests` (`aiGenerateTests`) | `request`, `onProgress` channel | `AiGenerateResult` |
+| `ai_review_code` (`reviewAiCode`) | `request`, `onProgress` channel | `AiReviewResult` |
 | `ai_usage` (`aiUsage`) | `bucketStartsMs`: ascending, at most 64 | `AiUsageSummary` |
 
 ```ts
-interface AiStatus { configured: boolean }
+interface AiProviderInfo { id: string; displayName: string }
+interface AiStatus { configured: boolean; provider: AiProviderInfo } // provider even without a key
 interface AiKeySaveResult { verified: boolean }
 interface AiModel { id: string; displayName: string; deprecated: boolean; superseded: boolean }
 interface AiModelList {
@@ -213,7 +216,8 @@ These are fixed now because they are expensive to change later.
 - Ledger: JSONL with `v`, `ts` (epoch ms), `provider`, `model`, `inputTokens`
   (uncached), `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outcome`,
   `inferenceGeo`, `speed`, `serviceTier`, nullable `stopCategory`, and nullable
-  `prices` in USD per MTok with `pricesFetchedAt`. New fields are additive with serde
+  `prices` in USD per MTok with `pricesFetchedAt`, and `kind` (`tests` or `review`,
+  defaulting to `tests` so older lines still parse). New fields are additive with serde
   defaults.
 - Ledger `outcome` is `ok`, `refused`, `truncated`, or `invalid`. `invalid` records
   usage for an unreadable response or an unexpected stop reason, and the command then
@@ -400,6 +404,97 @@ values) and the `Output` and `Expected` lines from the result page.
   `test()`, so they cannot leave it. One dispatch tagged `input.aiTests` adds the
   method and its imports and puts the cursor on its first statement.
 
+### Progress
+
+Both AI commands take a progress channel. Native sends
+`{"stage":"requesting","model":"<id>"}` right before the HTTP request, with the
+model actually sent, and `{"stage":"received"}` once the reply arrives, before
+parsing. Send failures are ignored. The client methods take an optional
+`onProgress` as their last argument.
+
+The controller shows the shared modal progress popup
+(`src/app/progress-overlay.ts`) from the click until the request ends. Its stages
+are reading, asking the provider by `displayName` (with the model ID once known,
+or "Asking the model" before the status names it), and writing:
+
+| Request | Kicker | Title | Stages |
+| --- | --- | --- | --- |
+| Fill `test()` | AI tests | Generating tests | Reading the problem, Asking …, Writing tests |
+| Failing case | AI tests | Adding failing case | the same |
+| Review | AI review | Reviewing your solution | Reading code and test results, Asking …, Preparing the review |
+
+The popup closes before any toast, the key settings, or editor focus, because it
+makes the shell inert while open. Events after the request ends are ignored, and a
+discarded or failed request closes it too. App shortcuts wait while an AI request
+runs.
+
+### Code review
+
+A second toolbar button, before the generate button, reviews the open solution. It
+shows under the stub button's rule for the problem (the open `Q<number>.java` is the
+loaded problem, which has a description) whatever the state of `test()`, has no
+shortcut, and waits for any running AI request or app operation. One in-flight flag
+covers generation and review.
+
+- A click reads the key status first; without a key it opens the LLM settings as
+  generation does. Otherwise it reads the cached model list (`ai_list_models` with
+  `refresh: false`, so no catalog request) and opens the "Review code" dialog.
+  Nothing is sent until Review is chosen; Cancel, Escape, or a backdrop click sends
+  nothing. No other AI request can start while the dialog is open.
+- The dialog names the file and provider, says whether the last test run goes
+  along ("Includes the last test run (3 passed, 1 failed)", "No test run yet", or
+  "Code changed since the last test run — results won't be included"), and lists
+  the models as a radio group with their price per million input and output tokens
+  ("Price unknown" without a price), cheapest first by output then input price,
+  with unpriced models last. Long file names wrap inside the dialog. Deprecated
+  models are hidden; a superseded one is offered only while it is the remembered
+  choice. Arrow keys move the choice, Enter on a model submits, and focus returns
+  to the button before the request.
+- The review model is remembered apart from the test generation pin, under
+  `leetcoder.llm-review-model.anthropic`, and saved when Review is chosen. The
+  dialog preselects it while it is offered; otherwise the top, cheapest model.
+  With no cached list it sends the test generation model and saves nothing. The choice is sent as `selectedModelId`.
+
+- `ai_review_code` takes `AiReviewRequest`: `selectedModelId`, `problemTitle`,
+  `problemContent`, `entryPoint`, `source` (the editor text, including unsaved
+  edits), `testRun`, and `language`. An empty file sends nothing.
+- `testRun` is set only when the last run's source is the current text of this
+  file; otherwise it is null and the review notes whether there was no run or the
+  code changed since. It carries `success`, `phase`, summary counts, each test's
+  `name`, `status`, `message`, `expected`, `actual`, `stdout`, and diagnostic
+  messages. The frontend clips each text field to 2,000 characters, keeps
+  diagnostics within 16,000, and keeps the total under native's 64,000-character
+  cap; tests that do not fit keep only their name and status. Native rejects a
+  source over 200,000 characters or a larger run.
+- `AiReviewResult` has `outcome`, `review` (only for `ok`), `servedModel`,
+  `fellBack`, and `usage` (input, output, cache read, and cache write tokens, and
+  `costUsd`, null when the served model has no price). `AiReview` has `verdict` (`correct`, `incorrect`, `unsure`),
+  `summary`, nullable `failureCause`, `issues`, `missedCases` (`input`, `reason`),
+  `efficiency` (`time`, `space`, `assessment`), and `improvements`. An invalid
+  reply is an error, as for generation.
+- The review uses its own cached system prompt. Per-request data stays in the user
+  message. Failing tests are explained first; with all passing, it looks for hidden
+  bugs, missed edge cases, and whether the complexity fits the constraints.
+- A result is shown in the bottom panel's Review tab, between Tests and Git, with
+  the file name and served model. The tab keeps the last review until a new one
+  succeeds, even after a file switch. Empty sections are left out, model text is
+  set through `textContent` only, and with no review the tab shows an empty state.
+  A refusal, truncation, or error shows a toast and keeps the previous review.
+- A usage card sits in a right-hand column beside the review and stacks under the
+  verdict when the panel is narrower than 560px. It shows the cost ("$0.0123",
+  "Cost unknown" when null), the served model's catalog name, input and output
+  tokens, cache read and write tokens only when nonzero, and whether test results
+  were included. The usage is stored with the last review.
+- Review calls are recorded in the usage ledger with `kind: "review"`.
+
+### Response language
+
+LLM settings has a "Review language" select, English (the default) or Korean,
+stored under `leetcoder.llm-response-language`; choosing English removes the key.
+The review request sends it as `language` (native defaults to English when it is
+absent). All prose is written in that language; `verdict` stays the English enum.
+Test generation ignores it, since it returns Java statements.
+
 ### Model catalog
 
 Refresh on key save, on opening the LLM tab, and on an AI click when the cache is
@@ -458,6 +553,8 @@ another line automatically. If no Haiku exists, ask the user to choose.
 - All whitespace in a pasted key is removed, since keys never contain any.
 - A link beside the key label opens the provider's key page.
 - First model option: "Default (newest Haiku)", naming the model it resolves to.
+- "Review language" sits below Model and works without a key. See
+  [Response language](#response-language).
 - Usage has Day and Week tabs with 14 and 8 local-time buckets, and weeks
   start on Monday. The tab's request replaces the shown data only when it responds.
   A headline shows the selected bucket's cost and counts, a bar chart of cost per

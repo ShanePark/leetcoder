@@ -1,9 +1,11 @@
-import type { BackendClient, Invoke, Listen } from './contracts'
+import type { AiProgressHandler, BackendClient, Invoke, Listen } from './contracts'
 import { BackendError } from './errors'
 import {
   normalizeAiGenerateResult,
   normalizeAiKeySaveResult,
   normalizeAiModelList,
+  normalizeAiProgress,
+  normalizeAiReviewResult,
   normalizeAiStatus,
   normalizeAiUsageSummary,
 } from './normalizers/ai'
@@ -28,6 +30,7 @@ import {
   normalizeGitChanges,
   normalizeGitCommitResult,
   normalizeGitDiff,
+  normalizeGitPullResult,
   normalizeGitPushResult,
   normalizeGitUnpushedCommitCount,
 } from './normalizers/git'
@@ -165,6 +168,11 @@ export function createBackendClient(
       return normalizeGitCommitResult(response)
     },
 
+    async pullGit(repoPath) {
+      const response = await invoke<unknown>('pull_git', { repoPath })
+      return normalizeGitPullResult(response)
+    },
+
     async pushGit(repoPath) {
       const response = await invoke<unknown>('push_git', { repoPath })
       return normalizeGitPushResult(response)
@@ -261,9 +269,20 @@ export function createBackendClient(
       return normalizeAiModelList(response)
     },
 
-    async aiGenerateTests(request) {
-      const response = await invoke<unknown>('ai_generate_tests', { request })
+    async aiGenerateTests(request, onProgress) {
+      const response = await invoke<unknown>('ai_generate_tests', {
+        request,
+        onProgress: aiProgressChannel(onProgress),
+      })
       return normalizeAiGenerateResult(response)
+    },
+
+    async reviewAiCode(request, onProgress) {
+      const response = await invoke<unknown>('ai_review_code', {
+        request,
+        onProgress: aiProgressChannel(onProgress),
+      })
+      return normalizeAiReviewResult(response)
     },
 
     async aiUsage(bucketStartsMs) {
@@ -271,4 +290,14 @@ export function createBackendClient(
       return normalizeAiUsageSummary(response)
     },
   }
+}
+
+/** The native commands always take the channel, so it is sent even without a handler. */
+function aiProgressChannel(onProgress: AiProgressHandler | undefined) {
+  return createProgressChannel((event) => {
+    const progress = normalizeAiProgress(event)
+    if (progress) {
+      onProgress?.(progress)
+    }
+  })
 }

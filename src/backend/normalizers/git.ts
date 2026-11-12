@@ -1,4 +1,4 @@
-import type { GitCommitResult, GitFileChange, GitPushResult } from '../contracts'
+import type { GitCommitResult, GitFileChange, GitPullResult, GitPushResult } from '../contracts'
 import { isRecord, numberValue, stringValue } from './common'
 
 export function normalizeGitChanges(value: unknown): GitFileChange[] {
@@ -79,6 +79,13 @@ export function normalizeGitPushResult(value: unknown): GitPushResult {
     output: stringValue(value.output) ?? stringValue(value.stdout) ?? '',
     branch: stringValue(value.branch) ?? null,
   }
+}
+
+export function normalizeGitPullResult(value: unknown): GitPullResult {
+  if (!isRecord(value) || typeof value.updated !== 'boolean') {
+    throw new Error('The Git pull response was invalid.')
+  }
+  return { updated: value.updated, output: stringValue(value.output) ?? '' }
 }
 
 export function normalizeGitUnpushedCommitCount(value: unknown): number {

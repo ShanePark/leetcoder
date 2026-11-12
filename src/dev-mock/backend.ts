@@ -3,6 +3,10 @@ import type {
   AiGenerateResult,
   AiKeySaveResult,
   AiModelList,
+  AiModel,
+  AiProgressHandler,
+  AiReviewRequest,
+  AiReviewResult,
   AiStatus,
   AiUsageSummary,
   AiUsageTotals,
@@ -10,6 +14,7 @@ import type {
   DailyProblem,
   GitCommitResult,
   GitFileChange,
+  GitPullResult,
   GitPushResult,
   ProblemFileEntry,
   PsLibraryMetadata,
@@ -22,8 +27,11 @@ import type {
 import type { ProblemFilePlan } from '../domain'
 import {
   AI_DEFAULT_MODEL_ID,
+  AI_FAILING_REVIEW,
   AI_GENERATION_USAGE,
   AI_MODELS,
+  AI_REVIEW,
+  AI_REVIEW_TOKENS,
   AI_STATEMENTS,
   DAILY_PROBLEM,
   MANUAL_PROBLEM,
@@ -262,6 +270,11 @@ export function createDevMockBackend(): BackendClient & {
       return { commitHash: 'a1b2c3d4e5f60789', message, paths }
     },
 
+    async pullGit(): Promise<GitPullResult> {
+      await delay(300)
+      return { updated: false, output: 'Already up to date with origin/main.' }
+    },
+
     async pushGit(): Promise<GitPushResult> {
       await delay(500)
       unpushedCommits = 0
@@ -306,7 +319,13 @@ export function createDevMockBackend(): BackendClient & {
 
 type MockAi = Pick<
   BackendClient,
-  'aiStatus' | 'aiSaveKey' | 'aiClearKey' | 'aiListModels' | 'aiGenerateTests' | 'aiUsage'
+  | 'aiStatus'
+  | 'aiSaveKey'
+  | 'aiClearKey'
+  | 'aiListModels'
+  | 'aiGenerateTests'
+  | 'reviewAiCode'
+  | 'aiUsage'
 >
 
 function createMockAi(): MockAi {
@@ -316,7 +335,7 @@ function createMockAi(): MockAi {
 
   return {
     async aiStatus(): Promise<AiStatus> {
-      return { configured }
+      return { configured, provider: { id: 'anthropic', displayName: 'Claude' } }
     },
 
     // The key argument is deliberately not declared: the preview only records that one was saved.
@@ -346,16 +365,41 @@ function createMockAi(): MockAi {
       }
     },
 
-    async aiGenerateTests(request: AiGenerateRequest): Promise<AiGenerateResult> {
+    async aiGenerateTests(
+      request: AiGenerateRequest,
+      onProgress?: AiProgressHandler,
+    ): Promise<AiGenerateResult> {
       if (!configured) {
         throw new Error('No API key is configured.')
       }
-      await delay(900)
-      const { selectedModelId } = request
-      const fellBack = selectedModelId !== null && !AI_MODELS.some((model) => model.id === selectedModelId)
-      const servedModel = selectedModelId === null || fellBack ? AI_DEFAULT_MODEL_ID : selectedModelId
+      const { servedModel, fellBack } = mockServedModel(request.selectedModelId)
+      await mockAiRequest(servedModel, 900, onProgress)
       usage.push({ ...AI_GENERATION_USAGE, ts: Date.now(), model: servedModel })
       return { outcome: 'ok', statements: mockAiStatements(request), servedModel, fellBack }
+    },
+
+    async reviewAiCode(
+      request: AiReviewRequest,
+      onProgress?: AiProgressHandler,
+    ): Promise<AiReviewResult> {
+      if (!configured) {
+        throw new Error('No API key is configured.')
+      }
+      if (request.source.trim() === '') {
+        throw new Error('The solution file is empty.')
+      }
+      const { servedModel, fellBack } = mockServedModel(request.selectedModelId)
+      await mockAiRequest(servedModel, 1_800, onProgress)
+      const requestUsage = mockRequestUsage(servedModel, AI_REVIEW_TOKENS)
+      usage.push({ ...requestUsage, approximate: false, refused: false, ts: Date.now(), model: servedModel })
+      const failed = request.testRun !== null && !request.testRun.success
+      return {
+        outcome: 'ok',
+        review: failed ? AI_FAILING_REVIEW : AI_REVIEW,
+        servedModel,
+        fellBack,
+        usage: requestUsage,
+      }
     },
 
     async aiUsage(bucketStartsMs: number[]): Promise<AiUsageSummary> {
@@ -378,6 +422,53 @@ function createMockAi(): MockAi {
       }
     },
   }
+}
+
+/** A pinned model that left the list falls back to the default, as the native command does. */
+function mockServedModel(selectedModelId: string | null): { servedModel: string; fellBack: boolean } {
+  const fellBack = selectedModelId !== null && !AI_MODELS.some((model) => model.id === selectedModelId)
+  return { servedModel: selectedModelId === null || fellBack ? AI_DEFAULT_MODEL_ID : selectedModelId, fellBack }
+}
+
+/** Reports progress like the native commands; most of `totalMs` is spent waiting for the reply. */
+async function mockAiRequest(
+  model: string,
+  totalMs: number,
+  onProgress: AiProgressHandler | undefined,
+): Promise<void> {
+  await delay(100)
+  onProgress?.({ stage: 'requesting', model })
+  await delay(totalMs - 200)
+  onProgress?.({ stage: 'received' })
+  await delay(100)
+}
+
+/** Prices tokens as the native ledger does: a used token class without a price leaves the cost unknown. */
+type AiRequestUsage = AiReviewResult['usage']
+
+function mockRequestUsage(model: string, tokens: Omit<AiRequestUsage, 'costUsd'>): AiRequestUsage {
+  const pricing = AI_MODELS.find((entry) => entry.id === model)?.pricing ?? null
+  return { ...tokens, costUsd: pricing === null ? null : mockCost(tokens, pricing) }
+}
+
+function mockCost(tokens: Omit<AiRequestUsage, 'costUsd'>, pricing: NonNullable<AiModel['pricing']>): number | null {
+  const classes: [number, number | null][] = [
+    [tokens.inputTokens, pricing.inputPerMTok],
+    [tokens.outputTokens, pricing.outputPerMTok],
+    [tokens.cacheReadTokens, pricing.cacheReadPerMTok],
+    [tokens.cacheWriteTokens, pricing.cacheWritePerMTok],
+  ]
+  let cost = 0
+  for (const [count, perMTok] of classes) {
+    if (count === 0) {
+      continue
+    }
+    if (perMTok === null) {
+      return null
+    }
+    cost += (count / 1_000_000) * perMTok
+  }
+  return cost
 }
 
 function mockAiStatements(request: AiGenerateRequest): string[] {

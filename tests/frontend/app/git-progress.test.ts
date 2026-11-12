@@ -10,8 +10,8 @@ import type { GitBackendClient } from '../../../src/app/types'
 import { updateGitCommitControls } from '../../../src/app/git-view'
 import {
   GIT_PROGRESS_STAGES,
+  gitProgressOverlayState,
   gitProgressStageIndex,
-  renderGitProgressOverlay,
 } from '../../../src/app/git-progress'
 
 interface Deferred<T> {
@@ -66,6 +66,7 @@ function controlsRoot(): {
 function appHarness(options: {
   commit: () => Promise<unknown>
   push?: () => Promise<unknown>
+  pull?: () => Promise<unknown>
   flushPendingSave?: () => Promise<boolean>
 }): {
   controller: GitController
@@ -85,6 +86,7 @@ function appHarness(options: {
   const messages: Array<{ message: string; tone: string }> = []
   const backend: GitBackendClient = {
     commitGit: options.commit,
+    pullGit: options.pull ?? vi.fn().mockResolvedValue({ updated: false, output: '' }),
     pushGit: options.push,
     listGitChanges: vi.fn().mockResolvedValue({ branch: 'main', changes: [file] }),
   }
@@ -165,26 +167,33 @@ describe('Git commit progress', () => {
     expect(controls.commitPush.disabled).toBe(false)
   })
 
-  it('renders an accessible blocking overlay with each commit-and-push phase', () => {
-    const overlay = renderGitProgressOverlay()
-
-    expect(overlay).toContain('data-git-progress-overlay')
-    expect(overlay).toContain('role="dialog" aria-modal="true"')
-    expect(overlay).toContain('COMMIT &amp; PUSH')
-    for (const stage of GIT_PROGRESS_STAGES) {
-      expect(overlay).toContain(`data-git-stage="${stage.id}"`)
-      expect(overlay).toContain(stage.label)
-    }
+  it('describes each commit-and-push phase as a progress overlay step', () => {
+    expect(gitProgressOverlayState('Pushing changes…')).toEqual({
+      kicker: 'Commit & Push',
+      title: 'Publishing changes',
+      stages: GIT_PROGRESS_STAGES,
+      current: 3,
+      detail: 'Pushing changes…',
+      footnote: 'Keep this window open while the changes are published.',
+    })
     expect(gitProgressStageIndex('Preparing commit and push…')).toBe(0)
-    expect(gitProgressStageIndex('Pushing changes…')).toBe(2)
+    expect(gitProgressStageIndex('Pulling latest changes…')).toBe(1)
+    expect(gitProgressStageIndex('Refreshing Git status…')).toBe(4)
+    expect(gitProgressStageIndex('Unknown')).toBe(0)
   })
 
   it('disables commit controls immediately and reports each commit-and-push phase', async () => {
+    const pull = deferred<unknown>()
     const commit = deferred<unknown>()
     const push = deferred<unknown>()
+    const pullMethod = vi.fn(() => pull.promise)
     const commitMethod = vi.fn(() => commit.promise)
     const pushMethod = vi.fn(() => push.promise)
-    const { controller, controls, progress, messages } = appHarness({ commit: commitMethod, push: pushMethod })
+    const { controller, controls, progress, messages } = appHarness({
+      commit: commitMethod,
+      push: pushMethod,
+      pull: pullMethod,
+    })
 
     const operation = controller.commitSelectedFiles(true)
 
@@ -195,6 +204,12 @@ describe('Git commit progress', () => {
     expect(controls.commit.disabled).toBe(true)
     expect(controls.commitPush.disabled).toBe(true)
 
+    await flushMicrotasks()
+    expect(pullMethod).toHaveBeenCalledWith('/repo')
+    expect(commitMethod).not.toHaveBeenCalled()
+    expect(controller.progressLabel).toBe('Pulling latest changes…')
+
+    pull.resolve({ updated: true, output: 'Fast-forward' })
     await flushMicrotasks()
     expect(commitMethod).toHaveBeenCalledWith('/repo', ['Q1.java'], 'Save Q1')
     expect(controller.progressLabel).toBe('Committing changes…')
@@ -213,6 +228,7 @@ describe('Git commit progress', () => {
     }])
     expect(progress).toEqual([
       'Preparing commit and push…',
+      'Pulling latest changes…',
       'Committing changes…',
       'Pushing changes…',
       'Refreshing Git status…',

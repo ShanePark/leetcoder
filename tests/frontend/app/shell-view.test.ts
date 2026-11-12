@@ -49,4 +49,19 @@ describe('shell markup', () => {
     expect(elementMarkup(linux, 'tests-tab')).not.toContain('<kbd')
     expect(elementMarkup(linux, 'git-tab')).not.toContain('<kbd')
   })
+  it('puts the review button before the generate button and the Review tab between Tests and Git', () => {
+    const markup = shellMarkup(false)
+    const review = elementMarkup(markup, 'ai-review-code')
+    expect(review).toContain('aria-label="Review code with AI"')
+    expect(review).toContain('hidden')
+    // Captioned AI actions, not square icon buttons.
+    expect(review).toContain('class="ai-action-button"')
+    expect(elementMarkup(markup, 'ai-generate-tests')).toContain('class="ai-action-button"')
+    expect(markup.indexOf('id="ai-review-code"')).toBeLessThan(markup.indexOf('id="ai-generate-tests"'))
+
+    const tabs = ['tests-tab', 'review-tab', 'git-tab'].map((id) => markup.indexOf(`id="${id}"`))
+    expect(tabs).toEqual([...tabs].sort((a, b) => a - b))
+    expect(elementMarkup(markup, 'review-tab')).not.toContain('keytip')
+    expect(markup).toMatch(/<section id="review-panel"[^>]*aria-labelledby="review-tab"[^>]*hidden>/)
+  })
 })

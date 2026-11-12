@@ -1,10 +1,18 @@
-import { aiButtonPresentation, type AiButtonPresentation, type AiRequestKind } from './ai-controller'
-import type { AppState } from './types'
+import {
+  aiButtonPresentation,
+  aiReviewButtonPresentation,
+  type AiButtonPresentation,
+  type AiRequestKind,
+} from './ai-controller'
+import type { AppState, BottomPanelTab } from './types'
 import { gitFileName, hasPendingGitWork } from './git-helpers'
 import { updateGitCommitControls as updateGitCommitControlsView } from './git-view'
 import type { AiTestStub } from '../editor'
 import { iconFor } from '../icons'
 import { shortcutLabel } from '../shortcuts'
+
+/** Bottom panel tabs in strip order. */
+export const BOTTOM_PANEL_TABS: readonly BottomPanelTab[] = ['tests', 'review', 'git']
 
 interface ShellControlsViewOptions {
   root: HTMLElement
@@ -30,18 +38,15 @@ export class ShellControlsView {
   }
 
   renderBottomPanelTabs(): void {
-    const testsTab = this.element<HTMLButtonElement>('#tests-tab')
-    const gitTab = this.element<HTMLButtonElement>('#git-tab')
-    const testsSelected = this.state.bottomPanelTab === 'tests'
-    testsTab.classList.toggle('is-active', testsSelected)
-    gitTab.classList.toggle('is-active', !testsSelected)
-    testsTab.setAttribute('aria-selected', String(testsSelected))
-    gitTab.setAttribute('aria-selected', String(!testsSelected))
-    testsTab.tabIndex = testsSelected ? 0 : -1
-    gitTab.tabIndex = testsSelected ? -1 : 0
-    this.element<HTMLElement>('#tests-panel').hidden = !testsSelected
-    this.element<HTMLElement>('#git-panel').hidden = testsSelected
-    this.element<HTMLButtonElement>('#run-test').hidden = !testsSelected
+    for (const tab of BOTTOM_PANEL_TABS) {
+      const selected = this.state.bottomPanelTab === tab
+      const button = this.element<HTMLButtonElement>(`#${tab}-tab`)
+      button.classList.toggle('is-active', selected)
+      button.setAttribute('aria-selected', String(selected))
+      button.tabIndex = selected ? 0 : -1
+      this.element<HTMLElement>(`#${tab}-panel`).hidden = !selected
+    }
+    this.element<HTMLButtonElement>('#run-test').hidden = this.state.bottomPanelTab !== 'tests'
     this.element<HTMLElement>('#git-tab-indicator').hidden = !hasPendingGitWork(this.state.git)
   }
 
@@ -98,8 +103,15 @@ export class ShellControlsView {
     this.updateGitCommitControls()
   }
 
-  /** The AI button, whose action follows the open file; see `aiButtonMode`. */
+  /** The AI buttons: generation follows the open file (see `aiButtonMode`), and review sits beside it. */
   updateAiButton(): void {
+    this.renderAiButton('#ai-review-code', aiReviewButtonPresentation(
+      this.state.selectedPath,
+      this.options.aiRequestPath(),
+      this.options.aiRequestKind(),
+      this.state.busy,
+      this.state.dailyProblem,
+    ))
     this.renderAiButton('#ai-generate-tests', aiButtonPresentation(
       this.state.selectedPath,
       this.options.aiRequestPath(),
@@ -113,9 +125,16 @@ export class ShellControlsView {
 
   private renderAiButton(selector: string, presentation: AiButtonPresentation): void {
     const button = this.element<HTMLButtonElement>(selector)
-    if (button.dataset.icon !== presentation.icon) {
+    if (button.dataset.icon !== presentation.icon || button.dataset.text !== presentation.text) {
       button.dataset.icon = presentation.icon
-      button.replaceChildren(iconFor(presentation.icon, presentation.busy ? 'button-icon is-spinning' : 'button-icon'))
+      button.dataset.text = presentation.text
+      const text = document.createElement('span')
+      text.className = 'ai-action-label'
+      text.textContent = presentation.text
+      button.replaceChildren(
+        iconFor(presentation.icon, presentation.busy ? 'button-icon is-spinning' : 'button-icon'),
+        text,
+      )
     }
     button.hidden = presentation.hidden
     button.disabled = presentation.disabled

@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AiKeySaveResult, AiModelList, AiStatus, AiUsageSummary, AiUsageTotals } from '../../../src/backend'
 import {
   LLM_MODEL_STORAGE_KEY,
+  LLM_RESPONSE_LANGUAGE_STORAGE_KEY,
   LlmSettingsController,
   llmUsageBucketStarts,
+  readLlmResponseLanguage,
   readSelectedLlmModel,
   type LlmSettingsBackend,
 } from '../../../src/app/llm-settings-controller'
@@ -197,11 +199,13 @@ function usageOf(totals: AiUsageTotals): AiUsageSummary {
   return { ...emptyUsage, buckets: [{ startMs: 0, totals, perModel: [] }], allTime: totals }
 }
 
+const provider = { id: 'anthropic', displayName: 'Claude' }
+
 const modelList: AiModelList = {
   models: [
-    { id: 'model-opus', displayName: 'Opus Name', deprecated: false, superseded: false },
-    { id: 'model-haiku', displayName: 'Haiku Name', deprecated: false, superseded: false },
-    { id: 'model-old', displayName: 'Old Name', deprecated: true, superseded: false },
+    { id: 'model-opus', displayName: 'Opus Name', deprecated: false, superseded: false, pricing: null },
+    { id: 'model-haiku', displayName: 'Haiku Name', deprecated: false, superseded: false, pricing: null },
+    { id: 'model-old', displayName: 'Old Name', deprecated: true, superseded: false, pricing: null },
   ],
   defaultModelId: 'model-haiku',
   fetchedAt: Date.UTC(2026, 10, 3, 12),
@@ -210,7 +214,7 @@ const modelList: AiModelList = {
 
 function createBackend() {
   return {
-    aiStatus: vi.fn<() => Promise<AiStatus>>().mockResolvedValue({ configured: false }),
+    aiStatus: vi.fn<() => Promise<AiStatus>>().mockResolvedValue({ configured: false, provider }),
     aiSaveKey: vi.fn<(apiKey: string) => Promise<AiKeySaveResult>>().mockResolvedValue({ verified: true }),
     aiClearKey: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
     aiListModels: vi.fn<(refresh: boolean) => Promise<AiModelList>>().mockResolvedValue(modelList),
@@ -257,7 +261,7 @@ async function activated(backend = createBackend(), storage = new MemoryStorage(
 
 function configuredBackend(): ReturnType<typeof createBackend> {
   const backend = createBackend()
-  backend.aiStatus.mockResolvedValue({ configured: true })
+  backend.aiStatus.mockResolvedValue({ configured: true, provider })
   return backend
 }
 
@@ -441,6 +445,40 @@ describe('shell markup', () => {
     expect(link).toContain('rel="noreferrer noopener"')
     expect(link).toMatch(/href="https:\/\//)
   })
+
+  it('offers English and Korean review languages, English first', () => {
+    const select = /<select id="llm-language-select"[^>]*>([\s\S]*?)<\/select>/.exec(shellMarkup())?.[1] ?? ''
+    expect([...select.matchAll(/value="([^"]*)"/g)].map((match) => match[1])).toEqual(['english', 'korean'])
+    expect(select).toContain('lang="ko"')
+  })
+})
+
+describe('LLM review language', () => {
+  it('defaults to English and ignores unknown stored values', () => {
+    const storage = new MemoryStorage()
+    expect(readLlmResponseLanguage(undefined)).toBe('english')
+    expect(readLlmResponseLanguage(storage as unknown as Storage)).toBe('english')
+    storage.setItem(LLM_RESPONSE_LANGUAGE_STORAGE_KEY, 'klingon')
+    expect(readLlmResponseLanguage(storage as unknown as Storage)).toBe('english')
+  })
+
+  it('shows the stored language and persists a change without a key', () => {
+    const storage = new MemoryStorage()
+    storage.setItem(LLM_RESPONSE_LANGUAGE_STORAGE_KEY, 'korean')
+    const harness = createHarness(createBackend(), storage)
+    const select = harness.el('#llm-language-select')
+    expect(select.value).toBe('korean')
+
+    select.value = 'english'
+    select.dispatch('change')
+    expect(storage.getItem(LLM_RESPONSE_LANGUAGE_STORAGE_KEY)).toBeNull()
+    expect(readLlmResponseLanguage(storage as unknown as Storage)).toBe('english')
+
+    select.value = 'korean'
+    select.dispatch('change')
+    expect(storage.getItem(LLM_RESPONSE_LANGUAGE_STORAGE_KEY)).toBe('korean')
+    expect(harness.backend.aiStatus).not.toHaveBeenCalled()
+  })
 })
 
 describe('LLM key entry', () => {
@@ -606,7 +644,7 @@ describe('LLM key entry', () => {
     controller.activate()
     input.focus()
 
-    status.resolve({ configured: true })
+    status.resolve({ configured: true, provider })
     await settle()
 
     expect(el('#llm-key-entry').hidden).toBe(true)
@@ -717,9 +755,9 @@ describe('LLM stale responses and re-renders', () => {
     // Reopening the tab supersedes the request still in flight.
     harness.controller.activate()
     await settle()
-    newer.resolve({ ...modelList, models: [{ id: 'new', displayName: 'New Name', deprecated: false, superseded: false }] })
+    newer.resolve({ ...modelList, models: [{ id: 'new', displayName: 'New Name', deprecated: false, superseded: false, pricing: null }] })
     await settle()
-    older.resolve({ ...modelList, models: [{ id: 'old', displayName: 'Stale Name', deprecated: false, superseded: false }] })
+    older.resolve({ ...modelList, models: [{ id: 'old', displayName: 'Stale Name', deprecated: false, superseded: false, pricing: null }] })
     await settle()
 
     expect(optionLabels(harness)).toContain('New Name')
@@ -738,7 +776,7 @@ describe('LLM stale responses and re-renders', () => {
     await settle()
     expect(el('#llm-key-status').textContent).toBe('Key saved')
 
-    status.resolve({ configured: false })
+    status.resolve({ configured: false, provider })
     await settle()
 
     expect(el('#llm-key-status').textContent).toBe('Key saved')
@@ -787,7 +825,7 @@ describe('LLM stale responses and re-renders', () => {
     const { el, controller, input } = createHarness(backend)
     controller.activate()
     controller.dispose()
-    status.resolve({ configured: true })
+    status.resolve({ configured: true, provider })
     await settle()
 
     expect(el('#llm-key-status').textContent).not.toBe('Key saved')
@@ -927,7 +965,7 @@ describe('LLM model selection', () => {
       ...modelList,
       models: [
         ...modelList.models,
-        { id: 'model-older', displayName: 'Older Name', deprecated: false, superseded: true },
+        { id: 'model-older', displayName: 'Older Name', deprecated: false, superseded: true, pricing: null },
       ],
     })
     const storage = new MemoryStorage()
@@ -1053,7 +1091,7 @@ describe('LLM model selection', () => {
     const hostile = '<img src=x onerror=alert(1)>'
     backend.aiListModels.mockResolvedValue({
       ...modelList,
-      models: [{ id: 'x', displayName: hostile, deprecated: false, superseded: false }],
+      models: [{ id: 'x', displayName: hostile, deprecated: false, superseded: false, pricing: null }],
       error: hostile,
     })
     const harness = await activated(backend)

@@ -5,6 +5,7 @@ import {
   normalizeGitChanges,
   normalizeGitCommitResult,
   normalizeGitDiff,
+  normalizeGitPullResult,
   normalizeGitPushResult,
   type Invoke,
 } from '../../../src/backend'
@@ -35,6 +36,7 @@ describe('backend client', () => {
       if (command === 'commit_git') {
         return { commitHash: 'abc123', message: 'Create Q1.java', paths: ['Q1.java'] }
       }
+      if (command === 'pull_git') return { updated: true, output: 'Fast-forward' }
       if (command === 'push_git') return { output: 'done', branch: 'main' }
       if (command === 'count_unpushed_git_commits') return 2
       throw new Error(`unexpected command ${command}`)
@@ -47,6 +49,7 @@ describe('backend client', () => {
     await expect(backend.commitGit('/repo', ['Q1.java'], 'Create Q1.java')).resolves.toMatchObject({
       commitHash: 'abc123',
     })
+    await expect(backend.pullGit('/repo')).resolves.toEqual({ updated: true, output: 'Fast-forward' })
     await expect(backend.pushGit('/repo')).resolves.toMatchObject({ branch: 'main' })
     await expect(backend.countUnpushedGitCommits('/repo')).resolves.toBe(2)
     expect(calls).toEqual([
@@ -54,6 +57,7 @@ describe('backend client', () => {
       { command: 'show_in_file_manager', args: { repoPath: '/repo', path: 'Q1.java' } },
       { command: 'get_git_diff', args: { repoPath: '/repo', paths: ['Q1.java'] } },
       { command: 'commit_git', args: { repoPath: '/repo', paths: ['Q1.java'], message: 'Create Q1.java' } },
+      { command: 'pull_git', args: { repoPath: '/repo' } },
       { command: 'push_git', args: { repoPath: '/repo' } },
       { command: 'count_unpushed_git_commits', args: { repoPath: '/repo' } },
     ])
@@ -66,6 +70,11 @@ describe('backend client', () => {
       paths: ['Q1.java'],
     })
     expect(normalizeGitPushResult('pushed')).toEqual({ output: 'pushed', branch: null })
+  })
+
+  it('rejects a pull response without an update flag', () => {
+    expect(normalizeGitPullResult({ updated: false })).toEqual({ updated: false, output: '' })
+    expect(() => normalizeGitPullResult({ output: 'done' })).toThrow('Git pull response was invalid')
   })
 
   it('rejects an invalid unpushed commit count', async () => {

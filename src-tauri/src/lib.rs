@@ -72,6 +72,7 @@ pub fn run() {
             commands::show_in_file_manager,
             commands::get_git_diff,
             commands::commit_git,
+            commands::pull_git,
             commands::push_git,
             commands::count_unpushed_git_commits,
             commands::run_problem_test,
@@ -87,6 +88,7 @@ pub fn run() {
             ai::ai_clear_key,
             ai::ai_list_models,
             ai::ai_generate_tests,
+            ai::ai_review_code,
             ai::ai_usage,
         ])
         .build(tauri::generate_context!())

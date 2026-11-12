@@ -2,7 +2,7 @@ use crate::git;
 use crate::leetcode;
 use crate::models::{
     CheckProblemDiagnosticsArgs, CreateProblemFileArgs, DailyProblem, GitCommitResult,
-    GitFileChange, GitPushResult, JavaTypeMembersMetadata, ProblemDiagnosticsResult,
+    GitFileChange, GitPullResult, GitPushResult, JavaTypeMembersMetadata, ProblemDiagnosticsResult,
     ProblemFileArgs, ProblemFileContent, ProblemFileList, ProblemTestEvent, ProblemTestResult,
     ProjectSearchResult, ProjectValidation, PsLibraryMetadata, RenameProblemFileArgs,
     RunProblemTestArgs,
@@ -243,6 +243,13 @@ pub async fn commit_git(
     tauri::async_runtime::spawn_blocking(move || git::commit(&repo_path, paths, message))
         .await
         .map_err(|error| format!("Git commit worker stopped unexpectedly: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn pull_git(repo_path: String) -> Result<GitPullResult, String> {
+    tauri::async_runtime::spawn_blocking(move || git::pull(&repo_path))
+        .await
+        .map_err(|error| format!("Git pull worker stopped unexpectedly: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

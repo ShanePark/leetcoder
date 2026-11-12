@@ -153,6 +153,9 @@ describe('browser preview Git and native-only capabilities', () => {
     expect(diff).toContain('@@ -8,9 +8,11 @@ public class Q1TwoSum {')
     expect(diff).toContain('+        Map<Integer, Integer> seen = new HashMap<>();')
     expect(diff).toContain('@@ -0,0 +1,4 @@\n+# scratch notes\n+\n+- revisit DP problems\n+\n')
+    expect(await finishDelayed(backend.pullGit(repo))).toEqual({
+      updated: false, output: 'Already up to date with origin/main.',
+    })
     expect(await finishDelayed(backend.pushGit(repo))).toEqual({ output: 'To github.com:shane/ps.git', branch: 'main' })
     expect(await backend.countUnpushedGitCommits(repo)).toBe(0)
     expect(await backend.validateProject(repo)).toEqual({ valid: true })

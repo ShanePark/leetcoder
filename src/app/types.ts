@@ -74,6 +74,8 @@ export interface TestRunSourceSnapshot {
   source: string
 }
 
+export type BottomPanelTab = 'tests' | 'review' | 'git'
+
 export interface CurrentTestSource {
   repoPath: string | null
   filePath: string | null
@@ -104,6 +106,7 @@ export interface GitBackendClient {
   showInFileManager?: (projectRoot: string, path: string) => Promise<void>
   commitGitChanges?: (projectRoot: string, paths: string[], message: string) => Promise<unknown>
   commitGit?: (projectRoot: string, paths: string[], message: string) => Promise<unknown>
+  pullGit?: (projectRoot: string) => Promise<unknown>
   pushGit?: (projectRoot: string) => Promise<unknown>
   countUnpushedGitCommits?: (projectRoot: string) => Promise<number>
 }
@@ -199,7 +202,7 @@ export interface AppState {
   busy: boolean
   fileSearch: string
   saveError: string | null
-  bottomPanelTab: 'tests' | 'git'
+  bottomPanelTab: BottomPanelTab
   git: GitState
   contextMenu: FileContextMenuState | null
   gitContextMenu: GitContextMenuState | null

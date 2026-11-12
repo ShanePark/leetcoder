@@ -1,4 +1,4 @@
-import type { AiModel, DailyProblem } from '../backend'
+import type { AiModel, AiReview, AiReviewResult, DailyProblem } from '../backend'
 
 export const DAILY_PROBLEM: DailyProblem = {
   date: new Date().toISOString().slice(0, 10),
@@ -38,10 +38,29 @@ export const MANUAL_PROBLEM: DailyProblem = {
 }
 
 export const AI_MODELS: readonly AiModel[] = [
-  { id: 'claude-opus-5-5', displayName: 'Claude Opus 5.5', deprecated: false, superseded: false },
-  { id: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5', deprecated: false, superseded: false },
-  { id: 'claude-haiku-5', displayName: 'Claude Haiku 5', deprecated: false, superseded: false },
-  { id: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5', deprecated: true, superseded: true },
+  {
+    id: 'claude-opus-5-5',
+    displayName: 'Claude Opus 5.5',
+    deprecated: false,
+    superseded: false,
+    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5, cacheWritePerMTok: 6.25 },
+  },
+  {
+    id: 'claude-sonnet-5-5',
+    displayName: 'Claude Sonnet 5.5',
+    deprecated: false,
+    superseded: false,
+    pricing: { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheWritePerMTok: 3.75 },
+  },
+  {
+    id: 'claude-haiku-5',
+    displayName: 'Claude Haiku 5',
+    deprecated: false,
+    superseded: false,
+    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheReadPerMTok: 0.1, cacheWritePerMTok: 1.25 },
+  },
+  // The price cache has no entry for this model.
+  { id: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5', deprecated: true, superseded: true, pricing: null },
 ]
 
 export const AI_DEFAULT_MODEL_ID = 'claude-sonnet-5-5'
@@ -81,6 +100,43 @@ export const AI_GENERATION_USAGE: Omit<AiUsageEntry, 'ts' | 'model'> = {
   costUsd: 0.0057,
   approximate: false,
   refused: false,
+}
+
+/** The tokens of each preview review, priced by the served model. A review sends the whole file and writes prose. */
+export const AI_REVIEW_TOKENS: Omit<AiReviewResult['usage'], 'costUsd'> = {
+  inputTokens: 2_480,
+  outputTokens: 412,
+  cacheReadTokens: 1_650,
+  cacheWriteTokens: 0,
+}
+
+/** The preview review of code whose tests passed, or that was sent without a run. */
+export const AI_REVIEW: AiReview = {
+  verdict: 'unsure',
+  summary: 'The approach is right, but the result depends on map lookups that the tests only partly cover.',
+  failureCause: null,
+  issues: [
+    'The complement is looked up after the current value is stored, so a value that is half of the target can match itself.',
+  ],
+  missedCases: [
+    { input: 'nums = [3,2,4], target = 6', reason: 'Index 0 pairs with itself because 3 + 3 = 6.' },
+    { input: 'nums = [3,3], target = 6', reason: 'Duplicate values share one map entry.' },
+  ],
+  efficiency: {
+    time: 'O(n)',
+    space: 'O(n)',
+    assessment: 'One pass over at most 10^4 numbers fits the limits easily.',
+  },
+  improvements: ['Look up the complement before storing the current value.'],
+}
+
+/** The preview review of code whose last run failed. */
+export const AI_FAILING_REVIEW: AiReview = {
+  ...AI_REVIEW,
+  verdict: 'incorrect',
+  summary: 'The failing test catches a real bug: an element can be paired with itself.',
+  failureCause:
+    'For nums = [3,2,4] and target = 6, the value 3 is stored before its complement is checked, so the method returns [0, 0] instead of [1, 2].',
 }
 
 export function seedAiUsage(now: number): AiUsageEntry[] {

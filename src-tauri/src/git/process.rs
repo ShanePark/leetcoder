@@ -135,6 +135,19 @@ pub(crate) fn command_error(operation: &str, output: &Output) -> String {
     }
 }
 
+/// Trimmed standard output and standard error, joined by a newline when both
+/// are present.
+pub(crate) fn combined_output(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
 pub(crate) fn utf8_stdout(output: &Output, operation: &str) -> Result<String, String> {
     String::from_utf8(output.stdout.clone())
         .map_err(|_| format!("{operation} returned invalid UTF-8 output"))

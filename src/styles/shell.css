@@ -296,3 +296,28 @@
 .workspace.is-sidebar-collapsed {
   grid-template-columns: minmax(0, 1fr);
 }
+
+/* The AI buttons sit together at the end of the editor toolbar. */
+.code-toolbar {
+  container: code-toolbar / inline-size;
+}
+
+.code-toolbar-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+/* A narrow editor keeps the file name readable: the AI actions drop their
+   captions and become icon-only; their aria-label and title still name them. */
+@container code-toolbar (max-width: 440px) {
+  .ai-action-button {
+    width: 24px;
+    padding: 0;
+  }
+
+  .ai-action-label {
+    display: none;
+  }
+}
