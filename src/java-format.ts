@@ -183,6 +183,12 @@ const BINARY_OPERATOR_NODES = new Set([
 
 const UNARY_OPERATOR_NODES = new Set(['ArithOp', 'LogicOp', 'BitOp'])
 
+const SEMICOLON_TERMINATED_NODES = new Set([
+  'ExpressionStatement', 'LocalVariableDeclaration', 'FieldDeclaration',
+  'ReturnStatement', 'ThrowStatement', 'BreakStatement', 'ContinueStatement',
+  'AssertStatement', 'DoStatement',
+])
+
 function isInlineWhitespace(source: string, from: number, to: number): boolean {
   return /^[ \t]*$/.test(source.slice(from, to))
 }
@@ -227,6 +233,22 @@ function ensureInlineSpace(
   edits.push({ from, to, insert: ' ' })
 }
 
+function normalizeTokenBoundary(
+  source: string,
+  previous: JavaSyntaxToken,
+  token: JavaSyntaxToken,
+  insert: string,
+  edits: JavaWhitespaceEdit[],
+): void {
+  // A line comment must keep its line break so it cannot swallow the token.
+  if (previous.name === 'LineComment' || previous.name === 'BlockComment') {
+    return
+  }
+  if (/^[ \t\r\n]*$/.test(source.slice(previous.to, token.from))) {
+    edits.push({ from: previous.to, to: token.from, insert })
+  }
+}
+
 function collectJavaTokenWhitespaceEdits(source: string): JavaWhitespaceEdit[] {
   const tree = javaLanguage.parser.parse(source).topNode
   const tokens: JavaSyntaxToken[] = []
@@ -264,13 +286,24 @@ function collectJavaTokenWhitespaceEdits(source: string): JavaWhitespaceEdit[] {
     if (operator === '!' || operator === '~' || operator === '++' || operator === '--') {
       return
     }
-    ensureInlineSpace(source, previous.to, node.from, edits)
+    if (node.type.name === 'AssignOp') {
+      normalizeTokenBoundary(source, previous, tokens[index], ' ', edits)
+    } else {
+      ensureInlineSpace(source, previous.to, node.from, edits)
+    }
     ensureInlineSpace(source, node.to, next.from, edits)
   }
 
   const visit = (node: JavaSyntaxNode, parentName: string | null): void => {
     if (BINARY_OPERATOR_NODES.has(node.type.name)) {
       addOperatorSpacing(node, parentName)
+    }
+    if (node.type.name === ';' && parentName && SEMICOLON_TERMINATED_NODES.has(parentName)) {
+      const index = tokenIndexByRange.get(`${node.from}:${node.to}`) ?? -1
+      const previous = previousToken(tokens, index)
+      if (previous) {
+        normalizeTokenBoundary(source, previous, tokens[index], '', edits)
+      }
     }
     if (node.firstChild !== null) {
       let child: JavaSyntaxNode | null = node.firstChild

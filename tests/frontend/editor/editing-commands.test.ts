@@ -80,6 +80,62 @@ describe('reformat command', () => {
     const source = 'package shane.leetcode.problems.easy;\n\nclass Q1 {\n}\n'
     expect(runEditorCommand(indentedJavaState(source), reformatJavaDocument).doc.toString()).toBe(source)
   })
+
+  it('joins split assignments and trailing semicolons before re-indenting', () => {
+    const source = [
+      '    public int numOfSubarrays(int[] arr) {',
+      '       int oddSum = 0;',
+      '       int evenSum = 0;',
+      '       int curOdd = 0;',
+      '       int curEven = 0;',
+      '       for (int n : arr) {',
+      '           int nextOdd = curOdd;',
+      '           int nextEven = curEven;',
+      '           if (n % 2 == 0) {',
+      '               curEven++;',
+      '           } else {',
+      '               nextOdd',
+      '                   = curEven;',
+      '               nextEven = curOdd;',
+      '               curOdd++;',
+      '           }',
+      '           oddSum += nextOdd;',
+      '           evenSum += nextEven',
+      '               ;',
+      '',
+      '       }',
+      '       return oddSum;',
+      '   }',
+    ].join('\n')
+    const expected = [
+      'public int numOfSubarrays(int[] arr) {',
+      '    int oddSum = 0;',
+      '    int evenSum = 0;',
+      '    int curOdd = 0;',
+      '    int curEven = 0;',
+      '    for (int n : arr) {',
+      '        int nextOdd = curOdd;',
+      '        int nextEven = curEven;',
+      '        if (n % 2 == 0) {',
+      '            curEven++;',
+      '        } else {',
+      '            nextOdd = curEven;',
+      '            nextEven = curOdd;',
+      '            curOdd++;',
+      '        }',
+      '        oddSum += nextOdd;',
+      '        evenSum += nextEven;',
+      '',
+      '    }',
+      '    return oddSum;',
+      '}',
+      '',
+    ].join('\n')
+
+    const formatted = runEditorCommand(indentedJavaState(source), reformatJavaDocument)
+    expect(formatted.doc.toString()).toBe(expected)
+    expect(runEditorCommand(formatted, reformatJavaDocument).doc.toString()).toBe(expected)
+  })
 })
 
 describe('clipboard copy command', () => {

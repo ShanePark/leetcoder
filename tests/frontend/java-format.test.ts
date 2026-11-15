@@ -167,6 +167,65 @@ describe('whitespace normalization', () => {
     ].join('\n'))
   })
 
+  it.each(['\n', '\r\n'])('joins detached assignment operators and statement terminators with %j', (newline) => {
+    const source = [
+      'public int numOfSubarrays(int[] arr) {',
+      '    int nextOdd = 0;',
+      '    int curEven = 1;',
+      '    nextOdd',
+      '        = curEven;',
+      '    int evenSum = 0;',
+      '    evenSum += nextOdd',
+      '        ;',
+      '    return evenSum',
+      '        ;',
+      '}',
+      '',
+    ].join(newline)
+    const expected = [
+      'public int numOfSubarrays(int[] arr) {',
+      '    int nextOdd = 0;',
+      '    int curEven = 1;',
+      '    nextOdd = curEven;',
+      '    int evenSum = 0;',
+      '    evenSum += nextOdd;',
+      '    return evenSum;',
+      '}',
+      '',
+    ].join(newline)
+    expect(normalizeJavaWhitespace(source)).toBe(expected)
+    expect(normalizeJavaWhitespace(expected)).toBe(expected)
+  })
+
+  it('preserves multiline expressions, empty statements, and comment boundaries', () => {
+    const source = [
+      'class Q1 {',
+      '    void run() {',
+      '        int value =',
+      '            first',
+      '                + second;',
+      '        value // assignment explanation',
+      '            = first;',
+      '        value /* assignment explanation */',
+      '            += second;',
+      '        value += first // trailing explanation',
+      '            ;',
+      '        value += second /* trailing explanation */',
+      '            ;',
+      '        if (ready)',
+      '            ;',
+      '        for (;;)',
+      '            ;',
+      '        while (ready)',
+      '            ;',
+      '        String text = "nextOdd\\n = curEven;";',
+      '    }',
+      '}',
+      '',
+    ].join('\n')
+    expect(normalizeJavaWhitespace(source)).toBe(source)
+  })
+
   it('does not rewrite punctuation in comments or literals adjacent to delimiters', () => {
     const source = [
       'class Q1 {',
