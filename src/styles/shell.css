@@ -23,6 +23,70 @@
   pointer-events: none;
 }
 
+/* Undecorated Linux windows resize from these edge strips; corners take a
+   larger square so diagonal resizes are easy to grab. */
+.window-resize-handle {
+  display: none;
+}
+
+:root[data-window-frame='bordered'] .window-resize-handle {
+  --resize-edge: 6px;
+  --resize-corner: 12px;
+  position: fixed;
+  z-index: 1001;
+  display: block;
+}
+
+.window-resize-handle[data-direction='North'],
+.window-resize-handle[data-direction='South'] {
+  right: var(--resize-corner);
+  left: var(--resize-corner);
+  height: var(--resize-edge);
+  cursor: ns-resize;
+}
+
+.window-resize-handle[data-direction='East'],
+.window-resize-handle[data-direction='West'] {
+  top: var(--resize-corner);
+  bottom: var(--resize-corner);
+  width: var(--resize-edge);
+  cursor: ew-resize;
+}
+
+.window-resize-handle[data-direction='NorthEast'],
+.window-resize-handle[data-direction='NorthWest'],
+.window-resize-handle[data-direction='SouthEast'],
+.window-resize-handle[data-direction='SouthWest'] {
+  width: var(--resize-corner);
+  height: var(--resize-corner);
+}
+
+.window-resize-handle[data-direction^='North'] {
+  top: 0;
+}
+
+.window-resize-handle[data-direction^='South'] {
+  bottom: 0;
+}
+
+.window-resize-handle[data-direction$='East'] {
+  right: 0;
+}
+
+.window-resize-handle[data-direction$='West'] {
+  left: 0;
+}
+
+.window-resize-handle[data-direction='NorthWest'],
+.window-resize-handle[data-direction='SouthEast'] {
+  cursor: nwse-resize;
+}
+
+.window-resize-handle[data-direction='NorthEast'],
+.window-resize-handle[data-direction='SouthWest'] {
+  cursor: nesw-resize;
+}
+
 /* One full-width bar above the panels. It sits on the backdrop rather than
    in a panel, so it reads as the window's title bar, and its layout never
    follows the sidebar width. 28px controls center in the 44px row.
