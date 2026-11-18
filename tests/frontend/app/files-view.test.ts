@@ -266,6 +266,30 @@ afterEach(() => {
 })
 
 describe('renderFilesView', () => {
+  it('marks only the selected case-distinct file active and keeps each click target', () => {
+    const view = elements()
+    const first = file(1)
+    const second = {
+      ...first,
+      path: 'src/main/java/easy/Q1problem.java',
+      name: 'Q1problem.java',
+    }
+    const handlers = callbacks()
+    const current = model({ files: [first, second], selectedPath: first.path })
+
+    renderFilesView(view, current, handlers)
+    const buttons = view.list.querySelectorAll('.file-item')
+    expect(buttons.map((button) => button.classList.contains('is-active'))).toEqual([true, false])
+    expect(buttons.map((button) => button.getAttribute('aria-current'))).toEqual(['page', null])
+    buttons[0].dispatch('click')
+    buttons[1].dispatch('click')
+    expect(handlers.onFileSelect.mock.calls).toEqual([[first], [second]])
+
+    renderFilesView(view, { ...current, selectedPath: second.path }, handlers)
+    expect(buttons.map((button) => button.classList.contains('is-active'))).toEqual([false, true])
+    expect(buttons.map((button) => button.getAttribute('aria-current'))).toEqual([null, 'page'])
+  })
+
   it('keeps file DOM and listeners when only row state changes', () => {
     const view = elements()
     const firstCallbacks = callbacks()

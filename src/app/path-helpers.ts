@@ -25,7 +25,6 @@ export function normalizeSourcePath(path: string): string {
     .replace(/^\.\/+/, '')
     .replace(/\/+/g, '/')
     .replace(/^\/+/, '')
-    .toLocaleLowerCase()
 }
 
 export function sameFilePath(left: string, right: string): boolean {

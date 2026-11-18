@@ -190,7 +190,7 @@ describe('ProjectContentSearchController', () => {
     searchProject.mockResolvedValue(result([
       match('src/Example.java', 3, 'filename hit already shown above'),
       match('src/utils/Helper.java', 5, 'first source line'),
-      match('src/utils/helper.java', 9, 'later line from same file'),
+      match('src/utils/Helper.java', 9, 'later line from same file'),
       match('docs/README.md', 7, 'readme preview'),
     ]))
 
@@ -213,6 +213,30 @@ describe('ProjectContentSearchController', () => {
     expect(list.textContent).not.toContain('Example.java')
     expect(list.textContent).not.toContain('later line from same file')
     expect(list.textContent).toContain('Preview only')
+    controller.dispose()
+  })
+
+  it('preserves case-distinct content paths when excluding filename hits and duplicate results', async () => {
+    const { controller, host, searchProject } = setup()
+    searchProject.mockResolvedValue(result([
+      match('src/Example.java', 3, 'filename result already shown'),
+      match('src/example.java', 4, 'separate lowercase example'),
+      match('src/utils/Helper.java', 5, 'uppercase helper'),
+      match('src/utils/helper.java', 6, 'lowercase helper'),
+      match('src/utils/Helper.java', 7, 'duplicate uppercase helper'),
+    ]))
+
+    controller.update('example', ['src/Example.java'])
+    await vi.advanceTimersByTimeAsync(PROJECT_CONTENT_SEARCH_DEBOUNCE_MS)
+    await flushPromises()
+
+    const list = findByClass(host, 'project-content-search-list')!
+    expect(list.childrenElements).toHaveLength(3)
+    expect(list.textContent).toContain('example.java:4')
+    expect(list.textContent).toContain('Helper.java:5')
+    expect(list.textContent).toContain('helper.java:6')
+    expect(list.textContent).not.toContain('filename result already shown')
+    expect(list.textContent).not.toContain('duplicate uppercase helper')
     controller.dispose()
   })
 
