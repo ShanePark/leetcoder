@@ -405,6 +405,7 @@ export class LeetcoderApp {
     this.problemSelectionController = new ProblemSelectionController({
       state: this.state,
       backend: this.backend,
+      storage: this.storage,
       render: () => this.renderAll(),
       setMessage: (message, tone) => this.setMessage(message, tone),
       isWindowVisible: () => this.isWindowVisible(),
