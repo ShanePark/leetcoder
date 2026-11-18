@@ -347,6 +347,38 @@ fn gradle_script_resolves_only_the_main_compile_classpath() {
     assert!(!GRADLE_INIT_SCRIPT.contains("testRuntimeClasspath"));
 }
 
+#[cfg(unix)]
+#[test]
+fn classpath_resolution_prepares_a_reusable_daemon_with_the_selected_java() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let root = workspace.path();
+    let wrapper = root.join("gradlew");
+    let java_home = root.join("selected jdk");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > arguments.txt\nprintf '%s' \"$JAVA_HOME\" > java-home.txt\nprintf 'LEETCODER_PS_CLASSPATH_V1:[]\\n'\n",
+    )
+    .expect("fake wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("executable wrapper");
+
+    let classpath =
+        resolve_main_compile_classpath(root, &wrapper, &java_home).expect("resolve classpath");
+
+    assert!(classpath.is_empty());
+    let arguments = fs::read_to_string(root.join("arguments.txt")).expect("wrapper arguments");
+    assert!(arguments.lines().any(|argument| argument == "--daemon"));
+    assert!(!arguments.lines().any(|argument| argument == "--no-daemon"));
+    assert!(arguments
+        .lines()
+        .any(|argument| argument == "leetcoderPrintMainCompileClasspath"));
+    assert_eq!(
+        fs::read_to_string(root.join("java-home.txt")).expect("wrapper Java home"),
+        java_home.to_string_lossy()
+    );
+}
+
 #[test]
 fn reflects_current_jar_signatures_without_initializing_classes() {
     let java = discover_compatible_java().expect("compatible JDK");

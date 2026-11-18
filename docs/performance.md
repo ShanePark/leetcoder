@@ -162,3 +162,29 @@ No filesystem index/freshness policy, cross-call JDK cache, new dependencies,
 bundle-size gain, or speculative Git-network/Gradle speedup was introduced.
 Linux desktop installation/execution, long-duration memory/energy use, and
 external-service latency were not verified on the audit's macOS host.
+
+## Gradle test runner benchmark
+
+```sh
+node scripts/performance/test-runner.mjs --runs 5
+```
+
+The benchmark uses a disposable Java project, local JDK 17, an installed
+Gradle 7.3.3 distribution, and JUnit jars from the local Gradle cache. Each mode
+runs offline with its own Gradle user home. Run it with the machine otherwise
+idle. Using the app's Gradle init scripts, it compares a new daemon on every
+run, a reused daemon, and the first test after the background classpath task
+has finished. Each mode also runs after a source edit. The report includes the
+warmup cost, time to the first test, and time until
+Gradle exits. Raw timings and Gradle logs go to the output directory printed by
+the benchmark. Use `--output` to choose that directory, or `--gradle`,
+`--java-home`, and `--cache` to point to existing local installations and jars.
+
+The benchmark checks daemon identity, compilation behavior, and JUnit results.
+Use the timing distributions to compare performance across runs on the same
+machine. The fixture isolates Gradle work from editor saves and app IPC.
+
+On Linux with JDK 17 and Gradle 7.3.3 (2026-11-18), the median of five repeat
+runs dropped from 6.76 s to 1.77 s with daemon reuse. A single run after a source
+edit dropped from 7.78 s to 1.89 s. The first run after background preparation
+took 3.94 s, with 5.69 s spent preparing the daemon in the background.
