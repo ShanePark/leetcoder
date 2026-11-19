@@ -15,6 +15,13 @@ const GIT_POLL_INTERVAL_MS = 4000
 
 export type GitMessageTone = 'info' | 'success' | 'error'
 
+export interface GitCommitConfirmation {
+  readonly branch: string | null
+  readonly paths: readonly string[]
+  readonly message: string
+  readonly pushAfterCommit: boolean
+}
+
 /** The repository identity used to reject responses from an older selection. */
 export interface GitRepositoryContext {
   repoPath: string | null
@@ -27,6 +34,7 @@ export interface GitRepositoryContext {
 export interface GitControllerHooks {
   getContext: () => GitRepositoryContext
   flushPendingSave: () => Promise<boolean>
+  confirmCommit: (request: GitCommitConfirmation) => Promise<boolean>
   setAppBusy: (busy: boolean) => void
   render: () => void
   renderPanel: () => void
@@ -505,16 +513,29 @@ export class GitController {
       this.hooks.renderPanel()
       return
     }
-    const token = this.startOperation(
-      pushAfterCommit ? 'Preparing commit and push…' : 'Preparing commit…',
-      pushAfterCommit ? 'commit-push' : null,
-    )
+    const branch = this.state.branch
+    const token = this.startOperation()
     if (!token) {
       return
     }
     this.hooks.render()
     let committed = false
     try {
+      const accepted = await this.hooks.confirmCommit({ branch, paths, message, pushAfterCommit })
+      if (!accepted || !this.isCurrentOperation(token)) {
+        return
+      }
+      const currentFiles = this.state.files.filter((file) => selectedPathSet.has(file.path))
+      const currentMessage = this.state.commitMessage.trim() || defaultGitCommitMessage(currentFiles)
+      if (this.state.branch !== branch || currentMessage !== message
+        || this.state.selectedPaths.length !== paths.length
+        || this.state.selectedPaths.some((path, index) => path !== paths[index])) {
+        this.hooks.setMessage('The commit selection changed. Review it and try again.', 'info')
+        return
+      }
+      this.operationKind = pushAfterCommit ? 'commit-push' : null
+      this.setOperationLabel(token, pushAfterCommit ? 'Preparing commit and push…' : 'Preparing commit…')
+      this.hooks.render()
       if (!(await this.hooks.flushPendingSave()) || !this.isCurrentOperation(token)) {
         return
       }

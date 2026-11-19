@@ -47,6 +47,7 @@ import {
   isCloseTabShortcut,
 } from './app/navigation'
 import { createGitState, GitController } from './app/git-controller'
+import { GitCommitDialog } from './app/git-commit-dialog'
 import { createPaneLayoutController, type PaneLayoutController } from './app/pane-layout'
 import { ProblemSelectionController } from './app/problem-selection-controller'
 import { DocumentController } from './app/document-controller'
@@ -178,6 +179,7 @@ export class LeetcoderApp {
   private keytipTimer: ReturnType<typeof setTimeout> | null = null
   private dailyDescriptionOpen = false
   private readonly gitController: GitController
+  private readonly gitCommitDialog: GitCommitDialog
   private readonly paneLayout: PaneLayoutController
   private readonly fileTabsView: FileTabsView
   private readonly testRunController: TestRunController
@@ -189,6 +191,7 @@ export class LeetcoderApp {
   private readonly fileOperationsController: FileOperationsController
   private readonly projectContentSearchController: ProjectContentSearchController
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
+    if (this.gitCommitDialog.isOpen) return
     // Both show a blocking progress popup, so nothing behind it may run.
     if (this.gitController.commitPushInProgress || this.aiController.requestPath !== null) {
       event.preventDefault()
@@ -278,6 +281,10 @@ export class LeetcoderApp {
    * the editor stops propagation of the chords it handles.
    */
   private readonly handleKeytipKeydown = (event: KeyboardEvent): void => {
+    if (this.gitCommitDialog.isOpen) {
+      this.hideKeytips()
+      return
+    }
     if (!isAdvertisedModifierPress(event, currentIsMacPlatform())) {
       this.hideKeytips()
       return
@@ -343,6 +350,7 @@ export class LeetcoderApp {
   }
 
   private readonly handleContextMenuKeydown = (event: KeyboardEvent): void => {
+    if (this.gitCommitDialog.isOpen) return
     if (this.gitController.commitPushInProgress) {
       event.preventDefault()
       return
@@ -371,6 +379,7 @@ export class LeetcoderApp {
         appBusy: this.state.busy,
       }),
       flushPendingSave: () => this.flushPendingSave(),
+      confirmCommit: (request) => this.gitCommitDialog.confirm(request),
       setAppBusy: (busy) => {
         this.state.busy = busy
       },
@@ -382,6 +391,7 @@ export class LeetcoderApp {
       setMessage: (message, tone) => this.setMessage(message, tone),
     }, this.state.git)
     this.renderShell()
+    this.gitCommitDialog = new GitCommitDialog(this.root)
     this.updateStatusView = createUpdateStatusView(this.root, {
       onRestart: () => {
         void this.updateController.activate()
@@ -767,6 +777,7 @@ export class LeetcoderApp {
     this.testRunController.dispose()
     this.liveDiagnostics.dispose()
     this.gitController.dispose()
+    this.gitCommitDialog.dispose()
     clearGitProgressOverlay(this.root)
     this.documentController.dispose()
     this.fileTabsView.dispose()
@@ -1006,7 +1017,7 @@ export class LeetcoderApp {
   }
 
   private runWorkspaceShortcut(id: WorkspaceShortcutId): void {
-    if (this.gitController.commitPushInProgress) {
+    if (this.gitController.commitPushInProgress || this.gitCommitDialog.isOpen) {
       return
     }
     switch (id) {

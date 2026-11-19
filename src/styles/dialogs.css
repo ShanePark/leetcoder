@@ -308,6 +308,22 @@
   width: min(460px, 100%);
 }
 
+.commit-git-dialog {
+  margin: auto;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
+  color: var(--text);
+}
+
+.commit-git-dialog::backdrop {
+  background: var(--dialog-backdrop);
+  backdrop-filter: blur(6px);
+}
+
+.commit-git-dialog:not([open]) {
+  display: none;
+}
+
 .discard-git-path {
   white-space: pre-line;
   max-height: 40vh;

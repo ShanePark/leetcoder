@@ -43,6 +43,7 @@ function harness(
   const messages: Array<{ message: string; tone: string }> = []
   const hooks: GitControllerHooks = {
     getContext: () => context,
+    confirmCommit: vi.fn().mockResolvedValue(true),
     flushPendingSave: vi.fn().mockResolvedValue(true),
     setAppBusy: (busy) => {
       context.appBusy = busy
@@ -183,6 +184,9 @@ describe('GitController', () => {
 
     const operation = controller.commitSelectedFiles(true)
     expect(controller.state.busy).toBe(true)
+    expect(controller.progressLabel).toBeNull()
+    expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+    await Promise.resolve()
     expect(controller.progressLabel).toBe('Preparing commit and push…')
     expect(hooks.flushPendingSave).toHaveBeenCalled()
 
@@ -215,6 +219,79 @@ describe('GitController', () => {
     expect(renders.at(-1)).toBe('')
   })
 
+  it.each([false, true])('cancels commit (push=%s) before saving or changing Git state', async (pushAfterCommit) => {
+    const confirmation = deferred<boolean>()
+    const backend: GitBackendClient = {
+      pullGit: vi.fn(),
+      commitGit: vi.fn(),
+      pushGit: vi.fn(),
+    }
+    const { controller, hooks } = harness(backend)
+    controller.state.branch = 'feature'
+    controller.state.files = [{ path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }]
+    controller.state.selectedPaths = ['Q1.java']
+    controller.state.commitMessage = '  Save Q1  '
+    hooks.confirmCommit = vi.fn(() => confirmation.promise)
+
+    const operation = controller.commitSelectedFiles(pushAfterCommit)
+    await controller.commitSelectedFiles(pushAfterCommit)
+
+    expect(hooks.confirmCommit).toHaveBeenCalledExactlyOnceWith({
+      branch: 'feature', paths: ['Q1.java'], message: 'Save Q1', pushAfterCommit,
+    })
+    expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+    expect(backend.pullGit).not.toHaveBeenCalled()
+    expect(backend.commitGit).not.toHaveBeenCalled()
+    expect(backend.pushGit).not.toHaveBeenCalled()
+    expect(controller.state.busy).toBe(true)
+    expect(controller.progressLabel).toBeNull()
+
+    confirmation.resolve(false)
+    await operation
+
+    expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+    expect(backend.pullGit).not.toHaveBeenCalled()
+    expect(backend.commitGit).not.toHaveBeenCalled()
+    expect(backend.pushGit).not.toHaveBeenCalled()
+    expect(controller.state.selectedPaths).toEqual(['Q1.java'])
+    expect(controller.state.commitMessage).toBe('  Save Q1  ')
+    expect(controller.state.busy).toBe(false)
+    expect(controller.commitPushInProgress).toBe(false)
+  })
+
+  it.each(['repository', 'branch', 'selection', 'message'] as const)(
+    'rejects approval after the %s changes while confirmation is open',
+    async (changed) => {
+      const confirmation = deferred<boolean>()
+      const backend: GitBackendClient = { pullGit: vi.fn(), commitGit: vi.fn(), pushGit: vi.fn() }
+      const { controller, context, hooks } = harness(backend)
+      controller.state.branch = 'main'
+      controller.state.files = [{ path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }]
+      controller.state.selectedPaths = ['Q1.java']
+      controller.state.commitMessage = 'Save Q1'
+      hooks.confirmCommit = vi.fn(() => confirmation.promise)
+      const operation = controller.commitSelectedFiles(true)
+
+      if (changed === 'repository') {
+        context.repoPath = '/other-repo'
+        context.repositoryGeneration += 1
+      } else if (changed === 'branch') {
+        controller.state.branch = 'other'
+      } else if (changed === 'selection') {
+        controller.state.selectedPaths = ['Q2.java']
+      } else {
+        controller.state.commitMessage = 'Changed message'
+      }
+      confirmation.resolve(true)
+      await operation
+
+      expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+      expect(backend.pullGit).not.toHaveBeenCalled()
+      expect(backend.commitGit).not.toHaveBeenCalled()
+      expect(backend.pushGit).not.toHaveBeenCalled()
+    },
+  )
+
   it('stops before committing when the branch cannot be fast-forwarded', async () => {
     const failure = 'main has diverged from origin/main (1 local and 1 remote commits). '
       + 'Nothing was committed; pull or rebase the branch before pushing.'
@@ -240,20 +317,23 @@ describe('GitController', () => {
     expect(controller.state.busy).toBe(false)
   })
 
-  it('does not pull for a plain commit', async () => {
+  it('confirms a plain commit and keeps pull and push unused', async () => {
     const backend: GitBackendClient = {
       pullGit: vi.fn(),
       commitGit: vi.fn().mockResolvedValue({ commitHash: 'abc1234', message: 'Save Q1', paths: ['Q1.java'] }),
       pushGit: vi.fn(),
       listGitChanges: vi.fn().mockResolvedValue({ branch: 'main', changes: [] }),
     }
-    const { controller } = harness(backend)
+    const { controller, hooks } = harness(backend)
     controller.state.files = [{ path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }]
     controller.state.selectedPaths = ['Q1.java']
 
     await controller.commitSelectedFiles(false)
 
     expect(backend.commitGit).toHaveBeenCalled()
+    expect(hooks.confirmCommit).toHaveBeenCalledExactlyOnceWith({
+      branch: null, paths: ['Q1.java'], message: 'Update Q1', pushAfterCommit: false,
+    })
     expect(backend.pullGit).not.toHaveBeenCalled()
     expect(backend.pushGit).not.toHaveBeenCalled()
   })

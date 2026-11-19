@@ -12,6 +12,9 @@ interface AppInternals {
     git: { commitMessage: string }
   }
   gitController: { commitSelectedFiles: (push: boolean) => Promise<void> }
+  gitCommitDialog: {
+    confirm: (request: { branch: string; paths: string[]; message: string; pushAfterCommit: boolean }) => Promise<boolean>
+  }
 }
 
 function internals(app: LeetcoderApp): AppInternals {
@@ -78,7 +81,7 @@ describe('LeetcoderApp workspace shortcuts', () => {
     }
   })
 
-  it('commits from the message field only while Commit is enabled', async () => {
+  it('routes the message-field shortcut and Commit button through the same guarded action', async () => {
     const app = await startApp(dom, createBackend().backend)
     const commit = vi.spyOn(internals(app).gitController, 'commitSelectedFiles')
     try {
@@ -93,6 +96,10 @@ describe('LeetcoderApp workspace shortcuts', () => {
       // Nothing typed: an enabled button means the default message applies.
       expect(internals(app).state.git.commitMessage).toBe('')
       dom.window.dispatch('keydown', altK())
+      expect(commit).toHaveBeenCalledExactlyOnceWith(false)
+
+      commit.mockClear()
+      element('#git-commit').click()
       expect(commit).toHaveBeenCalledExactlyOnceWith(false)
 
       // A disabled button keeps its guard when reached from the keyboard.
@@ -131,6 +138,40 @@ describe('LeetcoderApp workspace shortcuts', () => {
       element('#git-commit-push').disabled = false
       testMocks.editorInstances.at(-1)?.triggerWorkspaceShortcut('git-commit-push')
       expect(commit).toHaveBeenCalledExactlyOnceWith(true)
+    } finally {
+      await app.destroy()
+    }
+  })
+
+  it('ignores repeated commit shortcuts while the confirmation is open and keeps Cancel focused', async () => {
+    const app = await startApp(dom, createBackend().backend)
+    const commit = vi.spyOn(internals(app).gitController, 'commitSelectedFiles')
+    const dialog = element('#commit-git-dialog') as FakeElement & {
+      open: boolean
+      showModal: () => void
+      close: () => void
+    }
+    dialog.open = false
+    dialog.showModal = () => { dialog.open = true }
+    dialog.close = () => { dialog.open = false }
+    try {
+      element('#editor').focus()
+      element('#git-commit-push').disabled = false
+      const confirmation = internals(app).gitCommitDialog.confirm({
+        branch: 'main', paths: ['Q1.java'], message: 'Save Q1', pushAfterCommit: true,
+      })
+
+      expect(dom.document.activeElement).toBe(element('#cancel-commit-git'))
+      dom.window.dispatch('keydown', { ...ctrlAltK(), repeat: true })
+      testMocks.editorInstances.at(-1)?.triggerWorkspaceShortcut('git-commit-push')
+      dom.window.dispatch('keydown', keydown({ key: 'Enter', code: 'Enter' }))
+
+      expect(commit).not.toHaveBeenCalled()
+      expect(dialog.open).toBe(true)
+      expect(dom.document.activeElement).toBe(element('#cancel-commit-git'))
+      element('#cancel-commit-git').click()
+      await expect(confirmation).resolves.toBe(false)
+      expect(dom.document.activeElement).toBe(element('#editor'))
     } finally {
       await app.destroy()
     }

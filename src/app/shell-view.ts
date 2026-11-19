@@ -366,6 +366,16 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
           </div>
         </div>
       </div>
+      <dialog id="commit-git-dialog" class="discard-git-dialog commit-git-dialog" aria-labelledby="commit-git-title" aria-describedby="commit-git-branch" hidden>
+        <h2 id="commit-git-title" class="discard-git-title">Commit and push?</h2>
+        <p id="commit-git-branch" class="discard-git-message"></p>
+        <code id="commit-git-message" class="discard-git-path"></code>
+        <code id="commit-git-paths" class="discard-git-path"></code>
+        <div class="discard-git-actions">
+          <button id="cancel-commit-git" class="text-button" type="button" autofocus>Cancel</button>
+          <button id="confirm-commit-git" class="primary-button" type="button">Commit &amp; Push</button>
+        </div>
+      </dialog>
       <div id="discard-git-dialog" class="dialog-backdrop" hidden>
         <form id="discard-git-form" class="discard-git-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-git-title" aria-describedby="discard-git-message">
           <h2 id="discard-git-title" class="discard-git-title">Discard changes?</h2>
