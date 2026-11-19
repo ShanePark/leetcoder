@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { selectedGitFiles, updateGitCommitControls } from '../../../src/app/git-view'
 import { createGitState } from '../../../src/app/git-controller'
-import { renderDiscardGitDialog } from '../../../src/app/dialogs-view'
+import { renderDiscardGitDialog, renderGitContextMenu } from '../../../src/app/dialogs-view'
 import type { GitChangedFile } from '../../../src/app/types'
 
 describe('Git selection indexing', () => {
@@ -69,5 +69,30 @@ describe('Git selection controls', () => {
     renderDiscardGitDialog(root, { files, busy: false, gitBusy: false })
     expect(elements.get('#discard-git-path')?.textContent).toBe('Q1.java\nQ2.java')
     expect(elements.get('#discard-git-message')?.textContent).toContain('cannot be undone')
+  })
+})
+
+describe('Git context menu', () => {
+  it('names how many highlighted changes Discard acts on', () => {
+    const elements = new Map<string, { textContent: string; hidden: boolean; disabled: boolean; style: object }>()
+    const root = { querySelector: (selector: string) => {
+      if (!elements.has(selector)) elements.set(selector, { textContent: '', hidden: true, disabled: false, style: {} })
+      return elements.get(selector)
+    } } as unknown as HTMLElement
+    const files = ['Q1.java', 'Q2.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    const options = {
+      context: { file: files[0], x: 0, y: 0 },
+      files,
+      busy: false,
+      gitBusy: false,
+      loading: false,
+    }
+    renderGitContextMenu(root, { ...options, targetCount: 1 })
+    expect(elements.get('#git-discard-action')?.textContent).toBe('Discard Changes')
+    renderGitContextMenu(root, { ...options, targetCount: 2 })
+    expect(elements.get('#git-discard-action')?.textContent).toBe('Discard 2 Selected Changes')
+    expect(elements.get('#git-context-menu')?.hidden).toBe(false)
   })
 })

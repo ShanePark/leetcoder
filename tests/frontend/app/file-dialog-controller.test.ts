@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { file, deferred, installDom, startApp, createBackend, type DomHarness } from './lifecycle-harness'
 import { FileDialogController, type FileDialogState } from '../../../src/app/file-dialog-controller'
-import { renderDiscardGitDialog } from '../../../src/app/dialogs-view'
+import { renderDiscardGitDialog, renderGitContextMenu } from '../../../src/app/dialogs-view'
 import { createGitState } from '../../../src/app/git-controller'
 
 function harness(dom: DomHarness) {
@@ -123,34 +123,53 @@ describe('file dialog orchestration', () => {
     expect(dom.document.activeElement).toBe(dom.root.querySelector('#git-tab'))
   })
 
-  it('confirms a snapshot of all selected changes when the clicked file is selected', () => {
+  it('confirms a snapshot of all highlighted rows when the clicked row is highlighted', () => {
     const changes = ['Q1.java', 'Q2.java', 'Q3.java'].map((path) => ({
       path, status: 'M', staged: false, additions: null, deletions: null,
     }))
     h.state.git.files = changes
-    h.state.git.selectedPaths = ['Q1.java', 'Q2.java', 'missing.java']
+    h.state.git.rowSelectedPaths = ['Q1.java', 'Q2.java', 'missing.java']
     h.controller.openGitContextMenu(changes[1], 0, 0)
+    expect(renderGitContextMenu).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      targetCount: 2,
+    }))
     dom.root.querySelector('#git-discard-action').dispatch('click')
     expect(h.operations.discardGitChanges).not.toHaveBeenCalled()
     expect(renderDiscardGitDialog).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
       files: changes.slice(0, 2),
     }))
-    h.state.git.selectedPaths = ['Q3.java']
+    h.state.git.rowSelectedPaths = ['Q3.java']
     dom.root.querySelector('#discard-git-form').dispatch('submit', { preventDefault: vi.fn() })
     expect(h.operations.discardGitChanges).toHaveBeenCalledExactlyOnceWith(changes.slice(0, 2))
   })
 
-  it('discards only an unselected clicked file without changing selection', () => {
+  it('ignores commit checkboxes when choosing what to discard', () => {
+    const changes = ['Q1.java', 'Q2.java', 'Q3.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    h.state.git.files = changes
+    h.state.git.selectedPaths = ['Q1.java', 'Q2.java', 'Q3.java']
+    h.state.git.rowSelectedPaths = ['Q2.java']
+    h.controller.openGitContextMenu(changes[1], 0, 0)
+    expect(renderGitContextMenu).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      targetCount: 1,
+    }))
+    dom.root.querySelector('#git-discard-action').dispatch('click')
+    dom.root.querySelector('#discard-git-form').dispatch('submit', { preventDefault: vi.fn() })
+    expect(h.operations.discardGitChanges).toHaveBeenCalledExactlyOnceWith(changes[1])
+    expect(h.state.git.selectedPaths).toEqual(['Q1.java', 'Q2.java', 'Q3.java'])
+  })
+
+  it('discards only the clicked file when it is outside the highlighted rows', () => {
     const changes = ['Q1.java', 'Q2.java'].map((path) => ({
       path, status: 'M', staged: false, additions: null, deletions: null,
     }))
     h.state.git.files = changes
-    h.state.git.selectedPaths = ['Q1.java']
+    h.state.git.rowSelectedPaths = ['Q1.java']
     h.controller.openGitContextMenu(changes[1], 0, 0)
     dom.root.querySelector('#git-discard-action').dispatch('click')
     dom.root.querySelector('#discard-git-form').dispatch('submit', { preventDefault: vi.fn() })
     expect(h.operations.discardGitChanges).toHaveBeenCalledExactlyOnceWith(changes[1])
-    expect(h.state.git.selectedPaths).toEqual(['Q1.java'])
   })
 
   it('wires the heading checkbox to select-all and clear commands', async () => {

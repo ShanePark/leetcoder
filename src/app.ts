@@ -1123,8 +1123,11 @@ export class LeetcoderApp {
       },
       {
         onToggleFile: (path, selected) => this.gitController.toggleFile(path, selected),
-        onSelectFile: (path) => this.gitController.setActiveFile(path),
-        onContextMenu: (file, x, y) => this.fileDialogs.openGitContextMenu(file, x, y),
+        onSelectFile: (path, modifiers) => this.gitController.selectRow(path, modifiers),
+        onContextMenu: (file, x, y) => {
+          this.gitController.selectRowForContextMenu(file.path)
+          this.fileDialogs.openGitContextMenu(file, x, y)
+        },
       },
     )
     this.paneLayout.applyGitFileListWidth()

@@ -53,6 +53,8 @@ export interface FileContextMenuRenderOptions {
 export interface GitContextMenuRenderOptions {
   context: GitContextMenuState | null
   files: GitChangedFile[]
+  /** How many changes Discard acts on. */
+  targetCount: number
   busy: boolean
   gitBusy: boolean
   loading: boolean
@@ -252,6 +254,10 @@ export function renderGitContextMenu(root: HTMLElement, options: GitContextMenuR
   menu.style.top = `${position.y}px`
   menu.hidden = false
   const disabled = options.busy || options.gitBusy || options.loading
-  requiredElement<HTMLButtonElement>(root, '#git-discard-action').disabled = disabled
+  const discard = requiredElement<HTMLButtonElement>(root, '#git-discard-action')
+  discard.textContent = options.targetCount > 1
+    ? `Discard ${options.targetCount} Selected Changes`
+    : 'Discard Changes'
+  discard.disabled = disabled
   requiredElement<HTMLButtonElement>(root, '#git-show-file-action').disabled = disabled
 }

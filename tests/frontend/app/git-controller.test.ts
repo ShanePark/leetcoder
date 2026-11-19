@@ -425,3 +425,105 @@ describe('GitController', () => {
     expect(controller.state.error).toBeNull()
   })
 })
+
+describe('GitController row selection', () => {
+  function rowHarness() {
+    const getGitDiff = vi.fn().mockResolvedValue('')
+    const result = harness({ listGitChanges: vi.fn(), getGitDiff })
+    result.controller.state.files = ['Q1.java', 'Q2.java', 'Q3.java', 'Q4.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    result.controller.state.selectedPaths = ['Q1.java', 'Q2.java', 'Q3.java', 'Q4.java']
+    return { ...result, getGitDiff }
+  }
+  const plain = { toggle: false, range: false }
+  const toggle = { toggle: true, range: false }
+  const range = { toggle: false, range: true }
+
+  it('selects one row on a plain click and makes it the active diff', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q2.java', plain)
+    controller.selectRow('Q3.java', plain)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q3.java'])
+    expect(controller.state.activePath).toBe('Q3.java')
+    expect(controller.state.selectedPaths).toEqual(['Q1.java', 'Q2.java', 'Q3.java', 'Q4.java'])
+  })
+
+  it('toggles rows with Ctrl/Cmd and keeps the last row selected', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q3.java', plain)
+    controller.selectRow('Q1.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java', 'Q3.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+    expect(controller.state.rowSelectionAnchor).toBe('Q1.java')
+    controller.selectRow('Q3.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+    controller.selectRow('Q1.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+  })
+
+  it('moves the active diff to a selected row when Ctrl/Cmd removes the active row', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q1.java', plain)
+    controller.selectRow('Q3.java', toggle)
+    controller.selectRow('Q3.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+  })
+
+  it('selects a range from the anchor with Shift and adds it with Ctrl+Shift', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q3.java', plain)
+    controller.selectRow('Q1.java', range)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java', 'Q2.java', 'Q3.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+    expect(controller.state.rowSelectionAnchor).toBe('Q3.java')
+    controller.selectRow('Q4.java', range)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q3.java', 'Q4.java'])
+
+    controller.selectRow('Q1.java', plain)
+    controller.selectRow('Q3.java', toggle)
+    controller.selectRow('Q4.java', { toggle: true, range: true })
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java', 'Q3.java', 'Q4.java'])
+  })
+
+  it('narrows the selection to a right-clicked row outside it', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q1.java', plain)
+    controller.selectRow('Q2.java', range)
+    controller.selectRowForContextMenu('Q2.java')
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java', 'Q2.java'])
+    controller.selectRowForContextMenu('Q4.java')
+    expect(controller.state.rowSelectedPaths).toEqual(['Q4.java'])
+    expect(controller.state.activePath).toBe('Q4.java')
+  })
+
+  it('ignores row clicks while Git is busy', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q1.java', plain)
+    controller.state.busy = true
+    controller.selectRow('Q2.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+  })
+
+  it('drops rows that are no longer changed after a refresh', async () => {
+    const listGitChanges = vi.fn()
+      .mockResolvedValueOnce(' M Q1.java\n M Q2.java\n M Q3.java')
+      .mockResolvedValueOnce(' M Q1.java\n M Q3.java')
+      .mockResolvedValueOnce(' M Q1.java')
+    const { controller } = harness({ listGitChanges, getGitDiff: vi.fn().mockResolvedValue('') })
+
+    await controller.refreshStatus()
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+    controller.selectRow('Q2.java', { toggle: false, range: false })
+    controller.selectRow('Q3.java', { toggle: true, range: false })
+    await controller.refreshStatus()
+    expect(controller.state.rowSelectedPaths).toEqual(['Q3.java'])
+    expect(controller.state.rowSelectionAnchor).toBe('Q3.java')
+    await controller.refreshStatus()
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+    expect(controller.state.rowSelectionAnchor).toBe('Q1.java')
+  })
+})

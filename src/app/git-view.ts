@@ -1,4 +1,4 @@
-import type { BottomPanelTab, GitChangedFile, GitState } from './types'
+import type { BottomPanelTab, GitChangedFile, GitRowSelectModifiers, GitState } from './types'
 import { iconFor } from '../icons'
 import {
   defaultGitCommitMessage,
@@ -22,7 +22,7 @@ export interface GitPanelViewModel {
 
 export interface GitPanelViewCallbacks {
   onToggleFile: (path: string, selected: boolean) => void
-  onSelectFile: (path: string) => void
+  onSelectFile: (path: string, modifiers: GitRowSelectModifiers) => void
   onContextMenu: (file: GitChangedFile, x: number, y: number) => void
 }
 
@@ -65,6 +65,7 @@ export function renderGitPanel(
   }
 
   const selectedPaths = new Set(git.selectedPaths)
+  const rowSelectedPaths = new Set(git.rowSelectedPaths)
   const list = requiredElement<HTMLElement>(root, '#git-file-list')
   list.innerHTML = ''
   if (git.loading && git.files.length === 0) {
@@ -83,6 +84,7 @@ export function renderGitPanel(
       row.className = 'git-file-row'
       row.classList.toggle('is-active', file.path === git.activePath)
       row.classList.toggle('is-selected', selectedPaths.has(file.path))
+      row.classList.toggle('is-row-selected', rowSelectedPaths.has(file.path))
       row.title = file.path
       const checkbox = document.createElement('input')
       checkbox.type = 'checkbox'
@@ -97,7 +99,14 @@ export function renderGitPanel(
       fileButton.type = 'button'
       fileButton.className = 'git-file-button'
       fileButton.disabled = busy || git.busy
-      fileButton.addEventListener('click', () => callbacks.onSelectFile(file.path))
+      // Shift-click would otherwise extend the page's text selection.
+      fileButton.addEventListener('mousedown', (event) => {
+        if (event.shiftKey) event.preventDefault()
+      })
+      fileButton.addEventListener('click', (event) => callbacks.onSelectFile(file.path, {
+        toggle: event.ctrlKey || event.metaKey,
+        range: event.shiftKey,
+      }))
       const statusBadge = document.createElement('span')
       statusBadge.className = `git-file-status git-file-status-${normalizeGitStatusLabel(file.status)}`
       statusBadge.textContent = gitStatusGlyph(file.status)
