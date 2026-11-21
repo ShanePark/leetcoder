@@ -24,6 +24,8 @@ export interface JavaMethodCreationPlan {
   /** The exact source snapshot this plan was computed from. */
   source: string
   change: JavaIntentionChange
+  /** Edits to other calls that land together with `change`, in the same snapshot coordinates. */
+  callChanges?: readonly JavaIntentionChange[]
   /** The post-change selection, usually the generated default return value. */
   selection: { from: number; to: number }
 }

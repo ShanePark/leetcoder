@@ -605,6 +605,21 @@ describe('AI failing-case test method', () => {
     expect(applyUndo(undone.state).handled).toBe(false)
   })
 
+  it('adds a time-limit case built from the JDK with a plain call and no assertion', () => {
+    const statements = [
+      'int[] parent = new int[100000];',
+      'Arrays.setAll(parent, i -> i - 1);',
+      'String s = "a".repeat(100000);',
+      'minimumCost(parent.length, s.length());',
+    ]
+    const state = EditorState.create({ doc: FILLED, extensions: [java(), history(), javaAutoImports] })
+    const { view, state: current } = mutableEditorView(state)
+    expect(applyAiCaseTestStatements(view, statements)).toMatchObject({ ok: true, methodName: 'test2' })
+    const added = current().doc.toString()
+    expect(added).toContain('import java.util.Arrays;')
+    expect(added).toContain(`public void test2() {\n${statements.map((line) => `        ${line}`).join('\n')}\n    }`)
+  })
+
   it('leaves the document alone when the plan is rejected', () => {
     const { view, state } = mutableEditorView(javaState(FILLED))
     expect(applyAiCaseTestStatements(view, ['foo bar baz();'])).toEqual({ ok: false, reason: 'syntax-error' })

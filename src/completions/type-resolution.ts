@@ -1,5 +1,5 @@
 import { JAVA_HELPER_NODE_TYPES, JAVA_TYPE_IMPORTS, TYPE_GROUPS, type JavaSymbol } from './model'
-import { baseType } from './source'
+import { baseType, collectJavaSymbols, maskJavaCommentsAndLiterals } from './source'
 import { importLines } from './imports'
 
 export interface JavaReceiverTypeResolution {
@@ -74,6 +74,36 @@ function symbolTypeNames(source: string, symbol: JavaSymbol): string[] {
   return [...new Set([...declared, ...concrete].flatMap((typeName) => canonicalTypes(source, typeName)))]
 }
 
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/
+
+/** The scope start of the body of the only class-like type named `name` in this file. */
+function sameFileTypeBodyStart(masked: string, name: string): number | null {
+  const pattern = new RegExp(`\\b(?:class|interface|enum|record)\\s+${name.replace(/\$/g, '\\$')}\\b[^{;]*\\{`, 'g')
+  const matches = [...masked.matchAll(pattern)]
+  return matches.length === 1 ? matches[0].index + matches[0][0].length : null
+}
+
+/** Follow `value.field.field` through fields declared on classes in this file. */
+function sameFileFieldChain(source: string, receiver: string, position: number, symbols: JavaSymbol[]): JavaSymbol | null {
+  const segments = receiver.split('.')
+  if (segments.length < 2 || !segments.every((segment) => IDENTIFIER.test(segment))) return null
+  let current = symbolFor(symbols, segments[0], position)
+  if (!current) return null
+  const masked = maskJavaCommentsAndLiterals(source)
+  // Position-based symbols drop members of nested classes declared after the
+  // cursor, so read every declaration. A member's scope is its class body.
+  const declarations = collectJavaSymbols(source)
+  for (const field of segments.slice(1)) {
+    const type = current.declaredType
+    if (!type || type.includes('[]') || !IDENTIFIER.test(baseType(type))) return null
+    const bodyStart = sameFileTypeBodyStart(masked, baseType(type))
+    if (bodyStart === null) return null
+    current = declarations.find((symbol) => symbol.name === field && symbol.scopeStart === bodyStart) ?? null
+    if (!current) return null
+  }
+  return current
+}
+
 /**
  * Resolve the static type of an indexed array access such as `grid[0]` or
  * `this.grid[i][j]` from the array's declared type (`int[][]` -> `int[]` -> `int`).
@@ -128,6 +158,17 @@ export function resolveJavaReceiverTypes(
       return { kind: 'legacy', typeNames: [], isStatic: false }
     }
     const typeNames = symbolTypeNames(source, symbol)
+    return typeNames.length
+      ? { kind: 'metadata', typeNames, isStatic: false }
+      : { kind: 'unresolved', typeNames: [], isStatic: false }
+  }
+
+  const field = sameFileFieldChain(source, symbolName, position, symbols)
+  if (field) {
+    if (field.bases.includes('array') || field.declaredType?.includes('[]')) {
+      return { kind: 'legacy', typeNames: [], isStatic: false }
+    }
+    const typeNames = symbolTypeNames(source, field)
     return typeNames.length
       ? { kind: 'metadata', typeNames, isStatic: false }
       : { kind: 'unresolved', typeNames: [], isStatic: false }

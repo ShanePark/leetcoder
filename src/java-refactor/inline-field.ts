@@ -286,10 +286,11 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   const declaratorDimensions = children(variable).filter((part) => part.name === 'Dimension')
   const type = (target.type?.trim().replace(/\s+/g, '') ?? '') + '[]'.repeat(declaratorDimensions.length)
   const arrayType = /^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)(?:\[\])+$/.test(type)
-  if ((!arrayType && !/^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)$/.test(type))
-    || (arrayType && target.field)) return { reason: CONSTANT_ERROR }
   const initializer = children(variable).find((node) => node.from > target.definition.to && node.name !== 'AssignOp'
     && !['LineComment', 'BlockComment', 'Dimension'].includes(node.name))
+  // Other declared types can only inline a class instance creation.
+  const movesConstruction = !arrayType && !/^(?:byte|short|int|long|float|double|char|boolean|String|java\.lang\.String)$/.test(type)
+  if ((movesConstruction && initializer?.name !== 'ObjectCreationExpression') || (arrayType && target.field)) return { reason: CONSTANT_ERROR }
   if (!initializer || !children(variable).some((node) => node.name === 'AssignOp')) return { reason: 'The variable has no initializer.' }
   const sourceTypeNames = new Set(definitions.filter((definition) => [
     'ClassDeclaration', 'InterfaceDeclaration', 'EnumDeclaration', 'RecordDeclaration',
@@ -538,20 +539,41 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     const forSpec = nearestAncestor(reference, new Set(['ForSpec']))
     return Boolean(forSpec?.parent?.name === 'ForStatement' && forSpec.to <= declaration.from && declaration.to <= forSpec.parent.to)
   })
-  const canMoveReadToNextStatement = (): boolean => {
-    if (target.field || ['String', 'java.lang.String'].includes(type)
-      || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1
-      || !readsOnly(initializer, true)) return false
-    if (descendants(initializer).filter(identifierReference).some((reference) => {
-      const binding = resolve(reference)
-      return binding && binding !== 'ambiguous' && computedByEffect(binding)
-    })) return false
+  const readsEffectResult = (): boolean => descendants(initializer).filter(identifierReference).some((reference) => {
+    const binding = resolve(reference)
+    return binding && binding !== 'ambiguous' && computedByEffect(binding)
+  })
+  const movesToNextStatement = (isAllowed: (part: Node, parent: Node) => boolean): boolean => {
     const references = targetReferences()
     if (references.length !== 1) return false
     let statement = references[0]
     while (statement.parent && !sameNode(statement.parent, declaration.parent!)) statement = statement.parent
     return nextStatementAfterDeclaration(statement) && runsWithStatement(references[0], statement, false)
-      && onlyReadsBeforeUse(references[0], statement, allowedBeforeMovedRead)
+      && onlyReadsBeforeUse(references[0], statement, isAllowed)
+  }
+  const canMoveReadToNextStatement = (): boolean => {
+    if (target.field || ['String', 'java.lang.String'].includes(type)
+      || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1
+      || !readsOnly(initializer, true) || readsEffectResult()) return false
+    return movesToNextStatement(allowedBeforeMovedRead)
+  }
+  // The constructor may write the heap but not locals, and anything that throws first would skip its effects.
+  const allowedBeforeConstruction = (part: Node, parent: Node): boolean => allowedBeforeMovedRead(part, parent)
+    // An array store checks its target only after evaluating the right side, so only its subexpressions run first.
+    && (parent.name === 'AssignmentExpression' && part.name === 'ArrayAccess' ? children(part) : [part])
+      .every((value) => !descendants(value).some((nested) => ['ArrayAccess', 'FieldAccess', 'MethodInvocation'].includes(nested.name)))
+  const canMoveConstruction = (): boolean => {
+    const parts = children(initializer).filter((part) => !['LineComment', 'BlockComment'].includes(part.name))
+    const created = parts[1] && TYPE_NODES.has(parts[1].name) ? source.slice(parts[1].from, parts[1].to).replace(/\s+/g, '') : null
+    const argumentsNode = parts[2]
+    // A different declared type could change overload resolution or generic inference at the use.
+    if (target.field || children(declaration).filter((part) => part.name === 'VariableDeclarator').length !== 1
+      || parts.length !== 3 || parts[0].name !== 'new' || argumentsNode.name !== 'ArgumentList'
+      || !created || (type !== 'var' && created !== type) || created.includes('<>')
+      || definitions.some((definition) => definition.parent?.name === 'EnumDeclaration' && source.slice(definition.from, definition.to) === created)
+      || !children(argumentsNode).filter((part) => !['(', ')', ','].includes(part.name)).every((part) => readsOnly(part, true))
+      || readsEffectResult()) return false
+    return movesToNextStatement(allowedBeforeConstruction)
   }
   const immutableRead = (node: Node): boolean => {
     if (['LineComment', 'BlockComment'].includes(node.name)) return true
@@ -690,8 +712,8 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     return binding
   }
   const lengthReceiver = stableStringLengthReceiver()
-  const stableInitializer = Boolean(lengthReceiver) || stableExpression(initializer, new Set([target.definition.from]))
-  if (!stableInitializer && (dependencySyntaxError || !(arrayType ? canMoveArrayInitializer() : canMoveToAdjacentArgument() || canMoveReadToNextStatement() || canRepeatImmutableRead()))) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
+  const stableInitializer = !movesConstruction && (Boolean(lengthReceiver) || stableExpression(initializer, new Set([target.definition.from])))
+  if (!stableInitializer && (dependencySyntaxError || !(movesConstruction ? canMoveConstruction() : arrayType ? canMoveArrayInitializer() : canMoveToAdjacentArgument() || canMoveReadToNextStatement() || canRepeatImmutableRead()))) return dependencySyntaxError ? syntaxFailure : { reason: CONSTANT_ERROR }
   const initializerConstant = !lengthReceiver && stableInitializer && compileConstant(initializer)
   if (!initializerConstant && ['String', 'java.lang.String'].includes(type)) return { reason: 'A runtime String initializer cannot be duplicated safely.' }
   for (const reference of descendants(initializer).filter(identifierReference)) {
@@ -716,7 +738,7 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
   })) {
     return { reason: 'An earlier initializer may read the field before it is initialized.' }
   }
-  if (!arrayType && !isFinal && (type === 'String' || type === 'java.lang.String'
+  if (!arrayType && !movesConstruction && !isFinal && (type === 'String' || type === 'java.lang.String'
     || descendants(initializer).some((node) => ['StringLiteral', 'TextBlock'].includes(node.name)))) {
     // Non-constant String reads must not gain constant-expression concatenation and interning semantics.
     return { reason: 'String variables must be final to inline safely.' }
@@ -839,6 +861,8 @@ export function planJavaFieldInlining(source: string, selectionFrom: number, sel
     'BooleanLiteral', 'StringLiteral', 'TextBlock', 'ParenthesizedExpression',
   ]).has(initializer.name) ? initializerText : `(${initializerText})`
   const replacementFor = (access: Node): string => {
+    // A class instance creation is a primary expression, so any use position accepts it unparenthesized.
+    if (movesConstruction) return initializerText
     const parent = access.parent
     const delimited = parent?.getChild(')')?.to === parent?.to
       && (parent?.name === 'ParenthesizedExpression'

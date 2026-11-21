@@ -390,7 +390,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
       <div id="ai-case-dialog" class="dialog-backdrop" hidden>
         <form id="ai-case-form" class="rename-file-dialog ai-case-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-case-title" aria-describedby="ai-case-message">
           <h2 id="ai-case-title" class="rename-file-title">Add failing case</h2>
-          <p id="ai-case-message" class="discard-git-message">Paste the inputs and Expected value of a failed submission. They become a new test method in <code id="ai-case-file"></code>.</p>
+          <p id="ai-case-message" class="discard-git-message">Paste a failed submission's inputs and Expected value, or paste or describe a time-limit case. It becomes a new test method in <code id="ai-case-file"></code>.</p>
           <label class="sr-only" for="ai-case-input">Failing case</label>
           <textarea id="ai-case-input" class="rename-file-input ai-case-input" rows="10" autocomplete="off" spellcheck="false" placeholder="nums =&#10;[2,7,11,15]&#10;target =&#10;9&#10;Expected&#10;[0,1]"></textarea>
           <div class="rename-file-actions">

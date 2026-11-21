@@ -102,8 +102,10 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
     entries: [
       { id: 'move-to-line-end', bindings: ['Mod-ArrowRight', 'Alt-ArrowRight'], description: 'Move to line end' },
       { id: 'goto-definition', bindings: ['Mod-Click', 'Alt-Click'], description: 'Go to definition', hint: true },
+      { id: 'find', bindings: ['Mod-f', 'Alt-f'], description: 'Find in file' },
       { id: 'search-project', bindings: ['Shift-Mod-f', 'Shift-Alt-f'], description: 'Search project' },
       { id: 'focus-file-search', bindings: ['Shift-Mod-o', 'Shift-Alt-o'], description: 'Focus file search' },
+      { id: 'next-error', bindings: ['F2'], description: 'Next error' },
       { id: 'open-settings', bindings: ['Mod-,', 'Alt-,'], description: 'Open settings' },
       // Alt+/ is the physical Linux twin of Cmd+/ (toggle comment). Keep the
       // shortcut list on a shifted chord so the two actions remain distinct.

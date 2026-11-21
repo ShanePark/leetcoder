@@ -98,6 +98,44 @@ describe('Java receiver type resolution', () => {
     expect(resolve('class Solution { Ps value; void test() { value.| } }', 'value').typeNames).toEqual(['io.github.shanepark.Ps'])
   })
 
+  it('follows field chains through classes declared in the same file', () => {
+    const source = `import java.util.*;
+class Solution {
+    int dfs(Node node) {
+        for (var item : node.children.|) {}
+        return 1;
+    }
+
+    class Node {
+        List<Node> children = new ArrayList<>();
+        Node parent;
+        int[] counts;
+        void visit() {
+            Map<Integer, Integer> local = new HashMap<>();
+        }
+    }
+}`
+    const children = resolve(source, 'node.children')
+    expect(children.kind).toBe('metadata')
+    expect(children.isStatic).toBe(false)
+    expect(children.typeNames).toContain('java.util.List')
+    expect(resolve(source, 'node.parent.children').typeNames).toEqual(children.typeNames)
+    expect(resolve(source, 'node.counts').kind).toBe('legacy')
+    expect(resolve(source, 'node.local').kind).toBe('unresolved')
+    expect(resolve(source, 'node.missing').kind).toBe('unresolved')
+  })
+
+  it('does not follow a field chain into a class name declared twice', () => {
+    const source = `class Solution {
+    void test(Node node) { node.next.| }
+    class Node { Node next; }
+}
+class Other {
+    class Node { String next; }
+}`
+    expect(resolve(source, 'node.next').kind).toBe('unresolved')
+  })
+
   it('does not send unresolved value chains to the metadata inspector', () => {
     expect(resolve('class Solution { void test() { Object value; value.child.| } }', 'value.child').kind).toBe('unresolved')
     expect(resolve('class Solution { void test() { Object System; System.out.| } }', 'System.out').kind).toBe('unresolved')

@@ -1,6 +1,9 @@
 import { EditorState, type TransactionSpec } from '@codemirror/state'
 import { EditorView, keymap, runScopeHandlers } from '@codemirror/view'
+import { searchPanelOpen } from '@codemirror/search'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { setEditorIssues } from '../../../src/editor/gutters'
+import { diagnosticViewState } from '../../../src/editor/diagnostics'
 import {
   JavaEditor,
   isFontSizeShortcut,
@@ -10,6 +13,7 @@ import {
   isExtractMethodShortcut,
   isInlineFieldShortcut,
   isFileSearchAltShortcut,
+  isFindAltShortcut,
   isGitCommitAltShortcut,
   isGitCommitPushShortcut,
   isProjectSearchAltShortcut,
@@ -55,6 +59,7 @@ vi.mock('@codemirror/view', async (importOriginal) => {
     state: EditorState
     constructor(options: { state: EditorState }) { this.state = options.state }
     dispatch = (spec: TransactionSpec) => { this.state = this.state.update(spec).state }
+    focus = () => {}
     static domEventHandlers(handlers: Parameters<typeof original.EditorView.domEventHandlers>[0]) {
       parameterInfoMocks.handlers.push(handlers)
       return original.EditorView.domEventHandlers(handlers)
@@ -106,6 +111,7 @@ describe('Option shortcut matchers', () => {
     expect(isSettingsAltShortcut({ ...base, code: 'Comma' })).toBe(true)
     expect(isFileSearchAltShortcut({ ...base, code: 'KeyO', shiftKey: true })).toBe(true)
     expect(isProjectSearchAltShortcut({ ...base, code: 'KeyF', shiftKey: true })).toBe(true)
+    expect(isFindAltShortcut({ ...base, code: 'KeyF' })).toBe(true)
     expect(isShortcutHelpAltShortcut({ ...base, code: 'Slash', shiftKey: true })).toBe(true)
     expect(isLineCutAltShortcut({ ...base, code: 'KeyV' })).toBe(false)
   })
@@ -128,6 +134,9 @@ describe('Option shortcut matchers', () => {
     expect(isSettingsAltShortcut({ ...base, code: 'Comma', shiftKey: true })).toBe(false)
     expect(isFileSearchAltShortcut({ ...base, code: 'KeyO' })).toBe(false)
     expect(isProjectSearchAltShortcut({ ...base, code: 'KeyF' })).toBe(false)
+    expect(isFindAltShortcut({ ...base, code: 'KeyF', shiftKey: true })).toBe(false)
+    expect(isFindAltShortcut({ ...base, code: 'KeyF', metaKey: true })).toBe(false)
+    expect(isFindAltShortcut({ ...base, code: 'KeyF', ctrlKey: true })).toBe(false)
     expect(isFileSearchAltShortcut({ ...base, code: 'KeyO', shiftKey: true, metaKey: true })).toBe(false)
     expect(isProjectSearchAltShortcut({ ...base, code: 'KeyF', shiftKey: true, metaKey: true })).toBe(false)
     expect(isShortcutHelpAltShortcut({ ...base, code: 'Slash' })).toBe(false)
@@ -289,5 +298,42 @@ describe('Inline Field shortcut', () => {
     expect(isInlineFieldShortcut({ ...event, ctrlKey: true })).toBe(false)
     expect(isInlineFieldShortcut({ ...event, shiftKey: true })).toBe(false)
     expect(isInlineFieldShortcut({ ...event, code: 'KeyM' })).toBe(false)
+  })
+})
+
+describe('next error shortcut integration', () => {
+  it('runs next error on plain F2', () => {
+    const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement)
+    editor.view.dispatch({ changes: { from: 0, insert: 'class S {}\nint x' } })
+    editor.view.dispatch({
+      effects: setEditorIssues.of([{ file: 'Solution.java', line: 2, column: 5, caret: '    ^', message: 'bad' }]),
+      selection: { anchor: 0 },
+    })
+    const event = { key: 'F2', keyCode: 113, shiftKey: false, altKey: false, metaKey: false, ctrlKey: false } as KeyboardEvent
+    expect(runScopeHandlers(editor.view, event, 'editor')).toBe(true)
+    expect(editor.view.state.selection.main.head).toBe('class S {}\nint '.length)
+    expect(editor.view.state.field(diagnosticViewState).activeIds).toEqual([0])
+  })
+})
+
+describe('find shortcut integration', () => {
+  it('opens the find bar from the Linux physical Alt+F handler', () => {
+    vi.stubGlobal('navigator', { platform: 'Linux', userAgent: '' })
+    const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement)
+    const event = {
+      key: 'f', code: 'KeyF', shiftKey: false, altKey: true, metaKey: false, ctrlKey: false,
+      preventDefault: vi.fn(), stopPropagation: vi.fn(),
+    } as unknown as KeyboardEvent
+    expect(parameterInfoMocks.handlers.some((handlers) => handlers.keydown?.(event, editor.view))).toBe(true)
+    expect(searchPanelOpen(editor.view.state)).toBe(true)
+    expect(event.stopPropagation).toHaveBeenCalledOnce()
+  })
+
+  it.each(['editor', 'search-panel'])('binds the Linux Alt+F keymap in the %s scope', (scope) => {
+    vi.stubGlobal('navigator', { platform: 'Linux', userAgent: '' })
+    const editor = new JavaEditor({ ownerDocument: { body: {} } } as HTMLElement)
+    const event = { key: 'f', keyCode: 70, shiftKey: false, altKey: true, metaKey: false, ctrlKey: false } as KeyboardEvent
+    expect(runScopeHandlers(editor.view, event, scope)).toBe(true)
+    expect(searchPanelOpen(editor.view.state)).toBe(true)
   })
 })

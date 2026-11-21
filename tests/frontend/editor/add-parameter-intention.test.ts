@@ -121,11 +121,107 @@ describe('Add method parameter intention', () => {
     for (const source of sources) expect(actions(source)).toEqual([])
   })
 
-  it('suppresses edits that would invalidate old-arity or incompatible recursive calls', () => {
-    for (const extra of ['dfs(sb, 0, n);', 'dfs(sb, answer, 0, n);', 'dfs("wrong", sb, 0, n);', 'dfs(unknown, sb, 0, n);']) {
+  it('suppresses edits that would invalidate incompatible recursive calls', () => {
+    for (const extra of ['dfs(sb, answer, 0, n);', 'dfs("wrong", sb, 0, n);', 'dfs(unknown, sb, 0, n);']) {
       const source = screenshot.replace('            return;', `            ${extra}\n            return;`)
       expect(actions(source)).toEqual([])
     }
+  })
+
+  it('passes the new argument to calls that still use the old signature', () => {
+    const source = `class Solution {
+    public int[] findSubtreeSizes(int[] parent, String s) {
+        Node[] nodes = new Node[parent.length];
+        int[] answer = new int[parent.length];
+        dfs(nodes[0], answer);
+        return answer;
+    }
+
+    private int dfs(Node node) {
+        int sum = 1;
+        for (Node child : node.children.values()) {
+            sum += dfs(child);
+        }
+        return sum;
+    }
+
+    class Node {
+        Map<Character, Node> children = new HashMap<>();
+    }
+}`
+    const [action] = javaIntentionsAt(source, source.indexOf('dfs(nodes') + 1)
+    expect(action?.label).toBe("Add 'int[]' as 2nd parameter to method 'dfs()'")
+    expect(action?.detail).toBe('int dfs(Node node, int[] answer)')
+
+    let state = EditorState.create({
+      doc: source,
+      selection: { anchor: source.indexOf('dfs(nodes') + 1 },
+      extensions: [java(), history(), javaIntentionsExtension],
+    })
+    const view = {
+      get state() { return state },
+      dispatch: (spec: Parameters<EditorView['dispatch']>[0]) => { state = state.update(spec).state },
+      focus: () => undefined,
+    } as unknown as EditorView
+    expect(showJavaIntentions(view)).toBe(true)
+    expect(applySelectedJavaIntention(view)).toBe(true)
+    expect(state.doc.toString()).toBe(source
+      .replace('private int dfs(Node node)', 'private int dfs(Node node, int[] answer)')
+      .replace('sum += dfs(child);', 'sum += dfs(child, answer);'))
+    const selection = state.selection.main
+    expect(state.doc.sliceString(selection.from, selection.to)).toBe('answer')
+    expect(state.doc.sliceString(selection.from - 'int[] '.length, selection.to)).toBe('int[] answer')
+    expect(undo(view)).toBe(true)
+    expect(state.doc.toString()).toBe(source)
+  })
+
+  it('accepts a recursive call that already passes the new argument from a for-each variable', () => {
+    const source = `class Solution {
+    public int[] findSubtreeSizes(int[] parent, String s) {
+        Node[] nodes = new Node[parent.length];
+        int[] answer = new int[parent.length];
+        dfs(nodes[0], answer);
+        return answer;
+    }
+
+    private int dfs(Node node) {
+        int sum = 1;
+        for (Node child : node.children.values()) {
+            sum += dfs(child, answer);
+        }
+        return answer[node.index] = sum;
+    }
+
+    class Node {
+        Map<Character, Node> children = new HashMap<>();
+        int index;
+    }
+}`
+    const [action] = javaIntentionsAt(source, source.indexOf('dfs(nodes') + 1)
+    expect(action?.label).toBe("Add 'int[]' as 2nd parameter to method 'dfs()'")
+    const change = action!.plan.change
+    expect(action!.plan.callChanges).toEqual([])
+    expect(source.slice(0, change.from) + change.insert + source.slice(change.to))
+      .toBe(source.replace('private int dfs(Node node)', 'private int dfs(Node node, int[] answer)'))
+
+    const wrongType = source.replace('for (Node child :', 'for (String child :')
+    expect(javaIntentionsAt(wrongType, wrongType.indexOf('dfs(nodes') + 1)).toEqual([])
+  })
+
+  it('inserts the argument at its position in old-arity calls before and after the method', () => {
+    const source = screenshot
+      .replace('        return answer;', '        dfs(sb, 1, n);\n        return answer;')
+      .replace('            return;', '            dfs(sb, 0, n);\n            return;')
+    const editor = harness(source)
+    expect(showJavaIntentions(editor.view)).toBe(true)
+    expect(applySelectedJavaIntention(editor.view)).toBe(true)
+    const updated = editor.state().doc.toString()
+    expect(updated).toContain('        dfs(answer, sb, 1, n);\n        return answer;')
+    expect(updated).toContain('            dfs(answer, sb, 0, n);\n            return;')
+    expect(updated).toContain('private void dfs(List<String> answer, StringBuilder sb, int openCnt, int n)')
+    const selection = editor.state().selection.main
+    expect(updated.slice(selection.from, selection.to)).toBe('answer')
+    expect(updated.slice(selection.from - 'List<String> '.length, selection.from)).toBe('List<String> ')
   })
 
   it('adds the parameter for the recursive screenshot from the caller or either recursive call', () => {

@@ -1028,6 +1028,21 @@ describe('AI test generation button', () => {
       expect(editor().source).toBe(filledSource)
     })
 
+    it('explains an empty result in terms of a pasted or described case', async () => {
+      const backend = configuredBackend()
+      vi.mocked(backend.aiGenerateTests).mockResolvedValue({ ...okResult, statements: [] })
+      await openStub(backend, filledSource)
+      button().dispatch('click')
+      submitCase(pasted)
+
+      await vi.waitFor(() => {
+        expect(lastToast()?.message).toContain(
+          'the case may lack an input or Expected value without asking for a time-limit case',
+        )
+      })
+      expect(editor().source).toBe(filledSource)
+    })
+
     it('starts the next case from an empty field once a case was added', async () => {
       const backend = configuredBackend()
       await openStub(backend, filledSource)

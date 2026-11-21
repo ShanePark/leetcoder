@@ -467,4 +467,30 @@ describe('metadata-backed Java member completions', () => {
     expect(name.inspect).toHaveBeenCalledWith(['java.lang.String'])
     expect(name.result?.options.map((option) => option.label)).toEqual(['length()'])
   })
+
+  it('resolves member completions through a field of a class in the same file', async () => {
+    const source = `import java.util.*;
+class Solution {
+    private int dfs(Node node) {
+        int sum = 1;
+        for (var item : node.children.|) {
+        }
+        return sum;
+    }
+
+    class Node {
+        List<Node> children = new ArrayList<>();
+    }
+}`
+    const metadata: JavaTypeMembersMetadata = {
+      fingerprint: 'jdk-test',
+      types: [{
+        typeName: 'java.util.List', available: true, fields: [],
+        methods: [{ name: 'size', returnType: 'int', parameters: [], isStatic: false }],
+      }],
+    }
+    const row = await complete(source, metadata)
+    expect(row.inspect.mock.calls[0]?.[0]).toContain('java.util.List')
+    expect(row.result?.options.map((option) => option.label)).toContain('size()')
+  })
 })

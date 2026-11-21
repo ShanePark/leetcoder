@@ -218,14 +218,33 @@ export function buildDiagnosticRangeDecorations(issues: readonly PositionedIssue
 export function showDiagnosticAtLine(view: EditorView, lineNumber: number): boolean {
   const current = view.state.field(diagnosticViewState)
   const matching = current.issues.filter((entry) => currentLocation(view.state, entry).line === lineNumber)
-  if (matching.length === 0) {
+  return openDiagnostics(view, matching)
+}
+
+/**
+ * Move to the next diagnostic start after the cursor, wrapping to the first,
+ * and open every diagnostic that starts there.
+ */
+export function goToNextDiagnostic(view: EditorView): boolean {
+  const { issues } = view.state.field(diagnosticViewState)
+  if (issues.length === 0) {
     return false
   }
-  const first = matching[0]
+  const head = view.state.selection.main.head
+  const target = (issues.find((entry) => entry.from > head) ?? issues[0]).from
+  return openDiagnostics(view, issues.filter((entry) => entry.from === target))
+}
+
+/** Select the first entry, show all entries in the persistent tooltip, and focus. */
+function openDiagnostics(view: EditorView, entries: readonly PositionedIssue[]): boolean {
+  if (entries.length === 0) {
+    return false
+  }
+  const first = entries[0]
   view.dispatch({
     selection: { anchor: first.from },
     effects: [
-      setActiveDiagnostic.of(matching.map((entry) => entry.id)),
+      setActiveDiagnostic.of(entries.map((entry) => entry.id)),
       EditorView.scrollIntoView(first.from, { y: 'center' }),
     ],
   })
