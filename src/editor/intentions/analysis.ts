@@ -282,17 +282,48 @@ function argumentNodes(node: JavaSyntaxNode): JavaSyntaxNode[] {
   return children(argumentsNode).filter((child) => !PUNCTUATION_NODES.has(child.name))
 }
 
-function eligibleReceiver(node: JavaSyntaxNode): boolean {
+/** The call's receiver: null when unqualified or `this.`, undefined when unsupported. */
+function receiverNode(node: JavaSyntaxNode): JavaSyntaxNode | null | undefined {
   const methodName = directChild(node, 'MethodName')
   if (!methodName) {
-    return false
+    return undefined
   }
   const nodeChildren = children(node)
   const nameIndex = nodeChildren.findIndex((child) => child.from === methodName.from && child.to === methodName.to)
   const meaningful = nodeChildren.slice(0, nameIndex).filter((child) => (
     child.name !== '.' && child.name !== 'TypeArguments'
   ))
-  return meaningful.length === 0 || (meaningful.length === 1 && meaningful[0]?.name === 'this')
+  if (meaningful.length === 0 || (meaningful.length === 1 && meaningful[0]?.name === 'this')) return null
+  if (meaningful.length === 1 && meaningful[0]?.name === 'Identifier') return meaningful[0]
+  return undefined
+}
+
+function classBodyNamed(source: string, root: JavaSyntaxNode, name: string): JavaSyntaxNode | null {
+  const matches = descendants(root, (node) => node.name === 'ClassDeclaration')
+    .filter((declaration) => {
+      const definition = directChild(declaration, 'Definition')
+      return definition !== null && source.slice(definition.from, definition.to) === name
+    })
+  // Two same-named classes in one file cannot be told apart by name alone.
+  return matches.length === 1 ? directChild(matches[0]!, 'ClassBody') : null
+}
+
+/** Resolve `variable.call()` or `ClassName.call()` to a class declared in this file. */
+function receiverTarget(
+  source: string,
+  root: JavaSyntaxNode,
+  receiver: JavaSyntaxNode,
+  call: JavaSyntaxNode,
+  classBody: JavaSyntaxNode,
+  method: JavaMethodInfo | null,
+  declarations: readonly JavaDeclaration[],
+): JavaInvocationInfo['target'] {
+  const name = source.slice(receiver.from, receiver.to)
+  const declaration = declarationAt(declarations, name, call.from, classBody, method)
+  const typeName = declaration ? declaration.type.trim() : name
+  if (!/^[A-Za-z_$][\w$]*$/.test(typeName)) return null
+  const target = classBodyNamed(source, root, typeName)
+  return target ? { classBody: target, static: !declaration } : null
 }
 
 function previousWord(source: string, position: number): string | null {
@@ -306,13 +337,22 @@ function previousWord(source: string, position: number): string | null {
 
 function invocationInfo(
   source: string,
+  root: JavaSyntaxNode,
   node: JavaSyntaxNode,
   methods: readonly JavaMethodInfo[],
+  declarations: readonly JavaDeclaration[] | null,
 ): JavaInvocationInfo | null {
   const nameNode = invocationNameNode(node)
   const classBody = classBodyFor(node)
-  if (!nameNode || !classBody || !eligibleReceiver(node) || node.type.isError) {
+  const receiver = receiverNode(node)
+  if (!nameNode || !classBody || receiver === undefined || node.type.isError) {
     return null
+  }
+  const method = methodFor(node, methods)
+  let target: JavaInvocationInfo['target'] = null
+  if (receiver) {
+    target = declarations && receiverTarget(source, root, receiver, node, classBody, method, declarations)
+    if (!target) return null
   }
   if (previousWord(source, nameNode.from) === 'new') {
     return null
@@ -327,8 +367,9 @@ function invocationInfo(
     nameFrom: nameNode.from,
     nameTo: nameNode.to,
     classBody,
-    method: methodFor(node, methods),
+    method,
     arguments: argumentNodes(node),
+    target,
   }
 }
 
@@ -343,9 +384,11 @@ export function invocationAt(
   root: JavaSyntaxNode,
   methods: readonly JavaMethodInfo[],
   position: number,
+  /** Resolves qualified calls to same-file classes; without it only unqualified calls qualify. */
+  declarations: readonly JavaDeclaration[] | null = null,
 ): JavaInvocationInfo | null {
   const invocations = descendants(root, (node) => node.name === 'MethodInvocation')
-    .map((node) => invocationInfo(source, node, methods))
+    .map((node) => invocationInfo(source, root, node, methods, declarations))
     .filter((invocation): invocation is JavaInvocationInfo => Boolean(invocation))
   const exact = invocations
     .filter((invocation) => invocation.nameFrom <= position && position <= invocation.nameTo)

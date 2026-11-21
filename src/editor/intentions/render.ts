@@ -2,7 +2,6 @@ import { children, leadingIndent, lineBreakFor, lineStart, PUNCTUATION_NODES } f
 import { normalizeType } from './inference'
 import type {
   JavaIntentionChange,
-  JavaInvocationInfo,
   JavaMethodInfo,
   JavaMethodParameter,
   JavaSyntaxNode,
@@ -32,7 +31,8 @@ export function indentationUnit(source: string, classBody: JavaSyntaxNode, fallb
 
 export function methodText(
   source: string,
-  method: JavaInvocationInfo['method'],
+  /** Modifiers with a trailing space, such as `private static `. */
+  modifiers: string,
   returnType: string,
   name: string,
   parameters: readonly JavaMethodParameter[],
@@ -41,8 +41,7 @@ export function methodText(
 ): { text: string; selectionOffset: number; selectionLength: number } {
   const lineBreak = lineBreakFor(source)
   const bodyIndent = memberIndent + unit
-  const staticPrefix = method?.static ? 'static ' : ''
-  const signature = `private ${staticPrefix}${returnType} ${name}(${parameters.map((parameter) => `${parameter.type} ${parameter.name}`).join(', ')})`
+  const signature = `${modifiers}${returnType} ${name}(${parameters.map((parameter) => `${parameter.type} ${parameter.name}`).join(', ')})`
   const defaultValue = defaultReturnValue(returnType)
   if (defaultValue === null) {
     const text = `${memberIndent}${signature} {${lineBreak}${memberIndent}}`
