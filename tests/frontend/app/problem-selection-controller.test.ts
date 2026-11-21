@@ -47,9 +47,18 @@ function problem(frontendId: string, date = utcDateKey()): DailyProblem {
   }
 }
 
+function memoryStorage(): Pick<Storage, 'getItem' | 'setItem'> {
+  const values = new Map<string, string>()
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value) },
+  }
+}
+
 function harness(
   overrides: Partial<SelectionState> = {},
   isWindowVisible: () => boolean = () => true,
+  storage?: Pick<Storage, 'getItem' | 'setItem'>,
 ): {
   controller: ProblemSelectionController
   state: SelectionState
@@ -82,11 +91,173 @@ function harness(
     setMessage: (message, tone) => messages.push({ message, tone }),
     isWindowVisible,
     isDestroyed: () => false,
+    storage,
   })
   return { controller, state, fetchDailyProblem, fetchProblemBySlug, render, messages }
 }
 
 describe('ProblemSelectionController', () => {
+  describe('daily problem persistence', () => {
+    const cacheKey = 'leetcoder.daily-problem'
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-09-10T12:00:00.000Z'))
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('reuses the complete daily problem across controller restarts on the same UTC date', async () => {
+      const storage = memoryStorage()
+      const selected = {
+        ...problem('2'),
+        content: '<p>Cached statement</p>',
+        javaSnippet: 'class Solution { int solve() { return 2; } }',
+      }
+      const first = harness({}, () => true, storage)
+      first.fetchDailyProblem.mockResolvedValue(selected)
+      await first.controller.loadDailyProblem()
+      first.controller.dispose()
+
+      const restarted = harness({}, () => true, storage)
+      await restarted.controller.loadDailyProblem()
+
+      expect(first.fetchDailyProblem).toHaveBeenCalledOnce()
+      expect(restarted.fetchDailyProblem).not.toHaveBeenCalled()
+      expect(restarted.state.dailyProblem).toEqual(selected)
+      expect(restarted.state.dailyProblemDateKey).toBe('2026-09-10')
+      expect(restarted.state.dailyRetryPending).toBe(false)
+      expect(restarted.state.dailyLoading).toBe(false)
+      expect(restarted.controller.isViewingTodayProblem(selected)).toBe(true)
+
+      restarted.fetchProblemBySlug.mockResolvedValue(problem('7', ''))
+      await restarted.controller.loadProblemFromUrl('https://leetcode.com/problems/problem-7/')
+      expect(restarted.state.dailyProblem?.frontendId).toBe('7')
+      restarted.controller.selectToday()
+      expect(restarted.state.dailyProblem).toEqual(selected)
+      expect(restarted.fetchDailyProblem).not.toHaveBeenCalled()
+      expect(JSON.parse(storage.getItem(cacheKey)!)).toEqual(selected)
+      restarted.controller.dispose()
+    })
+
+    it('fetches once at UTC midnight after restoring a current cache', async () => {
+      const storage = memoryStorage()
+      storage.setItem(cacheKey, JSON.stringify(problem('1', '2026-09-10')))
+      vi.setSystemTime(new Date('2026-09-10T23:59:59.500Z'))
+      const { controller, state, fetchDailyProblem } = harness({}, () => true, storage)
+      fetchDailyProblem.mockResolvedValue(problem('2', '2026-09-11'))
+      await controller.loadDailyProblem()
+      expect(fetchDailyProblem).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1500)
+
+      expect(fetchDailyProblem).toHaveBeenCalledOnce()
+      expect(state.dailyProblem?.frontendId).toBe('2')
+      expect(state.dailyProblemDateKey).toBe('2026-09-11')
+      expect(JSON.parse(storage.getItem(cacheKey)!)).toEqual(problem('2', '2026-09-11'))
+      controller.refreshDailyProblemIfStale()
+      expect(fetchDailyProblem).toHaveBeenCalledOnce()
+      controller.dispose()
+    })
+
+    it('loads an available daily problem despite a previous date-only marker and caches it for restart', async () => {
+      const storage = memoryStorage()
+      const selected = { ...problem('2'), javaSnippet: 'class Solution {}', content: '<p>Problem</p>' }
+      storage.setItem('leetcoder.daily-problem-deferred-date', '2026-09-10')
+      const first = harness({}, () => true, storage)
+      first.fetchDailyProblem.mockResolvedValue(selected)
+
+      await first.controller.loadDailyProblem()
+
+      expect(first.fetchDailyProblem).toHaveBeenCalledOnce()
+      expect(first.state.dailyProblem).toEqual(selected)
+      expect(first.state.dailyProblemDateKey).toBe('2026-09-10')
+      expect(JSON.parse(storage.getItem(cacheKey)!)).toEqual(selected)
+      first.controller.dispose()
+
+      const restarted = harness({}, () => true, storage)
+      await restarted.controller.loadDailyProblem()
+
+      expect(restarted.fetchDailyProblem).not.toHaveBeenCalled()
+      expect(restarted.state.dailyProblem).toEqual(selected)
+      restarted.controller.dispose()
+    })
+
+    it.each([
+      ['stale date', JSON.stringify(problem('1', '2026-09-09'))],
+      ['future date', JSON.stringify(problem('1', '2026-09-11'))],
+      ['malformed JSON', '{'],
+      ['missing metadata', JSON.stringify({ date: '2026-09-10', frontendId: '1' })],
+      ['invalid metadata type', JSON.stringify({ ...problem('1'), title: 1 })],
+    ])('fetches a replacement for a cache with %s', async (_case, cached) => {
+      const storage = memoryStorage()
+      storage.setItem(cacheKey, cached)
+      const { controller, state, fetchDailyProblem } = harness({}, () => true, storage)
+      const selected = problem('2')
+      fetchDailyProblem.mockResolvedValue(selected)
+
+      await controller.loadDailyProblem()
+
+      expect(fetchDailyProblem).toHaveBeenCalledOnce()
+      expect(state.dailyProblem).toBe(selected)
+      expect(JSON.parse(storage.getItem(cacheKey)!)).toEqual(selected)
+      controller.dispose()
+    })
+
+    it('keeps successful problem loading usable when storage cannot be read or written', async () => {
+      const storage = {
+        getItem: () => { throw new Error('storage unavailable') },
+        setItem: () => { throw new Error('storage full') },
+      }
+      const { controller, state, fetchDailyProblem, messages } = harness({}, () => true, storage)
+      const selected = problem('2')
+      fetchDailyProblem.mockResolvedValue(selected)
+
+      await controller.loadDailyProblem()
+
+      expect(fetchDailyProblem).toHaveBeenCalledOnce()
+      expect(state.dailyProblem).toBe(selected)
+      expect(state.dailyError).toBeNull()
+      expect(state.dailyRetryPending).toBe(false)
+      expect(messages).toEqual([])
+      controller.dispose()
+    })
+
+    it('does not persist failed or stale provider responses', async () => {
+      const storage = memoryStorage()
+      const { controller, fetchDailyProblem } = harness({}, () => true, storage)
+      fetchDailyProblem
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValueOnce(problem('1', '2026-09-09'))
+      await controller.loadDailyProblem()
+      expect(storage.getItem(cacheKey)).toBeNull()
+
+      await controller.loadDailyProblem(true)
+
+      expect(storage.getItem(cacheKey)).toBeNull()
+      controller.dispose()
+    })
+
+    it('reuses a cached daily problem when the user retries on the same UTC date', async () => {
+      const storage = memoryStorage()
+      storage.setItem(cacheKey, JSON.stringify(problem('1')))
+      const { controller, state, fetchDailyProblem } = harness({}, () => true, storage)
+      fetchDailyProblem.mockResolvedValue(problem('2'))
+      await controller.loadDailyProblem()
+      expect(fetchDailyProblem).not.toHaveBeenCalled()
+
+      controller.retry()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(fetchDailyProblem).not.toHaveBeenCalled()
+      expect(state.dailyProblem?.frontendId).toBe('1')
+      expect(JSON.parse(storage.getItem(cacheKey)!)).toEqual(problem('1'))
+      controller.dispose()
+    })
+  })
+
   it('loads today’s problem and remembers the daily identity while selected manually', async () => {
     const { controller, state, fetchDailyProblem } = harness()
     const selected = problem('3622')

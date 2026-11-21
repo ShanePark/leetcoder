@@ -164,6 +164,45 @@ afterEach(() => {
 })
 
 describe('DocumentController', () => {
+  it('opens and switches case-distinct files in separate tabs with their own source and save path', async () => {
+    const caseVariant: ProblemFileEntry = {
+      ...fileA,
+      path: 'src/main/java/easy/Q1Twosum.java',
+      name: 'Q1Twosum.java',
+    }
+    const { controller, state, backend, editor } = createHarness({ files: [fileA, caseVariant] })
+
+    await controller.openFile(fileA)
+    await controller.openFile(caseVariant)
+
+    expect(state.openTabs.map((tab) => tab.path)).toEqual([fileA.path, caseVariant.path])
+    expect(state.selectedPath).toBe(caseVariant.path)
+    expect(state.selectedFqcn).toBe('easy.Q1Twosum')
+    expect(editor.value).toBe('class B {}')
+    expect(controller.openTabForPath(fileA.path)?.id).toBe(1)
+    expect(controller.openTabForPath(caseVariant.path)?.id).toBe(2)
+    const editedSource = 'class B { int value = 2; }'
+    controller.onEditorChange(editedSource)
+    await controller.flushPendingSave()
+    expect(backend.saveProblemFile).toHaveBeenLastCalledWith('/repo', caseVariant.path, editedSource)
+
+    await controller.openTab(1)
+
+    expect(state.selectedPath).toBe(fileA.path)
+    expect(state.selectedFqcn).toBe('easy.Q1TwoSum')
+    expect(editor.value).toBe('class A {}')
+
+    backend.readProblemFile.mockResolvedValueOnce(editedSource)
+    await controller.openTab(2)
+
+    expect(state.selectedPath).toBe(caseVariant.path)
+    expect(editor.value).toBe(editedSource)
+    expect(backend.readProblemFile.mock.calls.map((call) => call[1])).toEqual([
+      fileA.path, caseVariant.path, fileA.path, caseVariant.path,
+    ])
+    controller.dispose()
+  })
+
   it('opens a file, creates its tab, and resets the editor through one lifecycle', async () => {
     const { controller, state, backend, editor, hooks } = createHarness()
 

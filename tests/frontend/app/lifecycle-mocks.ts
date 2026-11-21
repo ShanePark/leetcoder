@@ -351,6 +351,8 @@ vi.mock('../../../src/app/git-controller', () => ({
     files: [],
     unpushedCommitCount: 0,
     selectedPaths: [],
+    rowSelectedPaths: [],
+    rowSelectionAnchor: null,
     activePath: null,
     diffByPath: {},
     fallbackDiff: '',
@@ -372,6 +374,8 @@ vi.mock('../../../src/app/git-controller', () => ({
     selectNoFiles(): void {}
     toggleFile(_path: string, _selected: boolean): void {}
     setActiveFile(_path: string): void {}
+    selectRow(_path: string, _modifiers?: unknown): void {}
+    selectRowForContextMenu(_path: string): void {}
     commitSelectedFiles(_push: boolean): Promise<void> { return Promise.resolve() }
     markStale(): void {}
     reset(): void {}

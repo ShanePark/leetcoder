@@ -8,12 +8,19 @@ import {
   normalizeGitDiff,
   normalizeGitStatus,
 } from './git-helpers'
-import type { GitBackendClient, GitState } from './types'
+import type { GitBackendClient, GitRowSelectModifiers, GitState } from './types'
 
 const GIT_REFRESH_DEBOUNCE_MS = 250
 const GIT_POLL_INTERVAL_MS = 4000
 
 export type GitMessageTone = 'info' | 'success' | 'error'
+
+export interface GitCommitConfirmation {
+  readonly branch: string | null
+  readonly paths: readonly string[]
+  readonly message: string
+  readonly pushAfterCommit: boolean
+}
 
 /** The repository identity used to reject responses from an older selection. */
 export interface GitRepositoryContext {
@@ -27,6 +34,7 @@ export interface GitRepositoryContext {
 export interface GitControllerHooks {
   getContext: () => GitRepositoryContext
   flushPendingSave: () => Promise<boolean>
+  confirmCommit: (request: GitCommitConfirmation) => Promise<boolean>
   setAppBusy: (busy: boolean) => void
   render: () => void
   renderPanel: () => void
@@ -56,6 +64,8 @@ export function createGitState(): GitState {
     files: [],
     unpushedCommitCount: 0,
     selectedPaths: [],
+    rowSelectedPaths: [],
+    rowSelectionAnchor: null,
     activePath: null,
     diffByPath: {},
     fallbackDiff: '',
@@ -277,6 +287,16 @@ export class GitController {
       this.state.activePath = snapshot.files.some((file) => file.path === this.state.activePath)
         ? this.state.activePath
         : snapshot.files[0]?.path ?? null
+      const rowSelected = new Set(this.state.rowSelectedPaths)
+      const rowSelectedPaths = snapshot.files
+        .map((file) => file.path)
+        .filter((path) => rowSelected.has(path))
+      this.state.rowSelectedPaths = rowSelectedPaths.length > 0 || !this.state.activePath
+        ? rowSelectedPaths
+        : [this.state.activePath]
+      if (!snapshot.files.some((file) => file.path === this.state.rowSelectionAnchor)) {
+        this.state.rowSelectionAnchor = this.state.rowSelectedPaths[0] ?? null
+      }
       this.state.diffByPath = {}
       this.state.fallbackDiff = ''
       this.state.loadedRepoPath = repoPath
@@ -377,6 +397,63 @@ export class GitController {
     }
     if (context.repoPath) {
       void this.loadDiff(context.repoPath, [path])
+    }
+  }
+
+  /**
+   * Select list rows the way file lists do: a plain click selects one row,
+   * `toggle` (Ctrl/Cmd) adds or removes a row, and `range` (Shift) selects
+   * from the anchor to the clicked row, adding to the selection with `toggle`.
+   * The last row added becomes active and shows its diff.
+   */
+  selectRow(path: string, modifiers: GitRowSelectModifiers = { toggle: false, range: false }): void {
+    if (!this.isAlive()) {
+      return
+    }
+    const context = this.hooks.getContext()
+    const paths = this.state.files.map((file) => file.path)
+    const index = paths.indexOf(path)
+    if (context.appBusy || this.state.busy || index < 0) {
+      return
+    }
+    const selected = new Set(this.state.rowSelectedPaths)
+    if (modifiers.range) {
+      const anchorIndex = paths.indexOf(this.state.rowSelectionAnchor ?? '')
+      const start = anchorIndex < 0 ? index : anchorIndex
+      const range = paths.slice(Math.min(start, index), Math.max(start, index) + 1)
+      const next = new Set(modifiers.toggle ? [...selected, ...range] : range)
+      this.state.rowSelectedPaths = paths.filter((entry) => next.has(entry))
+      if (anchorIndex < 0) {
+        this.state.rowSelectionAnchor = path
+      }
+    } else if (modifiers.toggle && selected.has(path)) {
+      // The list always keeps one row selected, so the last row stays.
+      if (selected.size > 1) {
+        this.state.rowSelectedPaths = this.state.rowSelectedPaths.filter((entry) => entry !== path)
+        // Keep the diff on a selected row rather than the one just removed.
+        const fallback = this.state.rowSelectedPaths.at(-1)
+        if (this.state.activePath === path && fallback) {
+          this.setActiveFile(fallback)
+        } else {
+          this.hooks.renderPanel()
+        }
+      }
+      return
+    } else {
+      if (!modifiers.toggle) {
+        selected.clear()
+      }
+      selected.add(path)
+      this.state.rowSelectedPaths = paths.filter((entry) => selected.has(entry))
+      this.state.rowSelectionAnchor = path
+    }
+    this.setActiveFile(path)
+  }
+
+  /** A context menu acts on the selection, so a click outside it selects only that row. */
+  selectRowForContextMenu(path: string): void {
+    if (!this.state.rowSelectedPaths.includes(path)) {
+      this.selectRow(path)
     }
   }
 
@@ -505,16 +582,29 @@ export class GitController {
       this.hooks.renderPanel()
       return
     }
-    const token = this.startOperation(
-      pushAfterCommit ? 'Preparing commit and push…' : 'Preparing commit…',
-      pushAfterCommit ? 'commit-push' : null,
-    )
+    const branch = this.state.branch
+    const token = this.startOperation()
     if (!token) {
       return
     }
     this.hooks.render()
     let committed = false
     try {
+      const accepted = await this.hooks.confirmCommit({ branch, paths, message, pushAfterCommit })
+      if (!accepted || !this.isCurrentOperation(token)) {
+        return
+      }
+      const currentFiles = this.state.files.filter((file) => selectedPathSet.has(file.path))
+      const currentMessage = this.state.commitMessage.trim() || defaultGitCommitMessage(currentFiles)
+      if (this.state.branch !== branch || currentMessage !== message
+        || this.state.selectedPaths.length !== paths.length
+        || this.state.selectedPaths.some((path, index) => path !== paths[index])) {
+        this.hooks.setMessage('The commit selection changed. Review it and try again.', 'info')
+        return
+      }
+      this.operationKind = pushAfterCommit ? 'commit-push' : null
+      this.setOperationLabel(token, pushAfterCommit ? 'Preparing commit and push…' : 'Preparing commit…')
+      this.hooks.render()
       if (!(await this.hooks.flushPendingSave()) || !this.isCurrentOperation(token)) {
         return
       }

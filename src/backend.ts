@@ -69,6 +69,7 @@ export { createBackendClient } from './backend/client'
 export { BackendError, errorMessage, isConflictError } from './backend/errors'
 
 export {
+  normalizeDailyProblem,
   normalizeUpdateBuild,
   normalizeUpdateStatus,
 } from './backend/normalizers/problem'

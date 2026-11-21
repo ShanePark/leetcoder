@@ -4,7 +4,7 @@ import { findIndexedProblemFile, indexProblemFiles } from '../../../src/app/file
 import type { ProblemFileEntry } from '../../../src/backend'
 
 describe('problem file index', () => {
-  it('matches canonical case and separator variants', () => {
+  it('matches equivalent separator and relative-prefix variants', () => {
     const file: ProblemFileEntry = {
       path: 'src/main/java/easy/Q1TwoSum.java',
       name: 'Q1TwoSum.java',
@@ -12,7 +12,7 @@ describe('problem file index', () => {
     }
     const index = indexProblemFiles([file])
 
-    expect(findIndexedProblemFile(index, './SRC\\MAIN\\JAVA\\EASY\\Q1TWOSUM.JAVA')).toBe(file)
+    expect(findIndexedProblemFile(index, './src\\main\\java\\easy\\Q1TwoSum.java')).toBe(file)
   })
 
   it('keeps the first entry for duplicate canonical paths like Array.find', () => {
@@ -23,12 +23,30 @@ describe('problem file index', () => {
     }
     const second: ProblemFileEntry = {
       ...first,
-      path: './SRC\\Q1.JAVA',
-      name: 'Q1.JAVA',
+      path: './src\\Q1.java',
     }
     const index = indexProblemFiles([first, second])
 
     expect(findIndexedProblemFile(index, 'src/Q1.java')).toBe(first)
+  })
+
+  it('indexes case-distinct files independently', () => {
+    const first: ProblemFileEntry = {
+      path: 'src/Q1TwoSum.java',
+      name: 'Q1TwoSum.java',
+      packageSegment: 'easy',
+    }
+    const second: ProblemFileEntry = {
+      ...first,
+      path: 'src/Q1Twosum.java',
+      name: 'Q1Twosum.java',
+    }
+    const index = indexProblemFiles([first, second])
+
+    expect(index.size).toBe(2)
+    expect(findIndexedProblemFile(index, first.path)).toBe(first)
+    expect(findIndexedProblemFile(index, second.path)).toBe(second)
+    expect(findIndexedProblemFile(index, 'src/Q1TWOSUM.java')).toBeUndefined()
   })
 
   it('returns undefined for a path that was not indexed', () => {

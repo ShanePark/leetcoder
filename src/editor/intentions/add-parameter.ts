@@ -34,7 +34,8 @@ export function addMethodParameterIntention(
   methods: readonly JavaMethodInfo[],
   declarations: readonly JavaDeclaration[],
 ): JavaIntention | null {
-  const targets = methods.filter((method) => method.name === invocation.name
+  if (invocation.target) return null
+  const targets =methods.filter((method) => method.name === invocation.name
     && method.classBody.from === invocation.classBody.from
     && method.classBody.to === invocation.classBody.to)
   if (targets.length !== 1) return null

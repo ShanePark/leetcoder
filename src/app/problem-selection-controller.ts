@@ -1,4 +1,4 @@
-import { errorMessage, type BackendClient, type DailyProblem } from '../backend'
+import { errorMessage, normalizeDailyProblem, type BackendClient, type DailyProblem } from '../backend'
 
 import {
   normalizeDailyProblemDateKey,
@@ -10,6 +10,7 @@ import type { AppState } from './types'
 
 const DAILY_RETRY_BASE_MS = 60_000
 const DAILY_RETRY_MAX_MS = 30 * 60_000
+const DAILY_PROBLEM_CACHE_KEY = 'leetcoder.daily-problem'
 
 type ProblemSelectionState = Pick<
   AppState,
@@ -29,6 +30,7 @@ export interface ProblemSelectionControllerBackend {
 export interface ProblemSelectionControllerHooks {
   readonly state: ProblemSelectionState
   readonly backend: ProblemSelectionControllerBackend
+  readonly storage?: Pick<Storage, 'getItem' | 'setItem'>
   readonly render: () => void
   readonly setMessage: (message: string, tone: 'info' | 'success' | 'error') => void
   readonly isWindowVisible: () => boolean
@@ -70,7 +72,8 @@ export class ProblemSelectionController {
     this.hooks.render()
 
     try {
-      const problem = await this.hooks.backend.fetchDailyProblem()
+      const cached = this.readCachedDailyProblem()
+      const problem = cached ?? await this.hooks.backend.fetchDailyProblem()
       if (!this.isCurrentRequest(requestId)) {
         return
       }
@@ -103,6 +106,9 @@ export class ProblemSelectionController {
         this.hooks.state.dailyError = null
         this.dailyRetryStreak = 0
         this.nextDailyRetryAt = 0
+        if (!cached) {
+          this.cacheDailyProblem(problem)
+        }
       }
     } catch (error) {
       if (!this.isCurrentRequest(requestId)) {
@@ -271,6 +277,27 @@ export class ProblemSelectionController {
     this.dailyRetryStreak += 1
     this.nextDailyRetryAt = Date.now() + delayMs
     return delayMs
+  }
+
+  private readCachedDailyProblem(): DailyProblem | null {
+    try {
+      const cached = this.hooks.storage?.getItem(DAILY_PROBLEM_CACHE_KEY)
+      if (!cached) {
+        return null
+      }
+      const problem = normalizeDailyProblem(JSON.parse(cached))
+      return normalizeDailyProblemDateKey(problem.date) === utcDateKey() ? problem : null
+    } catch {
+      return null
+    }
+  }
+
+  private cacheDailyProblem(problem: DailyProblem): void {
+    try {
+      this.hooks.storage?.setItem(DAILY_PROBLEM_CACHE_KEY, JSON.stringify(problem))
+    } catch {
+      // A full or unavailable cache must not discard a successful lookup.
+    }
   }
 
   private scheduleDailyProblemRefresh(delayMs = nextUtcMidnightDelayMs()): void {

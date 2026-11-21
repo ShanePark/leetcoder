@@ -7,6 +7,12 @@ export type WindowChromePlatform = 'macos' | 'linux' | 'other'
 
 type NativeThemeWindow = Pick<TauriWindow, 'setBackgroundColor' | 'setTheme'>
 type TitleBarWindow = Pick<TauriWindow, 'minimize' | 'toggleMaximize' | 'isMaximized' | 'onResized'>
+type ResizeWindow = Pick<TauriWindow, 'startResizeDragging'>
+type ResizeDirection = Parameters<TauriWindow['startResizeDragging']>[0]
+
+const RESIZE_DIRECTIONS: readonly ResizeDirection[] = [
+  'North', 'South', 'East', 'West', 'NorthEast', 'NorthWest', 'SouthEast', 'SouthWest',
+]
 
 export function windowChromePlatform(platform: string, userAgent = ''): WindowChromePlatform {
   if (isMacPlatform(platform, userAgent)) {
@@ -53,7 +59,7 @@ export async function installWindowChrome(
  */
 function installAppDrawnTitleBar(
   appRoot: HTMLElement,
-  nativeWindow: TitleBarWindow,
+  nativeWindow: TitleBarWindow & ResizeWindow,
   requestClose: () => Promise<void>,
 ): void {
   const header = appRoot.querySelector<HTMLElement>('.app-header')
@@ -67,6 +73,31 @@ function installAppDrawnTitleBar(
   header.setAttribute('data-tauri-drag-region', 'deep')
   for (const selector of ['.app-shell', '.workspace']) {
     appRoot.querySelector(selector)?.setAttribute('data-tauri-drag-region', '')
+  }
+  renderResizeHandles(appRoot, nativeWindow)
+}
+
+/**
+ * Give the undecorated window resize edges the webview can see. The native
+ * edge hit test only spans a few pixels and the webview resets the pointer
+ * to its own CSS cursor on every move, so the resize cursor flickers or never
+ * shows. These handles carry the resize cursors and hand the drag to the
+ * window manager; CSS hides them while the window is maximized.
+ */
+export function renderResizeHandles(appRoot: HTMLElement, nativeWindow: ResizeWindow): void {
+  for (const direction of RESIZE_DIRECTIONS) {
+    const handle = appRoot.ownerDocument.createElement('div')
+    handle.className = 'window-resize-handle'
+    handle.setAttribute('data-direction', direction)
+    handle.setAttribute('aria-hidden', 'true')
+    handle.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) {
+        return
+      }
+      event.preventDefault()
+      nativeWindow.startResizeDragging(direction).catch(reportChromeError)
+    })
+    appRoot.append(handle)
   }
 }
 

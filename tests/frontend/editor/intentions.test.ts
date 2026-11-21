@@ -206,6 +206,140 @@ describe('Java create-method intention planning', () => {
     const actual = source.lastIndexOf('missing(root)')
     expect(planJavaMethodCreation(source, actual + 2)).not.toBeNull()
   })
+
+  it('creates a method in a same-file class for a call on a typed receiver', () => {
+    const source = `public class Solution {
+    public int[] findSubtreeSizes(int[] parent, String s) {
+        Node[] nodes = new Node[parent.length];
+        for (int i = 0; i < parent.length; i++) {
+            Node node = new Node();
+            nodes[i] = node;
+            Node parentNode = nodes[parent[i]];
+            parentNode.addChild(node);
+        }
+        return null;
+    }
+
+    class Node {
+        List<Node> children = new ArrayList<>();
+
+    }
+
+}`
+    const intentions = javaIntentionsAt(source, source.indexOf('addChild') + 2)
+    expect(intentions.map((intention) => intention.label)).toEqual(["Create method 'addChild'"])
+    const plan = intentions[0]!.plan
+    expect(plan.returnType).toBe('void')
+    expect(plan.parameters).toEqual([{ type: 'Node', name: 'node' }])
+    const updated = source.slice(0, plan.change.from) + plan.change.insert + source.slice(plan.change.to)
+    expect(updated).toContain(`    class Node {
+        List<Node> children = new ArrayList<>();
+
+        public void addChild(Node node) {
+        }
+    }
+
+}`)
+  })
+
+  it('creates a static method for a call on a same-file class name', () => {
+    const source = `class Solution {
+    int solve() {
+        return Helper.make(3);
+    }
+}
+
+class Helper {
+}`
+    const plan = planJavaMethodCreation(source, source.indexOf('make') + 1)
+    const updated = source.slice(0, plan!.change.from) + plan!.change.insert + source.slice(plan!.change.to)
+    expect(updated).toContain(`class Helper {
+    public static int make(int value) {
+        return 0;
+    }
+}`)
+  })
+
+  it('ignores qualified calls it cannot resolve to a new method in this file', () => {
+    const source = `class Solution {
+    void solve(List<Node> list, Node[] array, Node node) {
+        list.add(node);
+        array.clone();
+        node.known();
+        Math.max(1, 2);
+        list.add(missing(node));
+    }
+
+    class Node {
+        void known() {}
+    }
+}`
+    expect(planJavaMethodCreation(source, source.indexOf('add(node)') + 1)).toBeNull()
+    expect(planJavaMethodCreation(source, source.indexOf('clone') + 1)).toBeNull()
+    expect(planJavaMethodCreation(source, source.indexOf('known();') + 1)).toBeNull()
+    expect(planJavaMethodCreation(source, source.indexOf('max') + 1)).toBeNull()
+    const lastLine = source.indexOf('        list.add(missing')
+    expect(planJavaMethodCreation(source, lastLine)?.name).toBe('missing')
+  })
+
+  it('creates an overload when the same-named method takes a different number of arguments', () => {
+    const source = `public class Solution {
+    public int[] findSubtreeSizes(int[] parent, String s) {
+        Node node = new Node();
+        Node parentNode = node;
+        parentNode.addChild(node);
+        return null;
+    }
+
+    class Node {
+        List<Node> children = new ArrayList<>();
+        Node parent;
+        void addChild(Node node, Node parent) {
+            this.children.add(node);
+        }
+
+    }
+
+}`
+    const intentions = javaIntentionsAt(source, source.indexOf('addChild(node)') + 2)
+    expect(intentions.map((intention) => intention.label)).toEqual(["Create method 'addChild'"])
+    const plan = intentions[0]!.plan
+    const updated = source.slice(0, plan.change.from) + plan.change.insert + source.slice(plan.change.to)
+    expect(updated).toContain(`            this.children.add(node);
+        }
+
+        public void addChild(Node node) {
+        }
+    }`)
+  })
+
+  it('does not create an overload beside a same-named varargs method', () => {
+    const source = `class Solution {
+    void solve(Node node) {
+        node.add(1, 2);
+    }
+
+    class Node {
+        void add(int... values) {}
+    }
+}`
+    expect(planJavaMethodCreation(source, source.indexOf('add(1') + 1)).toBeNull()
+  })
+
+  it('does not add a parameter to a same-named caller method for a qualified call', () => {
+    const source = `class Solution {
+    void addChild(Node node) {
+        Node other = new Node();
+        other.addChild(node, 1);
+    }
+
+    class Node {
+    }
+}`
+    const intentions = javaIntentionsAt(source, source.indexOf('other.addChild') + 'other.'.length + 1)
+    expect(intentions.map((intention) => intention.id)).toEqual(['create-method'])
+    expect(intentions[0]!.plan.change.insert).toContain('public void addChild(Node node, int value)')
+  })
 })
 
 describe('Java intentions menu state and keyboard actions', () => {

@@ -167,6 +167,10 @@
   background: var(--surface-3);
 }
 
+.git-file-row.is-row-selected {
+  background: var(--accent-soft);
+}
+
 .git-file-checkbox {
   flex: none;
   width: 14px;

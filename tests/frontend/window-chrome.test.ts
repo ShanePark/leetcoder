@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import {
   installWindowChrome,
+  renderResizeHandles,
   renderWindowControls,
   syncNativeWindowTheme,
   windowChromePlatform,
@@ -105,6 +106,7 @@ function fakeWindow(maximized = false) {
     destroy: vi.fn(async () => undefined),
     minimize: vi.fn(async () => undefined),
     toggleMaximize: vi.fn(async () => undefined),
+    startResizeDragging: vi.fn(async () => undefined),
     isMaximized: vi.fn(async () => state.maximized),
     onResized: vi.fn(async (handler: Listener) => {
       state.resized = handler
@@ -182,6 +184,7 @@ describe('installWindowChrome', () => {
     expect(header?.getAttribute('data-tauri-drag-region')).toBe('deep')
     expect(appRoot.elements.get('.app-shell')?.getAttribute('data-tauri-drag-region')).toBe('')
     expect(appRoot.elements.get('.workspace')?.getAttribute('data-tauri-drag-region')).toBe('')
+    expect(appRoot.children).toHaveLength(8)
     expect(nativeWindow.setTheme).not.toHaveBeenCalled()
     expect(nativeWindow.setBackgroundColor).not.toHaveBeenCalled()
   })
@@ -267,6 +270,35 @@ describe('renderWindowControls', () => {
     expect(maximize?.getAttribute('aria-label')).toBe('Restore')
     expect(maximize?.title).toBe('Restore')
     expect(ownerDocument.documentElement.dataset.windowFrame).toBe('maximized')
+  })
+})
+
+describe('renderResizeHandles', () => {
+  it('starts a native resize in the handle direction on a left-button press only', async () => {
+    const ownerDocument = new FakeDocument()
+    const appRoot = new FakeElement(ownerDocument)
+    const nativeWindow = fakeWindow()
+
+    renderResizeHandles(appRoot as unknown as HTMLElement, nativeWindow)
+    const handles = appRoot.children as FakeElement[]
+    expect(handles.map((handle) => handle.getAttribute('data-direction'))).toEqual([
+      'North', 'South', 'East', 'West', 'NorthEast', 'NorthWest', 'SouthEast', 'SouthWest',
+    ])
+    expect(handles.every((handle) => handle.className === 'window-resize-handle')).toBe(true)
+
+    const press = (handle: FakeElement, button: number) => {
+      const event = { button, preventDefault: vi.fn() }
+      for (const listener of handle.listeners.get('mousedown') ?? []) {
+        (listener as (event: unknown) => void)(event)
+      }
+      return event
+    }
+    const southEast = handles[6]
+    expect(press(southEast, 2).preventDefault).not.toHaveBeenCalled()
+    expect(nativeWindow.startResizeDragging).not.toHaveBeenCalled()
+    expect(press(southEast, 0).preventDefault).toHaveBeenCalledOnce()
+    await settle()
+    expect(nativeWindow.startResizeDragging).toHaveBeenCalledExactlyOnceWith('SouthEast')
   })
 })
 

@@ -18,8 +18,9 @@ pub(crate) fn isolate_test_process_session(command: &mut Command) {
     {
         use std::os::unix::process::CommandExt;
 
-        // Gradle and its test workers must share an isolated process group so
-        // a Stop request can terminate every process belonging to this run.
+        // Isolate this invocation's client and any children it starts. A reused
+        // Gradle daemon owns its test workers and cancels the build when this
+        // client's connection closes, allowing the daemon to serve later runs.
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() == -1 {

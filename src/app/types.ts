@@ -141,7 +141,12 @@ export interface GitState {
   files: GitChangedFile[]
   /** Commits the upstream lacks, from the same refresh as `files`. */
   unpushedCommitCount: number
+  /** Paths checked for the next commit. */
   selectedPaths: string[]
+  /** Rows highlighted in the list, in list order; row actions such as discard apply to these. */
+  rowSelectedPaths: string[]
+  /** The row a Shift-click range extends from. */
+  rowSelectionAnchor: string | null
   activePath: string | null
   diffByPath: Record<string, string>
   fallbackDiff: string
@@ -153,6 +158,12 @@ export interface GitState {
   commitMessageEdited: boolean
   loadedRepoPath: string | null
   stale: boolean
+}
+
+/** Mouse modifiers for a row click: `toggle` is Ctrl/Cmd, `range` is Shift. */
+export interface GitRowSelectModifiers {
+  readonly toggle: boolean
+  readonly range: boolean
 }
 
 export interface FileContextMenuState {

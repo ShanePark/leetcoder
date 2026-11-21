@@ -225,7 +225,8 @@ fn run_problem_test_with_control(
         .current_dir(&root)
         .env("JAVA_HOME", &java.home)
         .env("PATH", path_with_java_home(&java.home))
-        .arg("--no-daemon")
+        .arg("--daemon")
+        .arg("--console=plain")
         .arg("--init-script")
         .arg(&run_temp.path)
         .arg(format!(

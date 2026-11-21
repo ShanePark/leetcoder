@@ -73,6 +73,7 @@ pub(super) fn resolve_main_compile_classpath(
     command
         .current_dir(root)
         .env("JAVA_HOME", java_home)
+        .arg("--daemon")
         .arg("--console=plain")
         .arg("--quiet")
         .arg("--init-script")

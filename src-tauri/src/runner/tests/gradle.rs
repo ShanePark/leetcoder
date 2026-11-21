@@ -154,3 +154,60 @@ fn test_run_requires_the_expected_ps_repository_structure() {
     });
     assert!(result.unwrap_err().contains("valid ps repository"));
 }
+
+#[cfg(unix)]
+#[test]
+fn problem_test_invokes_a_reusable_daemon_and_preserves_the_method_filter() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("test repository");
+    let root = directory.path();
+    for package in crate::security::PACKAGE_SEGMENTS {
+        fs::create_dir_all(root.join(crate::security::SOURCE_ROOT).join(package))
+            .expect("problem package");
+    }
+    for file in ["build.gradle", "settings.gradle"] {
+        fs::write(root.join(file), "").expect("repository build file");
+    }
+    let wrapper = root.join("gradlew");
+    fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > arguments.txt
+printf '%s' "$JAVA_HOME" > java-home.txt
+for argument do
+    case "$argument" in
+        -DleetcoderResultDir=*) result_dir=${argument#*=} ;;
+    esac
+done
+cat > "$result_dir/TEST-Q1.xml" <<'REPORT'
+<testsuite name="shane.leetcode.problems.easy.Q1" tests="1" time="0.001">
+  <testcase classname="shane.leetcode.problems.easy.Q1" name="selectedTest" time="0.001"/>
+</testsuite>
+REPORT
+"#,
+    )
+    .expect("fake wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("executable wrapper");
+
+    let result = run_problem_test(RunProblemTestArgs {
+        project_root: root.to_string_lossy().into_owned(),
+        fully_qualified_class_name: "shane.leetcode.problems.easy.Q1".to_string(),
+        test_method: Some("selectedTest".to_string()),
+    })
+    .expect("run selected problem test");
+
+    assert!(result.success, "{result:?}");
+    assert_eq!(result.summary.passed, 1);
+    let arguments = fs::read_to_string(root.join("arguments.txt")).expect("wrapper arguments");
+    let arguments: Vec<_> = arguments.lines().collect();
+    assert!(arguments.contains(&"--daemon"));
+    assert!(arguments.contains(&"--console=plain"));
+    assert!(!arguments.contains(&"--no-daemon"));
+    assert!(arguments.contains(&"leetcoderProblemTest"));
+    assert!(arguments
+        .windows(2)
+        .any(|pair| { pair == ["--tests", "shane.leetcode.problems.easy.Q1.selectedTest"] }));
+    let java_home = fs::read_to_string(root.join("java-home.txt")).expect("selected Java home");
+    assert!(PathBuf::from(java_home).join("bin/java").is_file());
+}

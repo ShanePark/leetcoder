@@ -1,5 +1,5 @@
 import type { ProblemFileEntry } from '../backend'
-import type { AppState, GitChangedFile } from './types'
+import type { AppState, GitChangedFile, GitContextMenuState } from './types'
 import type { FileOperationsController } from './file-operations-controller'
 import { joinFilePath, normalizeJavaFileName } from './file-helpers'
 import { gitDirectoryPath, sameFilePath } from './path-helpers'
@@ -199,9 +199,7 @@ export class FileDialogController {
     }
     this.gitDiscardDialogFocusTarget = this.findGitFileFocusTarget(context.file.path)
     this.closeGitContextMenu()
-    this.gitDiscardDialogFiles = this.state.git.selectedPaths.includes(context.file.path)
-      ? this.state.git.files.filter((file) => this.state.git.selectedPaths.includes(file.path))
-      : [context.file]
+    this.gitDiscardDialogFiles = this.gitContextFiles(context)
     const files = this.gitDiscardDialogFiles
     this.renderDiscardGitDialog()
     queueMicrotask(() => {
@@ -304,10 +302,19 @@ export class FileDialogController {
     renderGitContextMenuView(this.root, {
       context: this.state.gitContextMenu,
       files: this.state.git.files,
+      targetCount: this.state.gitContextMenu ? this.gitContextFiles(this.state.gitContextMenu).length : 0,
       busy: this.state.busy,
       gitBusy: this.state.git.busy,
       loading: this.state.git.loading,
     })
+  }
+
+  /** The menu acts on the row selection when the clicked row is part of it. */
+  private gitContextFiles(context: GitContextMenuState): GitChangedFile[] {
+    const rowSelected = new Set(this.state.git.rowSelectedPaths)
+    return rowSelected.has(context.file.path)
+      ? this.state.git.files.filter((file) => rowSelected.has(file.path))
+      : [context.file]
   }
 
   private async showGitFileInManager(): Promise<void> {

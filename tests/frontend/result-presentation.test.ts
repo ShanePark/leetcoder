@@ -146,6 +146,12 @@ describe('editor failure locations', () => {
     expect(sourcePathsMatch('src/main/java/Q1TwoSum.java', 'Q2TwoSum.java')).toBe(false)
   })
 
+  it('keeps diagnostics from case-distinct source files separate', () => {
+    expect(sourcePathsMatch('src/main/java/Q1TwoSum.java', 'Q1Twosum.java')).toBe(false)
+    expect(sourcePathsMatch('src/main/java/Q1TwoSum.java', '/repo/src/main/java/Q1Twosum.java')).toBe(false)
+    expect(sourcePathsMatch('./src\\main\\java\\Q1TwoSum.java', '/repo/src/main/java/Q1TwoSum.java')).toBe(true)
+  })
+
   it('preserves distinct failed test and diagnostic messages at the same position', () => {
     const run = result({
       phase: 'test',

@@ -104,6 +104,7 @@ function appHarness(options: {
   }
   const hooks: GitControllerHooks = {
     getContext: () => context,
+    confirmCommit: vi.fn().mockResolvedValue(true),
     flushPendingSave: options.flushPendingSave ?? vi.fn().mockResolvedValue(true),
     setAppBusy: (busy) => {
       context.appBusy = busy
@@ -198,8 +199,8 @@ describe('Git commit progress', () => {
     const operation = controller.commitSelectedFiles(true)
 
     expect(controller.state.busy).toBe(true)
-    expect(controller.commitPushInProgress).toBe(true)
-    expect(controller.progressLabel).toBe('Preparing commit and push…')
+    expect(controller.commitPushInProgress).toBe(false)
+    expect(controller.progressLabel).toBeNull()
     expect(controls.input.disabled).toBe(true)
     expect(controls.commit.disabled).toBe(true)
     expect(controls.commitPush.disabled).toBe(true)
@@ -227,6 +228,7 @@ describe('Git commit progress', () => {
       tone: 'success',
     }])
     expect(progress).toEqual([
+      null,
       'Preparing commit and push…',
       'Pulling latest changes…',
       'Committing changes…',

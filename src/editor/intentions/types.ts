@@ -72,4 +72,6 @@ export interface JavaInvocationInfo {
   classBody: JavaSyntaxNode
   method: JavaMethodInfo | null
   arguments: JavaSyntaxNode[]
+  /** The same-file class a qualified call targets; null for unqualified and `this.` calls. */
+  target: { classBody: JavaSyntaxNode; static: boolean } | null
 }

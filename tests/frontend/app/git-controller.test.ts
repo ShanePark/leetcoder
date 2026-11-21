@@ -43,6 +43,7 @@ function harness(
   const messages: Array<{ message: string; tone: string }> = []
   const hooks: GitControllerHooks = {
     getContext: () => context,
+    confirmCommit: vi.fn().mockResolvedValue(true),
     flushPendingSave: vi.fn().mockResolvedValue(true),
     setAppBusy: (busy) => {
       context.appBusy = busy
@@ -183,6 +184,9 @@ describe('GitController', () => {
 
     const operation = controller.commitSelectedFiles(true)
     expect(controller.state.busy).toBe(true)
+    expect(controller.progressLabel).toBeNull()
+    expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+    await Promise.resolve()
     expect(controller.progressLabel).toBe('Preparing commit and push…')
     expect(hooks.flushPendingSave).toHaveBeenCalled()
 
@@ -215,6 +219,79 @@ describe('GitController', () => {
     expect(renders.at(-1)).toBe('')
   })
 
+  it.each([false, true])('cancels commit (push=%s) before saving or changing Git state', async (pushAfterCommit) => {
+    const confirmation = deferred<boolean>()
+    const backend: GitBackendClient = {
+      pullGit: vi.fn(),
+      commitGit: vi.fn(),
+      pushGit: vi.fn(),
+    }
+    const { controller, hooks } = harness(backend)
+    controller.state.branch = 'feature'
+    controller.state.files = [{ path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }]
+    controller.state.selectedPaths = ['Q1.java']
+    controller.state.commitMessage = '  Save Q1  '
+    hooks.confirmCommit = vi.fn(() => confirmation.promise)
+
+    const operation = controller.commitSelectedFiles(pushAfterCommit)
+    await controller.commitSelectedFiles(pushAfterCommit)
+
+    expect(hooks.confirmCommit).toHaveBeenCalledExactlyOnceWith({
+      branch: 'feature', paths: ['Q1.java'], message: 'Save Q1', pushAfterCommit,
+    })
+    expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+    expect(backend.pullGit).not.toHaveBeenCalled()
+    expect(backend.commitGit).not.toHaveBeenCalled()
+    expect(backend.pushGit).not.toHaveBeenCalled()
+    expect(controller.state.busy).toBe(true)
+    expect(controller.progressLabel).toBeNull()
+
+    confirmation.resolve(false)
+    await operation
+
+    expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+    expect(backend.pullGit).not.toHaveBeenCalled()
+    expect(backend.commitGit).not.toHaveBeenCalled()
+    expect(backend.pushGit).not.toHaveBeenCalled()
+    expect(controller.state.selectedPaths).toEqual(['Q1.java'])
+    expect(controller.state.commitMessage).toBe('  Save Q1  ')
+    expect(controller.state.busy).toBe(false)
+    expect(controller.commitPushInProgress).toBe(false)
+  })
+
+  it.each(['repository', 'branch', 'selection', 'message'] as const)(
+    'rejects approval after the %s changes while confirmation is open',
+    async (changed) => {
+      const confirmation = deferred<boolean>()
+      const backend: GitBackendClient = { pullGit: vi.fn(), commitGit: vi.fn(), pushGit: vi.fn() }
+      const { controller, context, hooks } = harness(backend)
+      controller.state.branch = 'main'
+      controller.state.files = [{ path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }]
+      controller.state.selectedPaths = ['Q1.java']
+      controller.state.commitMessage = 'Save Q1'
+      hooks.confirmCommit = vi.fn(() => confirmation.promise)
+      const operation = controller.commitSelectedFiles(true)
+
+      if (changed === 'repository') {
+        context.repoPath = '/other-repo'
+        context.repositoryGeneration += 1
+      } else if (changed === 'branch') {
+        controller.state.branch = 'other'
+      } else if (changed === 'selection') {
+        controller.state.selectedPaths = ['Q2.java']
+      } else {
+        controller.state.commitMessage = 'Changed message'
+      }
+      confirmation.resolve(true)
+      await operation
+
+      expect(hooks.flushPendingSave).not.toHaveBeenCalled()
+      expect(backend.pullGit).not.toHaveBeenCalled()
+      expect(backend.commitGit).not.toHaveBeenCalled()
+      expect(backend.pushGit).not.toHaveBeenCalled()
+    },
+  )
+
   it('stops before committing when the branch cannot be fast-forwarded', async () => {
     const failure = 'main has diverged from origin/main (1 local and 1 remote commits). '
       + 'Nothing was committed; pull or rebase the branch before pushing.'
@@ -240,20 +317,23 @@ describe('GitController', () => {
     expect(controller.state.busy).toBe(false)
   })
 
-  it('does not pull for a plain commit', async () => {
+  it('confirms a plain commit and keeps pull and push unused', async () => {
     const backend: GitBackendClient = {
       pullGit: vi.fn(),
       commitGit: vi.fn().mockResolvedValue({ commitHash: 'abc1234', message: 'Save Q1', paths: ['Q1.java'] }),
       pushGit: vi.fn(),
       listGitChanges: vi.fn().mockResolvedValue({ branch: 'main', changes: [] }),
     }
-    const { controller } = harness(backend)
+    const { controller, hooks } = harness(backend)
     controller.state.files = [{ path: 'Q1.java', status: 'modified', staged: false, additions: 1, deletions: 0 }]
     controller.state.selectedPaths = ['Q1.java']
 
     await controller.commitSelectedFiles(false)
 
     expect(backend.commitGit).toHaveBeenCalled()
+    expect(hooks.confirmCommit).toHaveBeenCalledExactlyOnceWith({
+      branch: null, paths: ['Q1.java'], message: 'Update Q1', pushAfterCommit: false,
+    })
     expect(backend.pullGit).not.toHaveBeenCalled()
     expect(backend.pushGit).not.toHaveBeenCalled()
   })
@@ -343,5 +423,107 @@ describe('GitController', () => {
     expect(controller.state.files.map((file) => file.path)).toEqual(['Q1.java'])
     expect(controller.state.unpushedCommitCount).toBe(0)
     expect(controller.state.error).toBeNull()
+  })
+})
+
+describe('GitController row selection', () => {
+  function rowHarness() {
+    const getGitDiff = vi.fn().mockResolvedValue('')
+    const result = harness({ listGitChanges: vi.fn(), getGitDiff })
+    result.controller.state.files = ['Q1.java', 'Q2.java', 'Q3.java', 'Q4.java'].map((path) => ({
+      path, status: 'M', staged: false, additions: null, deletions: null,
+    }))
+    result.controller.state.selectedPaths = ['Q1.java', 'Q2.java', 'Q3.java', 'Q4.java']
+    return { ...result, getGitDiff }
+  }
+  const plain = { toggle: false, range: false }
+  const toggle = { toggle: true, range: false }
+  const range = { toggle: false, range: true }
+
+  it('selects one row on a plain click and makes it the active diff', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q2.java', plain)
+    controller.selectRow('Q3.java', plain)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q3.java'])
+    expect(controller.state.activePath).toBe('Q3.java')
+    expect(controller.state.selectedPaths).toEqual(['Q1.java', 'Q2.java', 'Q3.java', 'Q4.java'])
+  })
+
+  it('toggles rows with Ctrl/Cmd and keeps the last row selected', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q3.java', plain)
+    controller.selectRow('Q1.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java', 'Q3.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+    expect(controller.state.rowSelectionAnchor).toBe('Q1.java')
+    controller.selectRow('Q3.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+    controller.selectRow('Q1.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+  })
+
+  it('moves the active diff to a selected row when Ctrl/Cmd removes the active row', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q1.java', plain)
+    controller.selectRow('Q3.java', toggle)
+    controller.selectRow('Q3.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+  })
+
+  it('selects a range from the anchor with Shift and adds it with Ctrl+Shift', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q3.java', plain)
+    controller.selectRow('Q1.java', range)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java', 'Q2.java', 'Q3.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+    expect(controller.state.rowSelectionAnchor).toBe('Q3.java')
+    controller.selectRow('Q4.java', range)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q3.java', 'Q4.java'])
+
+    controller.selectRow('Q1.java', plain)
+    controller.selectRow('Q3.java', toggle)
+    controller.selectRow('Q4.java', { toggle: true, range: true })
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java', 'Q3.java', 'Q4.java'])
+  })
+
+  it('narrows the selection to a right-clicked row outside it', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q1.java', plain)
+    controller.selectRow('Q2.java', range)
+    controller.selectRowForContextMenu('Q2.java')
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java', 'Q2.java'])
+    controller.selectRowForContextMenu('Q4.java')
+    expect(controller.state.rowSelectedPaths).toEqual(['Q4.java'])
+    expect(controller.state.activePath).toBe('Q4.java')
+  })
+
+  it('ignores row clicks while Git is busy', () => {
+    const { controller } = rowHarness()
+    controller.selectRow('Q1.java', plain)
+    controller.state.busy = true
+    controller.selectRow('Q2.java', toggle)
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+  })
+
+  it('drops rows that are no longer changed after a refresh', async () => {
+    const listGitChanges = vi.fn()
+      .mockResolvedValueOnce(' M Q1.java\n M Q2.java\n M Q3.java')
+      .mockResolvedValueOnce(' M Q1.java\n M Q3.java')
+      .mockResolvedValueOnce(' M Q1.java')
+    const { controller } = harness({ listGitChanges, getGitDiff: vi.fn().mockResolvedValue('') })
+
+    await controller.refreshStatus()
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+    controller.selectRow('Q2.java', { toggle: false, range: false })
+    controller.selectRow('Q3.java', { toggle: true, range: false })
+    await controller.refreshStatus()
+    expect(controller.state.rowSelectedPaths).toEqual(['Q3.java'])
+    expect(controller.state.rowSelectionAnchor).toBe('Q3.java')
+    await controller.refreshStatus()
+    expect(controller.state.rowSelectedPaths).toEqual(['Q1.java'])
+    expect(controller.state.activePath).toBe('Q1.java')
+    expect(controller.state.rowSelectionAnchor).toBe('Q1.java')
   })
 })
