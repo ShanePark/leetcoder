@@ -164,7 +164,7 @@ const REJECTION_REASONS: Readonly<Record<AiTestRejectionReason, string>> = {
 }
 
 const CASE_REJECTION_REASONS: Partial<Record<AiTestRejectionReason, string>> = {
-  'no-statements': 'the model returned no statements, so the case may lack an input or Expected value, or need an API this app cannot build',
+  'no-statements': 'the model returned no statements, so the case may lack an input or Expected value without asking for a time-limit case, or need an API this app cannot build',
   'outside-test-body': 'the statements would change code outside the new test method',
 }
 

@@ -105,7 +105,7 @@ import {
   testMethodMarkers,
   type EditorIssue,
 } from './editor/gutters'
-import { diagnosticHoverTooltips, showDiagnosticAtLine } from './editor/diagnostics'
+import { diagnosticHoverTooltips, goToNextDiagnostic, showDiagnosticAtLine } from './editor/diagnostics'
 import {
   cutSelectionOrLine,
   copySelectedText,
@@ -130,6 +130,7 @@ import {
   renameJavaSymbol,
 } from './editor/rename'
 import { javaSymbolHighlights } from './editor/symbol-highlighting'
+import { findInFile, openFind } from './editor/find'
 import {
   definitionHover,
   javaDefinitionAt,
@@ -437,6 +438,11 @@ export function isFileSearchAltShortcut(event: JavaDocAltShortcutEvent): boolean
     && !event.ctrlKey
 }
 
+/** Match the physical Linux Alt+F form of the find-in-file shortcut, without Shift. */
+export function isFindAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'KeyF')
+}
+
 /** Match the physical Linux Alt+Shift+F form of the project-search shortcut. */
 export function isProjectSearchAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return event.code === 'KeyF'
@@ -547,11 +553,13 @@ export class JavaEditor {
     const showShortcutsBindings = bindings('show-shortcuts')
     const settingsShortcuts = bindings('open-settings')
     const fileSearchShortcuts = bindings('focus-file-search')
+    const findShortcuts = bindings('find')
     const projectSearchShortcuts = shortcutBindings('search-project')
     const introduceVariableShortcuts = bindings('introduce-variable')
     const extractMethodShortcuts = bindings('extract-method')
     const inlineFieldShortcuts = bindings('inline-field')
     const renameMethodShortcuts = bindings('rename-method')
+    const nextErrorShortcuts = bindings('next-error')
     const finishTemplateShortcuts = bindings('finish-template')
     const showIntentionsShortcuts = shortcutBindings('show-intentions')
     const parameterInfoShortcuts = shortcutBindings('show-parameter-info')
@@ -672,6 +680,7 @@ export class JavaEditor {
         [isMoveLineDownAltShortcut, moveLineDown],
         [isSettingsAltShortcut, showSettings],
         [isFileSearchAltShortcut, focusFileSearch],
+        [isFindAltShortcut, openFind],
         [isToggleSidebarAltShortcut, workspaceShortcut('toggle-sidebar')],
         [isShowTestsPanelAltShortcut, workspaceShortcut('show-tests-panel')],
         [isShowGitPanelAltShortcut, workspaceShortcut('show-git-panel')],
@@ -717,6 +726,7 @@ export class JavaEditor {
         diagnosticHoverTooltips,
         definitionHover,
         javaSymbolHighlights,
+        findInFile,
         gutter({
           class: 'cm-failure-gutter',
           markers: (view) => view.state.field(failureMarkers),
@@ -814,6 +824,7 @@ export class JavaEditor {
           ...commandBindings(extractMethodShortcuts, extractMethod),
           ...commandBindings(inlineFieldShortcuts, inlineField),
           ...commandBindings(renameMethodShortcuts, renameSymbol),
+          ...commandBindings(nextErrorShortcuts, goToNextDiagnostic),
           // Familiar line-editing shortcuts. CodeMirror's built-in
           // commands handle selected line blocks and multiple cursors while
           // preserving the document's configured line separator.
@@ -828,6 +839,8 @@ export class JavaEditor {
           ...commandBindings(toggleCommentShortcuts, toggleComment),
           ...commandBindings(showShortcutsBindings, showShortcuts),
           ...commandBindings(settingsShortcuts, showSettings),
+          // The find bar's input runs this scope, so the shortcut refocuses it.
+          ...commandBindings(findShortcuts, openFind).map((binding) => ({ ...binding, scope: 'editor search-panel' })),
           ...commandBindings(projectSearchShortcuts, searchProject),
           ...commandBindings(fileSearchShortcuts, focusFileSearch),
           ...commandBindings(reformatShortcuts, reformatJavaDocument),

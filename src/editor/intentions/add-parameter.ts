@@ -10,6 +10,7 @@ import { expressionType, normalizeType } from './inference'
 import type {
   JavaDeclaration,
   JavaIntention,
+  JavaIntentionChange,
   JavaInvocationInfo,
   JavaMethodInfo,
 } from './types'
@@ -84,7 +85,11 @@ export function addMethodParameterIntention(
     scopeStart: target.body.from + 1,
     scopeEnd: target.body.to - 1,
   }]
-  for (const call of calls) {
+  // Like IntelliJ, calls that still use the old signature receive the
+  // triggering argument's text; inside the method it names the new parameter.
+  const oldArityCalls = calls.filter((call) => call.node.from !== invocation.node.from
+    && call.arguments.length === target.parameters.length)
+  for (const call of calls.filter((candidateCall) => !oldArityCalls.includes(candidateCall))) {
     const types = call.arguments.map((argument) => expressionType(source, argument, proposedDeclarations, methods, call))
     const positions = matchingParameterPositions(types, target)
     if (positions.length !== 1 || positions[0] !== candidate.index
@@ -105,7 +110,22 @@ export function addMethodParameterIntention(
   const previous = parameterNodes[candidate.index - 1]
   const from = next?.from ?? previous?.to ?? formal.from + 1
   const insert = next ? `${text}, ` : previous ? `, ${text}` : text
-  const selectionFrom = from + (previous && !next ? 2 : 0) + candidate.parameter.type.length + 1
+  const callChanges: JavaIntentionChange[] = []
+  for (const call of oldArityCalls) {
+    const argumentList = directChild(call.node, 'ArgumentList')
+    if (!argumentList) return null
+    const nextArgument = call.arguments[candidate.index]
+    const previousArgument = call.arguments[candidate.index - 1]
+    const name = candidate.parameter.name
+    callChanges.push(nextArgument
+      ? { from: nextArgument.from, to: nextArgument.from, insert: `${name}, ` }
+      : previousArgument
+        ? { from: previousArgument.to, to: previousArgument.to, insert: `, ${name}` }
+        : { from: argumentList.from + 1, to: argumentList.from + 1, insert: name })
+  }
+  const shift = callChanges.filter((change) => change.from < from)
+    .reduce((total, change) => total + change.insert.length, 0)
+  const selectionFrom = shift + from + (previous && !next ? 2 : 0) + candidate.parameter.type.length + 1
   const parameters = [...target.parameters]
   parameters.splice(candidate.index, 0, candidate.parameter)
   const position = candidate.index + 1
@@ -124,6 +144,7 @@ export function addMethodParameterIntention(
       callTo: invocation.node.to,
       source,
       change: { from, to: from, insert },
+      callChanges,
       selection: { from: selectionFrom, to: selectionFrom + candidate.parameter.name.length },
     },
   }

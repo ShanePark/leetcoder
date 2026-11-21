@@ -95,6 +95,29 @@ describe('platform primary binding', () => {
     expect(primaryShortcut(entryFor('Run test at cursor'), true)).toBe('⌃⇧R')
     expect(shortcutBindings('rename-method')).toEqual(['Shift-F6'])
   })
+
+  it('binds next error to plain F2 on both platforms without an Alt twin', () => {
+    expect(shortcutBindings('next-error')).toEqual(['F2'])
+    expect(platformShortcutBindings('next-error', false)).toEqual(['F2'])
+    expect(platformShortcutBindings('next-error', true)).toEqual(['F2'])
+    expect(shortcutLabel('next-error', false)).toBe('F2')
+    expect(shortcutLabel('next-error', true)).toBe('F2')
+    expect(entryFor('Next error').id).toBe('next-error')
+    const navigation = SHORTCUT_SECTIONS.find((section) => section.title === 'Navigation')
+    expect(navigation?.entries.map((entry) => entry.id)).toContain('next-error')
+  })
+
+  it('binds find in file to Cmd+F on macOS and its Alt+F twin elsewhere', () => {
+    expect(shortcutBindings('find')).toEqual(['Mod-f', 'Alt-f'])
+    expect(platformShortcutBindings('find', true)).toEqual(['Mod-f'])
+    expect(platformShortcutBindings('find', false)).toEqual(['Alt-f'])
+    expect(shortcutLabel('find', true)).toBe('⌘F')
+    expect(shortcutLabel('find', false)).toBe('Alt+F')
+    expect(entryFor('Find in file').id).toBe('find')
+    const navigation = SHORTCUT_SECTIONS.find((section) => section.title === 'Navigation')
+    const ids = navigation?.entries.map((entry) => entry.id) ?? []
+    expect(ids.indexOf('find')).toBe(ids.indexOf('search-project') - 1)
+  })
 })
 
 describe('shortcut table', () => {

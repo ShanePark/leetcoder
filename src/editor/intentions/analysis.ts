@@ -244,6 +244,25 @@ export function collectDeclarations(
       ),
     })
   }
+
+  // An enhanced for puts its variable directly in ForSpec, without a
+  // VariableDeclarator. It is visible from the header to the end of the loop.
+  for (const spec of descendants(root, (node) => node.name === 'ForSpec' && node.parent?.name === 'EnhancedForStatement')) {
+    const definition = directChild(spec, 'Definition')
+    const classBody = classBodyFor(spec)
+    const loop = spec.parent
+    const type = definition ? typeText(source, spec, definition, spec.to) : null
+    if (!definition || !classBody || !loop || !type) continue
+    result.push({
+      name: source.slice(definition.from, definition.to),
+      type,
+      declaredAt: definition.from,
+      classBody,
+      method: methodFor(spec, methods),
+      scopeStart: definition.to,
+      scopeEnd: loop.to,
+    })
+  }
   return result
 }
 

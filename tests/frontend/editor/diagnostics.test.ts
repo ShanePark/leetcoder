@@ -8,6 +8,7 @@ import {
   diagnosticHoverTooltips,
   diagnosticViewState,
   dismissDiagnosticTooltip,
+  goToNextDiagnostic,
   showDiagnosticAtLine,
 } from '../../../src/editor/diagnostics'
 
@@ -237,5 +238,79 @@ describe('in-editor compiler diagnostics', () => {
     const staleSourceTooltip = state().facet(showTooltip).find((value) => value !== null)!.create(view).dom as unknown as FakeElement
     expect(staleSourceTooltip.children.some((child) => child.tagName === 'pre')).toBe(false)
     expect(staleSourceTooltip.children[0].textContent).toBe(issue.message)
+  })
+})
+
+describe('next diagnostic navigation', () => {
+  // Line 2 starts at 4. Issues start at 5 (two sharing it), 8, and 0.
+  const issues: EditorIssue[] = [
+    { file: 'Solution.java', line: 2, column: 2, caret: ' ^~', message: 'first on line 2' },
+    { file: 'Solution.java', line: 2, column: 5, caret: '    ^', message: 'second on line 2' },
+    { file: 'Solution.java', line: 2, column: 2, caret: ' ^~', message: 'shares the first start' },
+    { file: 'Solution.java', line: 1, column: 1, caret: '^', message: 'line 1' },
+  ]
+
+  function viewAt(cursor: number, source = 'abc\nabcdef', entries = issues) {
+    const initial = stateWithIssues(source, entries)
+    return mutableView(initial.update({ selection: { anchor: cursor } }).state)
+  }
+
+  it('moves to the first issue starting after the cursor and opens all issues sharing that start', () => {
+    const { view, focus } = viewAt(1)
+
+    expect(goToNextDiagnostic(view)).toBe(true)
+    expect(view.state.selection.main.head).toBe(5)
+    expect(view.state.field(diagnosticViewState).activeIds).toEqual([0, 2])
+    expect(focus).toHaveBeenCalledOnce()
+    const tooltip = view.state.facet(showTooltip).find((value) => value !== null)
+    expect(tooltip).toBeDefined()
+    const container = tooltip!.create(view).dom as unknown as FakeElement
+    expect(container.children.map((child) => child.textContent)).toEqual(['first on line 2', 'shares the first start'])
+  })
+
+  it('skips the issue the cursor is at the start of or inside', () => {
+    const atStart = viewAt(5).view
+    expect(goToNextDiagnostic(atStart)).toBe(true)
+    expect(atStart.state.selection.main.head).toBe(8)
+    expect(atStart.state.field(diagnosticViewState).activeIds).toEqual([1])
+
+    const inside = viewAt(6).view
+    expect(goToNextDiagnostic(inside)).toBe(true)
+    expect(inside.state.selection.main.head).toBe(8)
+  })
+
+  it('wraps to the first issue and cycles through every issue on repeated presses', () => {
+    const { view } = viewAt(8)
+    const visited: Array<{ head: number; activeIds: readonly number[] | null }> = []
+    for (let press = 0; press < 4; press += 1) {
+      expect(goToNextDiagnostic(view)).toBe(true)
+      visited.push({
+        head: view.state.selection.main.head,
+        activeIds: view.state.field(diagnosticViewState).activeIds,
+      })
+    }
+    expect(visited).toEqual([
+      { head: 0, activeIds: [3] },
+      { head: 5, activeIds: [0, 2] },
+      { head: 8, activeIds: [1] },
+      { head: 0, activeIds: [3] },
+    ])
+  })
+
+  it('wraps to the same issue when it is the only one', () => {
+    const { view } = viewAt(2, 'abc\nabcdef', [issues[0]])
+    expect(goToNextDiagnostic(view)).toBe(true)
+    expect(view.state.selection.main.head).toBe(5)
+    expect(goToNextDiagnostic(view)).toBe(true)
+    expect(view.state.selection.main.head).toBe(5)
+    expect(view.state.field(diagnosticViewState).activeIds).toEqual([0])
+  })
+
+  it('returns false and leaves the editor unchanged without issues', () => {
+    const { view, state, focus } = viewAt(2, 'abc\nabcdef', [])
+    const before = state()
+    expect(goToNextDiagnostic(view)).toBe(false)
+    expect(state()).toBe(before)
+    expect(focus).not.toHaveBeenCalled()
   })
 })

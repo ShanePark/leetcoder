@@ -21,7 +21,7 @@ export function applyJavaMethodCreation(view: EditorViewType, plan: JavaMethodCr
     return true
   }
   view.dispatch({
-    changes: plan.change,
+    changes: [plan.change, ...(plan.callChanges ?? [])],
     selection: { anchor: plan.selection.from, head: plan.selection.to },
     scrollIntoView: true,
     userEvent: 'input.createMethod',
