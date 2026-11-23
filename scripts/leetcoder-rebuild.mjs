@@ -580,6 +580,7 @@ async function buildRelease(plan) {
   // ignore the finer markers emitted while the release build runs.
   let buildStage = 'building'
   emitUpdateStage(buildStage)
+  await runCommand('npm', ['ci', '--include=dev', '--no-audit', '--no-fund'])
   await runCommand('npm', ['run', 'tauri', '--', 'build', '--bundles', plan.bundleKind], {
     onLine(line) {
       const next = nextBuildStage(line, buildStage)
