@@ -3,30 +3,75 @@
 A desktop editor for solving Java problems in the `ps` repository: browse problems,
 edit solutions, run JUnit tests, and review and commit changes.
 
+<p align="center">
+  <img src="artifacts/leetcoder-editor.png" width="960" alt="leetcoder showing the daily problem's solution with its JUnit tests in the editor and five passing tests in the Tests tab" />
+</p>
+
+## Why leetcoder
+
+You write the solution yourself; the app takes care of everything around it.
+
+- **You solve, AI reviews.** The AI never writes your solution on its own. When
+  you are done, **AI review** checks correctness, edge cases, and complexity
+  against your test run, and you can ask follow-up questions. It changes code
+  only when you ask, as a diff you accept or reject.
+- **The chores are automated.** Today's problem arrives with its description and
+  a ready-to-run solution file, **Fill test** turns the examples into JUnit
+  assertions, and **Add case** turns a failing case into a new test.
+- **A real editor, not a browser text box.** Java completion and refactors,
+  one-key test runs, and commit and push to your solutions repository, in one
+  window.
+
+<p align="center">
+  <img src="artifacts/leetcoder-ai-review.png" width="480" alt="Review tab with an AI review of the solution, a follow-up question and its answer, and the usage meter" />
+  <img src="artifacts/leetcoder-ai-diff.png" width="480" alt="Diff dialog showing an AI-proposed change with Accept and Reject buttons" />
+</p>
+
 ## Features
 
 - **Problems and workspace:** open the daily problem or paste a problem's URL,
-  read its description, and create a solution. Browse by difficulty,
+  read its description, and create a solution; the daily card shows a disabled
+  **Opened** button while that file is open. Browse by difficulty,
   search files and saved contents, and duplicate, rename, or delete solutions.
-- **Java assistance:** complete local symbols, members, collections, supported
-  Stream chains, and classpath library APIs, with overload and parameter hints.
-- **Editing:** use live templates, automatic imports, formatting, JavaDoc,
+- **Java assistance:** complete local symbols, members, field chains through
+  classes in the same file, collections, supported Stream chains, and classpath
+  library APIs, with overload and parameter hints.
+- **Editing:** use live templates, automatic imports, formatting that keeps the
+  cursor in place, JavaDoc, find in file, a jump to the next compiler error,
   same-file navigation and usage highlighting, and supported renaming,
-  variable/method extraction, inlining, and intentions.
-- **Tests:** run a class or individual test, follow progress, stop execution,
-  and inspect results and output. Compiler diagnostics also appear while editing.
-- **Git:** review changes and diffs, select files, and commit or commit and push.
+  variable/method extraction, inlining, and intentions such as creating a method
+  on a class in the same file or adding a parameter and updating its calls.
+- **Tests:** run the class with **Run** or the test at the cursor with
+  **Run selected**, follow progress, stop execution, and inspect results and
+  output. A verdict line tops the test list, and a draggable split separates the
+  list from the output. Compiler diagnostics also appear while editing.
+- **AI tests:** with a Claude API key, **Fill test** writes the examples into a
+  bare `test()`, and **Add case** turns a pasted failing case, time-limit
+  result, or described stress case into the next `testN()` method.
+- **AI review:** **AI review** reviews the open solution with a model you choose,
+  including the last test run when the code is unchanged, and streams the result
+  into the **Review** tab in English or Korean. Ask follow-up questions there; the
+  answers stream in as Markdown from the review model. Only when you explicitly ask
+  for a change, such as a fix, does the AI propose one: a whole-file change that
+  opens as a unified diff with **Accept** (Enter) and **Reject**. Accept applies it as
+  one undoable edit and is blocked if the editor changed since. A live meter shows
+  tokens and cost for the review and its follow-ups; output tokens and cost are
+  estimates (≈) until each answer finishes.
+- **Git:** review changes and diffs, select files, discard selected changes, and
+  commit or commit and push after a confirmation where Enter confirms and Esc
+  cancels. Commit & Push fast-forwards from the upstream first and stops before
+  committing when the branch cannot fast-forward.
 - **Workspace preferences:** autosave, tabs, external file change detection,
   resizable panes, theme and font settings, and a keyboard shortcut list backed
-  by [the shared definitions](src/shortcuts.ts).
-
-<p align="center">
-  <img src="artifacts/leetcoder-q86-passed.png" width="960" alt="Current desktop editor showing the Q86 Partition List solution, project explorer, and five passing JUnit tests" />
-</p>
+  by [the shared definitions](src/shortcuts.ts). Shortcuts use Alt on Linux and
+  ⌘ on macOS, such as Alt+F and ⌘F for find in file; F2 jumps to the next error.
+  Workspace shortcuts show or hide Problems, Tests, and Git and start a commit,
+  and holding the modifier shows their keytips.
 
 ## Install, run, and build
 
 Build from this repository's source using the instructions for your OS.
+`npm run rebuild` prints the path of its log when it finishes or fails.
 
 ### macOS
 
@@ -41,12 +86,11 @@ xcode-select --install
 From a checkout of this repository, run:
 
 ```bash
-npm ci
 npm run rebuild
 ```
 
-This builds, installs, and launches `/Applications/leetcoder.app`, which you can
-keep in the Dock. To update after changing or pulling source, run `npm run rebuild`
+This installs the locked npm dependencies, then builds, installs, and launches
+`/Applications/leetcoder.app`, which you can keep in the Dock. To update after changing or pulling source, run `npm run rebuild`
 again.
 
 ### Ubuntu 24.04
@@ -65,11 +109,11 @@ sudo apt-get install -y \
 From a checkout of this repository, run:
 
 ```bash
-npm ci
 npm run rebuild
 ```
 
-This builds, installs, and launches `~/.local/lib/leetcoder/leetcoder.AppImage`.
+This installs the locked npm dependencies, then builds, installs, and launches
+`~/.local/lib/leetcoder/leetcoder.AppImage`.
 The launcher is installed at `~/.local/share/applications/leetcoder.desktop`.
 To update after changing or pulling source, run `npm run rebuild` again.
 
@@ -85,7 +129,10 @@ falls back to JDK 11.
 2. Edit your solution; changes save automatically. Use **Duplicate** to start
    another attempt with the same test harness.
 3. Run the class or an individual test and inspect results in **Tests**.
-4. Review diffs in **Git**, select files, and choose **Commit** or **Commit & Push**.
+4. Optionally choose **AI review** and ask follow-up questions in **Review**.
+   Add a Claude API key in the LLM settings first.
+5. Review diffs in **Git**, select files, choose **Commit** or **Commit & Push**,
+   and confirm.
 
 ## Development
 
