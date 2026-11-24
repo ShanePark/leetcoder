@@ -79,7 +79,7 @@ export class ShellControlsView {
     })
     const dailyPrimary = this.root.querySelector<HTMLButtonElement>('.daily-primary')
     if (dailyPrimary) {
-      dailyPrimary.disabled = busy || !this.state.projectValid
+      dailyPrimary.disabled = busy || !this.state.projectValid || dailyPrimary.dataset.fileOpen === 'true'
     }
     this.root.querySelectorAll<HTMLButtonElement>('.daily-today, .problem-lookup-submit').forEach((button) => {
       button.disabled = busy || this.state.dailyLoading

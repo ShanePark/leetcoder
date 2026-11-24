@@ -51,6 +51,7 @@ class FakeText {
 class FakeElement {
   readonly children: FakeChild[] = []
   readonly attributes = new Map<string, string>()
+  readonly dataset: Record<string, string> = {}
   readonly classList = new FakeClassList()
   readonly listeners = new Map<string, Array<(event: any) => void>>()
   parentElement: FakeElement | null = null
@@ -228,6 +229,7 @@ function model(overrides: Partial<DailyProblemViewModel> = {}): DailyProblemView
   return {
     problem,
     existingFile: file,
+    existingFileOpen: false,
     projectValid: true,
     busy: false,
     dailyLoading: false,
@@ -282,6 +284,33 @@ describe('createDailyProblemView', () => {
     const primary = header.querySelector('.daily-primary')
     primary?.dispatch('click')
     expect(callbacksRef.onOpenFile).toHaveBeenCalledWith(replacement)
+  })
+
+  it('shows a disabled Opened button while the problem file is already open', () => {
+    const header = new FakeElement()
+    const description = new FakeElement()
+    const resizeHandle = new FakeElement()
+    const callbacksRef = callbacks()
+    const renderer = createDailyProblemView(
+      { header, description, resizeHandle },
+      callbacksRef,
+    )
+    renderer(model({ existingFileOpen: true }))
+
+    const primary = header.querySelector('.daily-primary')!
+    expect(primary.textContent).toBe('Opened')
+    expect(primary.disabled).toBe(true)
+    // Busy-state refreshes re-enable the button unless it carries this marker.
+    expect(primary.dataset.fileOpen).toBe('true')
+
+    renderer(model({ existingFileOpen: false }))
+
+    const reopened = header.querySelector('.daily-primary')!
+    expect(reopened.textContent).toBe('Open file')
+    expect(reopened.disabled).toBe(false)
+    expect(reopened.dataset.fileOpen).toBeUndefined()
+    reopened.dispatch('click')
+    expect(callbacksRef.onOpenFile).toHaveBeenCalledWith(file)
   })
 
   it('rebuilds when the lookup draft or state changes and preserves focused input selection', () => {

@@ -8,6 +8,8 @@ export type DailyProblemSelection = 'daily' | 'manual'
 export interface DailyProblemViewModel {
   problem: DailyProblem | null
   existingFile: ProblemFileEntry | null
+  /** Whether `existingFile` is the file currently shown in the editor. */
+  existingFileOpen: boolean
   projectValid: boolean
   busy: boolean
   dailyLoading: boolean
@@ -48,6 +50,7 @@ interface DailyProblemRenderSnapshot {
   readonly existingFilePath: string
   readonly existingFileName: string
   readonly existingFilePackage: ProblemFileEntry['packageSegment'] | ''
+  readonly existingFileOpen: boolean
   readonly projectValid: boolean
   readonly busy: boolean
   readonly dailyLoading: boolean
@@ -194,10 +197,15 @@ export function createDailyProblemView(
     const primary = document.createElement('button')
     primary.type = 'button'
     primary.className = 'primary-button daily-primary'
-    primary.textContent = model.existingFile ? 'Open file' : 'Create file'
+    const fileOpen = Boolean(model.existingFile) && model.existingFileOpen
+    primary.textContent = fileOpen ? 'Opened' : model.existingFile ? 'Open file' : 'Create file'
     if (!model.projectValid) {
       primary.disabled = true
       primary.title = 'Choose a repository first'
+    } else if (fileOpen) {
+      primary.disabled = true
+      primary.dataset.fileOpen = 'true'
+      primary.title = 'This file is already open'
     } else {
       primary.disabled = model.busy
     }
@@ -254,6 +262,7 @@ function dailyProblemRenderSnapshot(model: DailyProblemViewModel): DailyProblemR
     existingFilePath: existingFile?.path ?? '',
     existingFileName: existingFile?.name ?? '',
     existingFilePackage: existingFile?.packageSegment ?? '',
+    existingFileOpen: model.existingFileOpen,
     projectValid: model.projectValid,
     busy: model.busy,
     dailyLoading: model.dailyLoading,
@@ -281,6 +290,7 @@ function sameDailyProblemSnapshot(
     && previous.existingFilePath === next.existingFilePath
     && previous.existingFileName === next.existingFileName
     && previous.existingFilePackage === next.existingFilePackage
+    && previous.existingFileOpen === next.existingFileOpen
     && previous.projectValid === next.projectValid
     && previous.busy === next.busy
     && previous.dailyLoading === next.dailyLoading

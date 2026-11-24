@@ -567,7 +567,11 @@ export class LeetcoderApp {
       renderFileHeading: () => this.renderFileHeading(),
       renderFileTabs: () => this.renderFileTabs(),
       updateFileTabState: () => this.updateFileTabState(),
-      updateFileExplorerState: () => this.fileExplorer.updateFileExplorerState(),
+      updateFileExplorerState: () => {
+        this.fileExplorer.updateFileExplorerState()
+        // The daily card's primary button depends on which file is selected.
+        this.renderDailyProblem()
+      },
       updateEditorVisibility: () => this.controlsView.updateEditorVisibility(),
       renderResult: () => this.renderResult(),
       setExpandedGroup: (group, expanded) => this.fileExplorer.setExpandedGroup(group, expanded),
@@ -1175,9 +1179,11 @@ export class LeetcoderApp {
 
   private renderDailyProblem(): void {
     const problem = this.state.dailyProblem
+    const existingFile = problem ? findTodayProblemFile(this.state.files, problem) : null
     this.dailyProblemView({
       problem,
-      existingFile: problem ? findTodayProblemFile(this.state.files, problem) : null,
+      existingFile,
+      existingFileOpen: existingFile !== null && existingFile.path === this.state.selectedPath,
       projectValid: this.state.projectValid,
       busy: this.state.busy,
       dailyLoading: this.state.dailyLoading,
