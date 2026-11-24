@@ -6,6 +6,8 @@
  * `src/backend/`.
  */
 export type {
+  AiCodeProposal,
+  AiCodeProposalOutcome,
   AiGenerateRequest,
   AiGenerateResult,
   AiKeySaveResult,
@@ -14,10 +16,14 @@ export type {
   AiModelPricing,
   AiProgress,
   AiProgressHandler,
+  AiProposalRecord,
   AiProviderInfo,
   AiRequestUsage,
   AiResponseLanguage,
   AiReview,
+  AiReviewFollowUpRequest,
+  AiReviewFollowUpResult,
+  AiReviewFollowUpTurn,
   AiReviewMissedCase,
   AiReviewRequest,
   AiReviewResult,
@@ -25,6 +31,9 @@ export type {
   AiReviewTestRun,
   AiReviewVerdict,
   AiStatus,
+  AiStreamEvent,
+  AiStreamHandler,
+  AiStreamUsage,
   AiModelUsage,
   AiUsageBucket,
   AiUsageSummary,

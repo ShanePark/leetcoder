@@ -19,7 +19,9 @@ import type {
   AiModelPricing,
   AiProgressHandler,
   AiRequestUsage,
+  AiStreamHandler,
   AiReview,
+  AiReviewFollowUpResult,
   AiReviewResult,
   AiStatus,
   TestResult,
@@ -42,9 +44,11 @@ import {
   type AiControllerUi,
   type AiReviewModelChoice,
   type AiReviewModelRequest,
+  type AiReviewStream,
   type AiTarget,
 } from '../../../src/app/ai-controller'
 import type { ProgressOverlayState } from '../../../src/app/progress-overlay'
+import { AiEditDiffDialog } from '../../../src/app/ai-edit-diff-dialog'
 
 const javaSource = (body: string): string => `package shane.leetcode.problems.easy;
 
@@ -1199,8 +1203,7 @@ describe('AI test generation button', () => {
       expect(dom.root.querySelector<FakeElement>('#review-body').children[0].children
         .map((child) => (child as unknown as { className: string }).className))
         .toEqual(['review-head', 'review-usage', 'review-main'])
-      expect(testMocks.progressOverlays[0]).toMatchObject({ kicker: 'AI review', title: 'Reviewing your solution' })
-      expect(testMocks.progressOverlays.at(-1)).toBeNull()
+      expect(testMocks.progressOverlays).toHaveLength(0)
       expect(reviewButton().attributes.get('aria-busy')).toBe('false')
       expect(reviewButton().disabled).toBe(false)
     })
@@ -1276,8 +1279,250 @@ describe('AI test generation button', () => {
       await vi.waitFor(() => {
         expect(lastToast()?.message).toContain('The model declined to review Q1TwoSum.java.')
       })
-      expect(reviewTab().attributes.get('aria-selected')).not.toBe('true')
-      expect(testMocks.progressOverlays.at(-1)).toBeNull()
+      // The tab opened when the review started; it goes back to what it showed before.
+      expect(reviewTab().attributes.get('aria-selected')).toBe('true')
+      expect(classNames(dom.root.querySelector<FakeElement>('#review-body').children)).toEqual(['review-empty'])
+      expect(testMocks.progressOverlays).toHaveLength(0)
+    })
+
+    it('streams the review into the Review tab while the editor stays usable', async () => {
+      const backend = reviewBackend()
+      const result = deferred<AiReviewResult>()
+      let onEvent: AiStreamHandler | undefined
+      vi.mocked(backend.reviewAiCode).mockImplementation((_request, _onProgress, handler) => {
+        onEvent = handler
+        return result.promise
+      })
+      await openStub(backend, filledSource)
+
+      await openPicker()
+      submitPicker()
+      await vi.waitFor(() => {
+        expect(onEvent).toBeDefined()
+      })
+      const body = dom.root.querySelector<FakeElement>('#review-body')
+      const layout = () => body.children[0]
+      expect(reviewTab().attributes.get('aria-selected')).toBe('true')
+      expect(classNames(layout().children)).toEqual(['review-head', 'review-usage', 'review-main'])
+      const status = layout().children[0].children.at(-1)!
+      expect((status as unknown as { className: string }).className).toBe('review-stream-status')
+      expect(status.children[1].textContent).toMatch(/^Thinking… \d+s · Small Name$/)
+      expect(testMocks.progressOverlays).toHaveLength(0)
+      expect(reviewButton().disabled).toBe(true)
+      // The disabled button has lost focus, as it does in a browser.
+      dom.document.activeElement = dom.document.body
+      const keydown = { key: 'a', preventDefault: vi.fn() }
+      dom.window.dispatch('keydown', keydown)
+      expect(keydown.preventDefault).not.toHaveBeenCalled()
+
+      onEvent!({ kind: 'usage', usage: { inputTokens: 2_000, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, final: false })
+      onEvent!({ kind: 'text', text: '{"verdict":"correct","summary":"Two poi' })
+      expect(status.children[1].textContent).toMatch(/^Writing the review… \d+s · Small Name$/)
+      const main = layout().children[2]
+      expect(main.attributes.get('aria-busy')).toBe('true')
+      expect(main.children[0].textContent).toBe('Two poi')
+      const meter = layout().children[1]
+      // 2,000 input tokens and ten estimated output tokens at $1 and $5 per million.
+      expect(meter.children[1].textContent).toBe('≈ $0.0021')
+
+      result.resolve(reviewResult)
+      await vi.waitFor(() => {
+        expect(reviewButton().disabled).toBe(false)
+      })
+      expect(layout().children[1]).toBe(meter)
+      expect(meter.children[1].textContent).toBe('$0.0123')
+      expect(classNames(layout().children[0].children)).not.toContain('review-stream-status')
+      expect(dom.document.activeElement === reviewButton()).toBe(true)
+    })
+
+    it('leaves focus where the user moved it during the review', async () => {
+      const backend = reviewBackend()
+      const result = deferred<AiReviewResult>()
+      vi.mocked(backend.reviewAiCode).mockReturnValue(result.promise)
+      await openStub(backend, filledSource)
+      await openPicker()
+      submitPicker()
+      await vi.waitFor(() => {
+        expect(backend.reviewAiCode).toHaveBeenCalledOnce()
+      })
+      const input = dom.root.querySelector<FakeElement>('#file-search')
+      input.focus()
+      result.resolve(reviewResult)
+      await vi.waitFor(() => {
+        expect(reviewButton().disabled).toBe(false)
+      })
+      expect(dom.document.activeElement === input).toBe(true)
+    })
+
+    describe('follow-up', () => {
+      const followUpInput = (): FakeElement => dom.root.querySelector<FakeElement>('#review-follow-up-input')
+      const followUpSend = (): FakeElement => dom.root.querySelector<FakeElement>('#review-follow-up-send')
+      const typeQuestion = (text: string): void => {
+        followUpInput().value = text
+        followUpInput().dispatch('input')
+      }
+      const pressEnter = (): void => {
+        followUpInput().dispatch('keydown', { key: 'Enter', preventDefault: vi.fn() })
+      }
+      const followUpResult = {
+        outcome: 'ok' as const,
+        answer: 'Because **order** matters.',
+        servedModel: 'model-a',
+        fellBack: false,
+        usage: reviewUsage,
+      }
+
+      async function reviewed(backend: BackendClient): Promise<void> {
+        vi.mocked(backend.readProblemFile).mockResolvedValue(filledSource)
+        await openApp(backend)
+        await selectFile(file)
+        await openPicker()
+        submitPicker()
+        await vi.waitFor(() => {
+          expect(reviewTab().attributes.get('aria-selected')).toBe('true')
+        })
+      }
+
+      it('is disabled until a review is shown', async () => {
+        await openStub(reviewBackend(), filledSource)
+        expect(followUpInput().disabled).toBe(true)
+        expect(followUpSend().disabled).toBe(true)
+      })
+
+      it('asks about the code as reviewed, streams the answer, and leaves the app usable', async () => {
+        const backend = reviewBackend()
+        const answer = deferred<typeof followUpResult>()
+        let onEvent: AiStreamHandler | undefined
+        vi.mocked(backend.askAiReviewFollowUp).mockImplementation((_request, handler) => {
+          onEvent = handler
+          return answer.promise
+        })
+        await reviewed(backend)
+        expect(followUpInput().disabled).toBe(false)
+        editor().emitChange(`${filledSource}\n// edited after the review`)
+        const progressCount = testMocks.progressOverlays.length
+
+        typeQuestion('Why does order matter?')
+        expect(followUpSend().disabled).toBe(false)
+        pressEnter()
+        await vi.waitFor(() => {
+          expect(backend.askAiReviewFollowUp).toHaveBeenCalledOnce()
+        })
+        const request = vi.mocked(backend.askAiReviewFollowUp).mock.calls[0][0]
+        expect(request).toMatchObject({
+          selectedModelId: 'model-a',
+          reviewAnswer: review,
+          history: [],
+          question: 'Why does order matter?',
+        })
+        expect(request.review).toEqual(vi.mocked(backend.reviewAiCode).mock.calls[0][0])
+        expect(request.review.source).toBe(filledSource)
+        expect(followUpInput().value).toBe('')
+        expect(followUpSend().disabled).toBe(true)
+        expect(reviewButton().disabled).toBe(true)
+        expect(testMocks.progressOverlays).toHaveLength(progressCount)
+        const keydown = { key: 'a', preventDefault: vi.fn() }
+        dom.window.dispatch('keydown', keydown)
+        expect(keydown.preventDefault).not.toHaveBeenCalled()
+
+        onEvent?.({ kind: 'text', text: 'Because ' })
+        answer.resolve(followUpResult)
+        await vi.waitFor(() => {
+          expect(reviewButton().disabled).toBe(false)
+        })
+        const main = dom.root.querySelector<FakeElement>('#review-body').children[0].children[2]
+        const conversation = main.children.at(-1)!
+        expect((conversation as unknown as { className: string }).className).toBe('review-section review-follow-ups')
+        expect(conversation.children[1].children[0].textContent).toBe('Why does order matter?')
+        expect(backend.aiUsage).toHaveBeenCalled()
+      })
+
+      describe('a proposed change', () => {
+        const proposal = { summary: 'Return early', code: `${filledSource}\n// changed`, baseCode: filledSource }
+        let open: ReturnType<typeof vi.spyOn<AiEditDiffDialog, 'open'>>
+
+        beforeEach(() => {
+          open = vi.spyOn(AiEditDiffDialog.prototype, 'open').mockImplementation(() => {})
+        })
+
+        afterEach(() => {
+          open.mockRestore()
+        })
+
+        it('opens the diff as soon as the answer settles, once', async () => {
+          const backend = reviewBackend()
+          vi.mocked(backend.askAiReviewFollowUp).mockResolvedValue({ ...followUpResult, proposal })
+          await reviewed(backend)
+
+          typeQuestion('Fix it')
+          pressEnter()
+          await vi.waitFor(() => {
+            expect(open).toHaveBeenCalledOnce()
+          })
+          expect(open.mock.calls[0][0]).toMatchObject({
+            fileName: 'Q1TwoSum.java',
+            proposal: { ...proposal, status: 'pending' },
+            canAccept: true,
+          })
+
+          vi.mocked(backend.askAiReviewFollowUp).mockResolvedValue({ ...followUpResult, proposal: null })
+          typeQuestion('Why?')
+          pressEnter()
+          await vi.waitFor(() => {
+            expect(backend.askAiReviewFollowUp).toHaveBeenCalledTimes(2)
+            expect(reviewButton().disabled).toBe(false)
+          })
+          expect(open).toHaveBeenCalledOnce()
+        })
+
+        it('leaves the change for its View diff button while another dialog is open', async () => {
+          const backend = reviewBackend()
+          const answer = deferred<AiReviewFollowUpResult>()
+          vi.mocked(backend.askAiReviewFollowUp).mockReturnValue(answer.promise)
+          await reviewed(backend)
+
+          typeQuestion('Fix it')
+          pressEnter()
+          await vi.waitFor(() => {
+            expect(backend.askAiReviewFollowUp).toHaveBeenCalledOnce()
+          })
+          const queryAll = dom.root.querySelectorAll.bind(dom.root)
+          vi.spyOn(dom.root, 'querySelectorAll').mockImplementation(<T extends FakeElement = FakeElement>(selector: string): T[] =>
+            selector === '.dialog-backdrop:not([hidden])' ? [dom.root.querySelector<T>('#settings-dialog')] : queryAll<T>(selector))
+          answer.resolve({ ...followUpResult, proposal })
+          await vi.waitFor(() => {
+            expect(reviewButton().disabled).toBe(false)
+          })
+          expect(open).not.toHaveBeenCalled()
+        })
+      })
+
+      it('puts the question back and shows the error when the request fails', async () => {
+        const backend = reviewBackend()
+        vi.mocked(backend.askAiReviewFollowUp).mockRejectedValue(new Error('Too many follow-up turns.'))
+        await reviewed(backend)
+
+        typeQuestion('Why?')
+        pressEnter()
+        await vi.waitFor(() => {
+          expect(followUpInput().value).toBe('Why?')
+        })
+        expect(lastToast()?.message).toBe('Could not answer the question: Too many follow-up turns.')
+        const main = dom.root.querySelector<FakeElement>('#review-body').children[0].children[2]
+        expect(main.children.map((child) => (child as unknown as { className: string }).className))
+          .not.toContain('review-section review-follow-ups')
+      })
+
+      it('keeps the draft across file switches', async () => {
+        const backend = reviewBackend()
+        vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
+        await reviewed(backend)
+        typeQuestion('Half-typed question')
+        await selectFile(otherFile)
+        await selectFile(file)
+        expect(followUpInput().value).toBe('Half-typed question')
+        expect(followUpInput().disabled).toBe(false)
+      })
     })
   })
 
@@ -1400,6 +1645,9 @@ const reviewUsage: AiRequestUsage = {
   costUsd: 0.0123,
 }
 
+const classNames = (elements: readonly FakeElement[]): string[] =>
+  elements.map((element) => (element as unknown as { className: string }).className)
+
 const reviewResult: AiReviewResult = { outcome: 'ok', review, servedModel: 'model-a', fellBack: false, usage: reviewUsage }
 
 const pricing = (inputPerMTok: number, outputPerMTok: number): AiModelPricing => ({
@@ -1438,6 +1686,7 @@ function unitController(overrides: Partial<AiControllerApi> = {}, uiOverrides: P
     aiListModels: vi.fn(async () => reviewModels),
     aiGenerateTests: vi.fn(async () => okResult),
     reviewAiCode: vi.fn(async () => reviewResult),
+    askAiReviewFollowUp: vi.fn(async () => ({ outcome: 'ok', answer: '', proposal: null, servedModel: 'model-a', fellBack: false, usage: reviewUsage }) as const),
     currentTarget: () => unitTarget,
     headerProblem: () => problemOne,
     readContext: () => ({ stub: 'bare', methodHeaders: ['int f()'], canAddCase: true }),
@@ -1449,6 +1698,7 @@ function unitController(overrides: Partial<AiControllerApi> = {}, uiOverrides: P
       events.push('focus')
     }),
     readSource: () => 'class Q1TwoSum { int f() { return 1; } }',
+    replaceSource: vi.fn(),
     reviewTestRun: () => ({ testRun: null, omitted: 'no-run' }),
     responseLanguage: () => 'korean',
     ...overrides,
@@ -1472,10 +1722,19 @@ function unitController(overrides: Partial<AiControllerApi> = {}, uiOverrides: P
     reviewed: vi.fn(() => {
       events.push('reviewed')
     }),
+    reviewStreamChanged: vi.fn((stream: AiReviewStream | null) => {
+      events.push(stream ? `stream: ${stream.text}` : 'stream ended')
+    }),
+    usageChanged: vi.fn(() => {
+      events.push('usage')
+    }),
+    proposalArrived: vi.fn(),
     chooseReviewModel: vi.fn(async () => {
       events.push('picker')
       return { modelId: 'model-review' }
     }),
+    followUpsChanged: vi.fn(),
+    followUpAnswerChanged: vi.fn(),
     ...uiOverrides,
   }
   return { controller: createAiController(api, ui), api, ui }
@@ -1611,14 +1870,13 @@ describe('AI review', () => {
       servedModelName: 'model-a',
       testRunOmitted: null,
       usage: reviewUsage,
+      pricing: null,
+      request: vi.mocked(api.reviewAiCode).mock.calls[0][0],
+      target: api.currentTarget(),
+      followUps: [],
     })
-    expect(ui.progressStates[0]).toMatchObject({ kicker: 'AI review', title: 'Reviewing your solution' })
-    expect(stageLabels(ui.progressStates[1])).toEqual([
-      'Reading code and test results',
-      'Asking Claude',
-      'Preparing the review',
-    ])
-    expect(ui.events.slice(-2)).toEqual(['progress closed', 'reviewed'])
+    expect(ui.progressStates).toHaveLength(0)
+    expect(ui.events.slice(-3)).toEqual(['stream: ', 'stream ended', 'reviewed'])
     expect(ui.generationFinished).toHaveBeenCalledOnce()
     expect(api.aiGenerateTests).not.toHaveBeenCalled()
   })
@@ -1639,7 +1897,7 @@ describe('AI review', () => {
     await controller.review()
     expect(ui.reviewed).not.toHaveBeenCalled()
     expect(ui.showMessage).toHaveBeenCalledWith(expect.stringContaining(message), 'error')
-    expect(ui.progressStates.at(-1)).toBeNull()
+    expect(ui.events.slice(-2)).toEqual(['stream ended', expect.stringContaining(message)])
   })
 
   it('shows an error and no review when the call fails', async () => {
@@ -1647,7 +1905,76 @@ describe('AI review', () => {
     await controller.review()
     expect(ui.showMessage).toHaveBeenCalledWith('Could not review the code: too long', 'error')
     expect(ui.reviewed).not.toHaveBeenCalled()
-    expect(ui.progressStates.at(-1)).toBeNull()
+    expect(ui.events.slice(-2)).toEqual(['stream ended', 'message: Could not review the code: too long'])
+  })
+
+  it('streams the review: the model by name, the JSON so far, and the usage, then ends before the result', async () => {
+    const pending = deferred<AiReviewResult>()
+    let report: AiProgressHandler | undefined
+    let onEvent: AiStreamHandler | undefined
+    const { controller, ui } = unitController({
+      reviewTestRun: () => ({ testRun: null, omitted: 'changed' }),
+      reviewAiCode: (_request, onProgress, handler) => {
+        report = onProgress
+        onEvent = handler
+        return pending.promise
+      },
+    }, { chooseReviewModel: vi.fn(async () => ({ modelId: 'model-mid' })) })
+    const now = vi.spyOn(Date, 'now').mockReturnValue(5_000)
+
+    const reviewing = controller.review()
+    await vi.waitFor(() => {
+      expect(onEvent).toBeDefined()
+    })
+    const stream = vi.mocked(ui.reviewStreamChanged).mock.calls[0][0]!
+    expect(stream).toEqual({
+      fileName: 'Q1TwoSum.java',
+      modelId: 'model-mid',
+      modelName: 'Mid Name',
+      pricing: pricing(3, 15),
+      testRunOmitted: 'changed',
+      startedAt: 5_000,
+      text: '',
+      live: { reported: null, final: false, chars: 0 },
+    })
+    expect(controller.requestKind).toBe('review')
+
+    report!({ stage: 'requesting', model: 'model-large' })
+    expect(stream).toMatchObject({ modelId: 'model-large', modelName: 'Large Name', pricing: pricing(5, 25) })
+    const usage = { inputTokens: 900, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }
+    onEvent!({ kind: 'usage', usage, final: false })
+    onEvent!({ kind: 'thinking', chars: 8 })
+    onEvent!({ kind: 'text', text: '{"verdict":' })
+    onEvent!({ kind: 'text', text: '"correct"' })
+    expect(stream.text).toBe('{"verdict":"correct"')
+    expect(stream.live).toEqual({ reported: usage, final: false, chars: 8 + 20 })
+    expect(ui.reviewStreamChanged).toHaveBeenCalledTimes(4)
+    expect(vi.mocked(ui.reviewStreamChanged).mock.calls.every(([value]) => value === stream)).toBe(true)
+
+    pending.resolve(reviewResult)
+    await reviewing
+    expect(ui.events.slice(-6)).toEqual([
+      'usage', 'usage', 'stream: {"verdict":', 'stream: {"verdict":"correct"', 'stream ended', 'reviewed',
+    ])
+    onEvent!({ kind: 'text', text: 'late' })
+    expect(ui.reviewStreamChanged).toHaveBeenCalledTimes(5)
+    expect(stream.text).toBe('{"verdict":"correct"')
+    now.mockRestore()
+  })
+
+  it('names the catalog default before the request says which model it sent to', async () => {
+    const firstStream = async (overrides: Partial<AiControllerApi>) => {
+      const unit = unitController(overrides, { chooseReviewModel: vi.fn(async () => ({ modelId: null })) })
+      let seen: AiReviewStream | null = null
+      vi.mocked(unit.ui.reviewStreamChanged).mockImplementation((stream) => {
+        seen ??= stream && { ...stream }
+      })
+      await unit.controller.review()
+      return seen
+    }
+    expect(await firstStream({})).toMatchObject({ modelId: 'model-small', modelName: 'Small Name' })
+    expect(await firstStream({ aiListModels: vi.fn(async () => { throw new Error('no cache') }) }))
+      .toMatchObject({ modelId: '', modelName: 'the default model', pricing: null })
   })
 
   it('names a substituted model after showing the review', async () => {
@@ -1748,49 +2075,21 @@ describe('AI review', () => {
     }))
   })
 
-  describe('focus after the popup closes', () => {
-    /**
-     * Stands in for the review button and the popup: the popup saves the
-     * focused element when it opens and focuses it again when it closes, and a
-     * disabled button cannot take focus.
-     */
-    function focusHarness(overrides: Partial<AiControllerApi>) {
-      const page = { active: 'button' as 'button' | 'dialog' | 'body', disabled: false, saved: null as string | null }
-      const focusButton = (): void => {
-        page.active = page.disabled ? 'body' : 'button'
-      }
-      let controller: AiController | undefined
-      const unit = unitController(overrides, {
-        requestChanged: vi.fn(() => {
-          page.disabled = controller!.requestPath !== null
-        }),
-        showProgress: vi.fn((state: ProgressOverlayState | null) => {
-          if (state && page.active !== 'dialog') {
-            page.saved = page.active === 'button' && !page.disabled ? 'button' : null
-            page.active = 'dialog'
-          } else if (!state && page.active === 'dialog') {
-            if (page.saved === 'button') focusButton()
-            else page.active = 'body'
-          }
-        }),
-      })
-      controller = unit.controller
-      return { ...unit, page }
-    }
-
-    it('returns focus to the review button after a review', async () => {
-      const { controller, ui, page } = focusHarness({})
-      await controller.review()
-      expect(ui.reviewed).toHaveBeenCalledOnce()
-      expect(page).toMatchObject({ active: 'button', disabled: false })
+  it('shows no popup for a review and enables the button again before the stream ends', async () => {
+    let controller: AiController | undefined
+    const order: string[] = []
+    const unit = unitController({}, {
+      requestChanged: vi.fn(() => {
+        order.push(controller!.requestPath === null ? 'idle' : 'busy')
+      }),
+      reviewStreamChanged: vi.fn((stream: AiReviewStream | null) => {
+        if (!stream) order.push('stream ended')
+      }),
     })
-
-    it('returns focus to the review button after a review error', async () => {
-      const { controller, ui, page } = focusHarness({ reviewAiCode: vi.fn(async () => { throw new Error('too long') }) })
-      await controller.review()
-      expect(ui.showMessage).toHaveBeenCalledWith('Could not review the code: too long', 'error')
-      expect(page).toMatchObject({ active: 'button', disabled: false })
-    })
+    controller = unit.controller
+    await controller.review()
+    expect(unit.ui.showProgress).not.toHaveBeenCalled()
+    expect(order).toEqual(['busy', 'idle', 'stream ended'])
   })
 
   it('sends nothing for another loaded problem or an empty file', async () => {

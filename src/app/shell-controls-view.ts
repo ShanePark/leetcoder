@@ -24,6 +24,8 @@ interface ShellControlsViewOptions {
   aiRequestKind: () => AiRequestKind | null
   aiTestStub: () => AiTestStub
   aiCaseTestAvailable: () => boolean
+  /** The @Test method holding the editor cursor, which Run selected targets. */
+  testMethodAtCursor: () => string | null
 }
 
 /** Update shell controls directly without rebuilding focused editor or Git inputs. */
@@ -46,7 +48,9 @@ export class ShellControlsView {
       button.tabIndex = selected ? 0 : -1
       this.element<HTMLElement>(`#${tab}-panel`).hidden = !selected
     }
-    this.element<HTMLButtonElement>('#run-test').hidden = this.state.bottomPanelTab !== 'tests'
+    const testsTab = this.state.bottomPanelTab === 'tests'
+    this.element<HTMLButtonElement>('#run-test').hidden = !testsTab
+    this.element<HTMLButtonElement>('#run-selected-test').hidden = !testsTab
     this.element<HTMLElement>('#git-tab-indicator').hidden = !hasPendingGitWork(this.state.git)
   }
 
@@ -172,6 +176,30 @@ export class ShellControlsView {
       )
       runButton.dataset.runAction = action
     }
+    this.updateRunSelectedButton()
+  }
+
+  /**
+   * Run selected follows the cursor, so the editor refreshes it on every
+   * selection change. It stays disabled during a run rather than becoming a
+   * second Stop button.
+   */
+  updateRunSelectedButton(): void {
+    const button = this.element<HTMLButtonElement>('#run-selected-test')
+    const running = this.state.testRun?.status === 'running'
+    const method = this.state.selectedFqcn ? this.options.testMethodAtCursor() : null
+    const shortcut = shortcutLabel('run-test-at-cursor', this.options.macPlatform())
+    button.disabled = running || this.state.busy || method === null
+    button.title = running
+      ? 'Wait for the current test run to finish'
+      : !this.state.selectedFqcn
+        ? 'Select a Java problem file to run'
+        : method === null
+          ? 'Put the cursor in an @Test method to run only that test'
+          : `Run ${method}() (${shortcut})`
+    button.setAttribute('aria-label', method === null || running
+      ? `Run selected test (${shortcut})`
+      : `Run ${method}() (${shortcut})`)
   }
 
   updateEditorVisibility(): void {

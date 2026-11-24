@@ -114,16 +114,20 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
             <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git<span id="git-tab-indicator" class="bottom-panel-tab-indicator" role="img" aria-label="Uncommitted or unpushed changes" title="Uncommitted or unpushed changes" hidden></span><span class="keytip" aria-hidden="true">${label('show-git-panel')}</span></button>
           </div>
           <div class="bottom-panel-actions" role="group" aria-label="Test actions">
-            <span class="selected-test-shortcut-hint">Selected test <kbd id="run-selected-shortcut">${shortcutLabel('run-test-at-cursor', options.macPlatform)}</kbd></span>
-            <button id="run-test" class="primary-button" type="button"><span id="run-label">Run</span> <kbd id="run-shortcut">${shortcutLabel('run-test', options.macPlatform)}</kbd></button>
+            <button id="run-selected-test" class="secondary-button" type="button">Run selected <kbd id="run-selected-shortcut">${label('run-test-at-cursor')}</kbd></button>
+            <button id="run-test" class="primary-button" type="button"><span id="run-label">Run</span> <kbd id="run-shortcut">${label('run-test')}</kbd></button>
           </div>
         </div>
         <section id="tests-panel" class="tests-panel" role="tabpanel" aria-labelledby="tests-tab" aria-busy="false">
-          <div id="test-status-row" class="test-status-row"></div>
           <div id="test-body" class="test-body"></div>
         </section>
         <section id="review-panel" class="review-panel" role="tabpanel" aria-labelledby="review-tab" hidden>
           <div id="review-body" class="review-body"></div>
+          <form id="review-follow-up-form" class="review-follow-up-bar">
+            <label class="sr-only" for="review-follow-up-input">Follow-up question</label>
+            <textarea id="review-follow-up-input" rows="1" maxlength="4000" spellcheck="false" disabled></textarea>
+            <button id="review-follow-up-send" class="primary-button" type="submit" disabled>Send</button>
+          </form>
         </section>
         <section id="git-panel" class="git-panel" role="tabpanel" aria-labelledby="git-tab" hidden>
           <div class="git-toolbar">
@@ -372,8 +376,8 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         <code id="commit-git-message" class="discard-git-path"></code>
         <code id="commit-git-paths" class="discard-git-path"></code>
         <div class="discard-git-actions">
-          <button id="cancel-commit-git" class="text-button" type="button" autofocus>Cancel</button>
-          <button id="confirm-commit-git" class="primary-button" type="button">Commit &amp; Push</button>
+          <button id="cancel-commit-git" class="text-button" type="button">Cancel <kbd id="cancel-commit-git-shortcut">${label('git-cancel-commit')}</kbd></button>
+          <button id="confirm-commit-git" class="primary-button" type="button" autofocus><span id="confirm-commit-git-label">Commit &amp; Push</span> <kbd id="confirm-commit-git-shortcut">${label('git-confirm-commit')}</kbd></button>
         </div>
       </dialog>
       <div id="discard-git-dialog" class="dialog-backdrop" hidden>

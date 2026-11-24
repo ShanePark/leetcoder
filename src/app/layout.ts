@@ -8,6 +8,10 @@ export const MIN_GIT_FILE_LIST_WIDTH = 180
 export const MIN_GIT_DIFF_WIDTH = 260
 export const GIT_SPLITTER_WIDTH = 7
 export const GIT_WORKSPACE_GAP = 16
+export const DEFAULT_TEST_LIST_WIDTH = 300
+export const MIN_TEST_LIST_WIDTH = 200
+export const MIN_TEST_OUTPUT_WIDTH = 260
+export const TEST_SPLITTER_WIDTH = 10
 export const DEFAULT_SIDEBAR_WIDTH = 248
 export const MIN_SIDEBAR_WIDTH = 180
 export const MAX_SIDEBAR_WIDTH = 520
@@ -23,6 +27,7 @@ export const VIEWPORT_MARGIN = 8
 
 export const BOTTOM_PANEL_HEIGHT_KEY = 'leetcoder.bottom-panel-height'
 export const GIT_FILE_LIST_WIDTH_KEY = 'leetcoder.git-file-list-width'
+export const TEST_LIST_WIDTH_KEY = 'leetcoder.test-list-width'
 export const SIDEBAR_WIDTH_KEY = 'leetcoder.sidebar-width'
 export const SIDEBAR_COLLAPSED_KEY = 'leetcoder.sidebar-collapsed'
 export const DAILY_DESCRIPTION_HEIGHT_KEY = 'leetcoder.daily-description-height'
@@ -168,6 +173,13 @@ export function clampGitFileListWidth(value: number, availableWidth = 900): numb
   return Math.round(Math.min(maximum, Math.max(MIN_GIT_FILE_LIST_WIDTH, candidate)))
 }
 
+/** Keep both the test list and the run output usable in the Tests tab. */
+export function clampTestListWidth(value: number, availableWidth = 900): number {
+  const maximum = maxTestListWidth(availableWidth)
+  const candidate = Number.isNaN(value) ? DEFAULT_TEST_LIST_WIDTH : value
+  return Math.round(Math.min(maximum, Math.max(MIN_TEST_LIST_WIDTH, candidate)))
+}
+
 /** Keep the resizable problem-file pane usable alongside the editor. */
 export function clampSidebarWidth(value: number, availableWidth = 1000): number {
   const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 1000
@@ -187,6 +199,11 @@ export function clampDailyDescriptionHeight(value: number, availableHeight = 800
 export function maxGitFileListWidth(availableWidth: number): number {
   const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 900
   return Math.max(MIN_GIT_FILE_LIST_WIDTH, Math.round(usableWidth - MIN_GIT_DIFF_WIDTH - GIT_SPLITTER_WIDTH - GIT_WORKSPACE_GAP))
+}
+
+export function maxTestListWidth(availableWidth: number): number {
+  const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 900
+  return Math.max(MIN_TEST_LIST_WIDTH, Math.round(usableWidth - MIN_TEST_OUTPUT_WIDTH - TEST_SPLITTER_WIDTH))
 }
 
 export function maxSidebarWidth(availableWidth: number): number {
@@ -222,6 +239,12 @@ export function readGitFileListWidth(storage: Storage | undefined): number {
   const value = storage?.getItem(GIT_FILE_LIST_WIDTH_KEY)
   const parsed = value ? Number(value) : DEFAULT_GIT_FILE_LIST_WIDTH
   return clampGitFileListWidth(Number.isFinite(parsed) ? parsed : DEFAULT_GIT_FILE_LIST_WIDTH)
+}
+
+export function readTestListWidth(storage: Storage | undefined): number {
+  const value = storage?.getItem(TEST_LIST_WIDTH_KEY)
+  const parsed = value ? Number(value) : DEFAULT_TEST_LIST_WIDTH
+  return clampTestListWidth(Number.isFinite(parsed) ? parsed : DEFAULT_TEST_LIST_WIDTH)
 }
 
 export function readSidebarWidth(storage: Storage | undefined): number {

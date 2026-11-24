@@ -1,3 +1,4 @@
+import { isCommitConfirmShortcut } from '../shortcuts'
 import type { GitCommitConfirmation } from './git-controller'
 
 /** Confirm the exact commit before the controller saves or changes the repository. */
@@ -11,6 +12,14 @@ export class GitCommitDialog {
     this.dialog = this.element<HTMLDialogElement>('#commit-git-dialog')
     this.listen(this.element('#cancel-commit-git'), 'click', () => this.finish(false))
     this.listen(this.element('#confirm-commit-git'), 'click', () => this.finish(true))
+    this.listen(this.dialog, 'keydown', (event) => {
+      const key = event as KeyboardEvent
+      // Enter on Cancel keeps its native meaning; anywhere else it confirms.
+      if (key.isComposing || !isCommitConfirmShortcut(key)) return
+      if (key.target === this.element('#cancel-commit-git')) return
+      key.preventDefault()
+      this.finish(true)
+    })
     this.listen(this.dialog, 'cancel', (event) => {
       event.preventDefault()
       this.finish(false)
@@ -30,7 +39,7 @@ export class GitCommitDialog {
     const fileCount = `${request.paths.length} ${request.paths.length === 1 ? 'file' : 'files'}`
     const branch = request.branch ? ` to ${request.branch}` : ' to the current branch'
     this.element('#commit-git-title').textContent = request.pushAfterCommit ? 'Commit and push?' : 'Commit changes?'
-    this.element('#confirm-commit-git').textContent = request.pushAfterCommit ? 'Commit & Push' : 'Commit'
+    this.element('#confirm-commit-git-label').textContent = request.pushAfterCommit ? 'Commit & Push' : 'Commit'
     this.element('#commit-git-branch').textContent = request.pushAfterCommit
       ? `Commit ${fileCount}${branch} and push to its upstream?`
       : `Commit ${fileCount}${branch}?`
@@ -41,7 +50,7 @@ export class GitCommitDialog {
       try {
         this.dialog.hidden = false
         this.dialog.showModal()
-        this.element('#cancel-commit-git').focus()
+        this.element('#confirm-commit-git').focus()
       } catch {
         this.finish(false)
       }

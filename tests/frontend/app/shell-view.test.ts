@@ -64,4 +64,16 @@ describe('shell markup', () => {
     expect(elementMarkup(markup, 'review-tab')).not.toContain('keytip')
     expect(markup).toMatch(/<section id="review-panel"[^>]*aria-labelledby="review-tab"[^>]*hidden>/)
   })
+
+  it('offers Run selected and Run as buttons with registry shortcuts, and no separate status row', () => {
+    const linux = shellMarkup(false)
+    const selected = elementMarkup(linux, 'run-selected-test')
+    expect(selected).toContain('class="secondary-button"')
+    expect(selected).toContain('Run selected <kbd id="run-selected-shortcut">Ctrl+Shift+R</kbd>')
+    expect(elementMarkup(linux, 'run-test')).toContain('<kbd id="run-shortcut">Ctrl+R</kbd>')
+    expect(linux.indexOf('id="run-selected-test"')).toBeLessThan(linux.indexOf('id="run-test"'))
+    expect(elementMarkup(shellMarkup(true), 'run-selected-test')).toContain('<kbd id="run-selected-shortcut">⌃⇧R</kbd>')
+    expect(linux).not.toContain('selected-test-shortcut-hint')
+    expect(linux).not.toContain('test-status-row')
+  })
 })

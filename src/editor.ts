@@ -22,6 +22,7 @@ import {
   history,
   historyKeymap,
   indentWithTab,
+  isolateHistory,
   moveLineDown,
   moveLineUp,
   redo,
@@ -114,6 +115,7 @@ import {
   inlineJavaField,
   formatJavaDocClipboard,
   introduceJavaVariable,
+  lineDocumentChanges,
   planJavaDocInsertion,
   reformatJavaDocument,
   smartBackspaceOnBlankLine,
@@ -223,6 +225,8 @@ export interface EditorCallbacks {
   onSave?: () => boolean | void
   onRun?: () => boolean | void
   onRunTestAtCursor?: (methodName: string | null) => boolean | void
+  /** Called after the cursor moves or the document changes. */
+  onCursorChange?: () => void
   onShowShortcuts?: () => void
   onShowSettings?: () => void
   onFocusFileSearch?: () => void
@@ -862,6 +866,9 @@ export class JavaEditor {
           if (update.docChanged) {
             callbacks.onChange?.(update.state.doc.toString())
           }
+          if (update.docChanged || update.selectionSet) {
+            callbacks.onCursorChange?.()
+          }
         }),
         // CodeMirror's built-in keymap contains an Alt+ArrowRight movement
         // command. Run our physical-key fallbacks before that keymap so the
@@ -962,6 +969,22 @@ export class JavaEditor {
       annotations: Transaction.addToHistory.of(false),
     })
     this.foldImports()
+  }
+
+  /**
+   * Replace the document with `source` as one undo step. Only the differing
+   * lines change, so the cursor and scroll stay with the code they were on.
+   */
+  replaceValue(source: string): void {
+    const current = this.getValue()
+    if (source === current) {
+      return
+    }
+    this.view.dispatch({
+      changes: lineDocumentChanges(current, source),
+      userEvent: 'input.replace',
+      annotations: isolateHistory.of('full'),
+    })
   }
 
   /** Cheap enough to read on every edit, unlike the full context. */

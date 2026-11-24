@@ -190,6 +190,38 @@ describe('LeetcoderApp lifecycle', () => {
     await app.destroy()
   })
 
+  it('runs only the @Test method at the cursor from Run selected, and disables it elsewhere', async () => {
+    const { backend } = createBackend()
+    const app = await startApp(dom, backend)
+    const appInternals = app as unknown as {
+      state: { selectedFqcn: string | null; busy: boolean; testRun: null }
+      renderAll: () => void
+    }
+    appInternals.state.selectedFqcn = 'easy.Q1TwoSum'
+    appInternals.state.busy = false
+    appInternals.state.testRun = null
+    const button = dom.root.querySelector<FakeElement>('#run-selected-test')
+    const controller = testMocks.testRunControllers.at(-1)!
+
+    testMocks.testMethodAtCursor = null
+    appInternals.renderAll()
+    expect(button.disabled).toBe(true)
+    expect(button.title).toBe('Put the cursor in an @Test method to run only that test')
+    button.dispatch('click')
+    expect(controller.runCurrentTest).not.toHaveBeenCalled()
+
+    // A cursor move alone refreshes the button; no app render is needed.
+    testMocks.editorInstances.at(-1)!.moveCursor('returnsPair')
+    expect(button.disabled).toBe(false)
+    expect(button.title).toBe('Run returnsPair() (Ctrl+Shift+R)')
+    button.dispatch('click')
+    expect(controller.runCurrentTest).toHaveBeenCalledExactlyOnceWith('returnsPair')
+
+    testMocks.editorInstances.at(-1)!.moveCursor(null)
+    expect(button.disabled).toBe(true)
+    await app.destroy()
+  })
+
   it('does not gate remembered repository startup on a pending daily request', async () => {
     const { backend } = createBackend()
     const daily = deferred<typeof dailyProblem>()

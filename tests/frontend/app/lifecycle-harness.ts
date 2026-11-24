@@ -338,6 +338,14 @@ export function createBackend(): BackendHarness {
       fellBack: false,
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null },
     }),
+    askAiReviewFollowUp: vi.fn().mockResolvedValue({
+      outcome: 'refused',
+      answer: '',
+      proposal: null,
+      servedModel: '',
+      fellBack: false,
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null },
+    }),
     aiUsage: vi.fn().mockResolvedValue({
       buckets: [],
       allTime: emptyAiUsageTotals,

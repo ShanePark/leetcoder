@@ -5,6 +5,7 @@ import {
   formatShortcut,
   isFileSearchShortcut,
   isProjectSearchShortcut,
+  isProposalAcceptShortcut,
   isSettingsShortcut,
   platformBindings,
   platformShortcutBindings,
@@ -338,7 +339,28 @@ describe('workspace shortcut table', () => {
       section.entries.map((entry) => entry.id),
     ]))
     expect(sections.get('Tool windows')).toEqual(['toggle-sidebar', 'show-tests-panel', 'show-git-panel'])
-    expect(sections.get('Git')).toEqual(['git-commit', 'git-commit-push'])
+    expect(sections.get('Git')).toEqual(['git-commit', 'git-commit-push', 'git-confirm-commit', 'git-cancel-commit'])
+  })
+
+  it('labels the commit dialog keys the same on both platforms', () => {
+    for (const mac of [false, true]) {
+      expect(shortcutLabel('git-confirm-commit', mac)).toBe('Enter')
+      expect(shortcutLabel('git-cancel-commit', mac)).toBe('Esc')
+    }
+  })
+
+  it('lists and labels the proposed-change dialog keys the same on both platforms', () => {
+    const section = SHORTCUT_SECTIONS.find((entry) => entry.title === 'AI review')
+    expect(section?.entries.map((entry) => entry.id)).toEqual(['ai-accept-change', 'ai-close-change'])
+    for (const mac of [false, true]) {
+      expect(shortcutLabel('ai-accept-change', mac)).toBe('Enter')
+      expect(shortcutLabel('ai-close-change', mac)).toBe('Esc')
+    }
+    const plain = { key: 'Enter', shiftKey: false, altKey: false, metaKey: false, ctrlKey: false }
+    expect(isProposalAcceptShortcut(plain)).toBe(true)
+    expect(isProposalAcceptShortcut({ ...plain, shiftKey: true })).toBe(false)
+    expect(isProposalAcceptShortcut({ ...plain, metaKey: true })).toBe(false)
+    expect(isProposalAcceptShortcut({ ...plain, key: 'Escape' })).toBe(false)
   })
 })
 

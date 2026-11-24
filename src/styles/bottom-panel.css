@@ -105,21 +105,12 @@
   display: flex;
   flex: none;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .bottom-panel-actions .primary-button.is-stop-action {
   background: var(--red);
   color: var(--on-danger);
-}
-
-.selected-test-shortcut-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-faint);
-  font-size: 12px;
-  white-space: nowrap;
 }
 
 /* ---------------------------------------------------------------- */
@@ -227,16 +218,11 @@
   white-space: nowrap;
 }
 
-.review-usage-caption,
+.review-usage-breakdown,
 .review-usage-tests {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--border);
-}
-
-.review-usage-caption {
-  color: var(--text-faint);
-  font-size: 11px;
 }
 
 .review-usage-stats {
@@ -258,6 +244,47 @@
   text-align: right;
 }
 
+.review-usage-summary {
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.review-usage-summary:hover {
+  color: var(--text);
+}
+
+.review-usage-requests {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-usage-request {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 0 8px;
+}
+
+.review-usage-request-cost {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.review-usage-request-tokens {
+  grid-column: 1 / -1;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.review-usage-request.is-estimated .review-usage-request-label::after {
+  content: ' …';
+}
+
 .review-usage-tests {
   display: flex;
   align-items: center;
@@ -276,6 +303,33 @@
 
 .review-usage-tests.is-included::before {
   background: var(--green);
+}
+
+/* A review on its way: what the model is doing, how long it has taken, and
+   which model it is. */
+.review-stream-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.review-stream-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 1.5px solid var(--surface-3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-stream-spinner {
+    animation-duration: 2.5s;
+  }
 }
 
 @container review-body (max-width: 560px) {
@@ -399,4 +453,170 @@
   font-family: var(--font-mono);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+/* Follow-up conversation and composer */
+
+.review-turn {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.review-turn + .review-turn {
+  margin-top: 6px;
+}
+
+.review-question {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.review-answer {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.review-answer-note {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.review-answer-note.is-refused {
+  color: var(--amber);
+}
+
+.review-answer-pending {
+  display: inline-flex;
+  gap: 4px;
+  padding: 6px 0;
+}
+
+.review-answer-pending > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  animation: review-answer-pending 1.2s ease-in-out infinite;
+}
+
+.review-answer-pending > span:nth-child(2) { animation-delay: 0.15s; }
+.review-answer-pending > span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes review-answer-pending {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-answer-pending > span {
+    animation: none;
+  }
+}
+
+.review-answer .md-paragraph {
+  white-space: pre-wrap;
+}
+
+.review-answer .md-heading {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.review-answer .md-heading-1 {
+  font-size: 15px;
+}
+
+.review-answer .md-heading-2 {
+  font-size: 14px;
+}
+
+.review-answer .md-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.review-answer .md-list .md-list {
+  margin-top: 2px;
+}
+
+.review-answer .md-list-item {
+  white-space: pre-wrap;
+}
+
+.review-answer .md-inline-code {
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.review-answer .md-code {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.review-follow-up-bar {
+  display: flex;
+  flex: none;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border);
+}
+
+#review-follow-up-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  max-height: 160px;
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  resize: none;
+  /* The script turns scrolling on only once the text is taller than max-height. */
+  overflow-y: hidden;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+#review-follow-up-input::placeholder {
+  color: var(--text-faint);
+}
+
+#review-follow-up-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+#review-follow-up-input:disabled {
+  opacity: 0.55;
 }

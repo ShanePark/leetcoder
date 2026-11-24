@@ -82,6 +82,11 @@ import {
   type StoredAiReview,
 } from './app/ai-controller'
 import { renderAiReviewPanel } from './app/ai-review-view'
+import { AiReviewStreamView } from './app/ai-review-stream-view'
+import { AiUsageMeter, aiMeterState } from './app/ai-usage-meter'
+import { AiFollowUpView } from './app/ai-follow-up-view'
+import { AiEditDiffDialog } from './app/ai-edit-diff-dialog'
+import type { AiReviewFollowUp } from './app/ai-follow-up'
 import { OverlayController } from './app/overlay-controller'
 import {
   renderGitPanel as renderGitPanelView,
@@ -168,6 +173,10 @@ export class LeetcoderApp {
   private readonly aiController: AiController
   private readonly aiCaseDialog: AiCaseDialog
   private readonly aiReviewModelDialog: AiReviewModelDialog
+  private readonly aiFollowUpView: AiFollowUpView
+  private readonly aiEditDiffDialog: AiEditDiffDialog
+  private readonly aiUsageMeter: AiUsageMeter
+  private readonly aiReviewStreamView: AiReviewStreamView
   /** The last review only; a new one replaces it. */
   private aiReview: StoredAiReview | null = null
   private readonly llmSettings: LlmSettingsController
@@ -191,9 +200,14 @@ export class LeetcoderApp {
   private readonly fileOperationsController: FileOperationsController
   private readonly projectContentSearchController: ProjectContentSearchController
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
-    if (this.gitCommitDialog.isOpen) return
-    // Both show a blocking progress popup, so nothing behind it may run.
-    if (this.gitController.commitPushInProgress || this.aiController.requestPath !== null) {
+    if (this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) return
+    // Both show a blocking progress popup, so nothing behind it may run. A
+    // review or follow-up shows none and leaves the app usable while it streams.
+    const aiKind = this.aiController.requestKind
+    if (
+      this.gitController.commitPushInProgress
+      || (this.aiController.requestPath !== null && aiKind !== 'follow-up' && aiKind !== 'review')
+    ) {
       event.preventDefault()
       return
     }
@@ -281,7 +295,7 @@ export class LeetcoderApp {
    * the editor stops propagation of the chords it handles.
    */
   private readonly handleKeytipKeydown = (event: KeyboardEvent): void => {
-    if (this.gitCommitDialog.isOpen) {
+    if (this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) {
       this.hideKeytips()
       return
     }
@@ -350,7 +364,7 @@ export class LeetcoderApp {
   }
 
   private readonly handleContextMenuKeydown = (event: KeyboardEvent): void => {
-    if (this.gitCommitDialog.isOpen) return
+    if (this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) return
     if (this.gitController.commitPushInProgress) {
       event.preventDefault()
       return
@@ -547,6 +561,9 @@ export class LeetcoderApp {
         void this.testRunController.runCurrentTest(methodName ?? undefined)
         return true
       },
+      onCursorChange: () => {
+        this.controlsView?.updateRunSelectedButton()
+      },
     })
     this.psLibraryController = new PsLibraryController({
       backend: this.backend,
@@ -648,12 +665,26 @@ export class LeetcoderApp {
       openSettings: options.openPermissionSettings ?? (() => tauriInvoke<void>('open_repository_permission_settings')),
       showError: (message, actions, detail) => this.toastController.show(message, 'error', actions, detail),
     })
+    this.aiEditDiffDialog = new AiEditDiffDialog(this.root, currentIsMacPlatform())
+    this.aiUsageMeter = new AiUsageMeter(this.root.ownerDocument)
+    this.aiReviewStreamView = new AiReviewStreamView({
+      body: () => this.element<HTMLElement>('#review-body'),
+      meter: () => this.aiUsageMeter.element,
+    })
+    this.aiFollowUpView = new AiFollowUpView({
+      root: this.root,
+      send: (question) => this.aiReview
+        ? this.aiController.askFollowUp(this.aiReview, question)
+        : Promise.resolve(false),
+      viewProposal: (turn) => this.openProposal(turn),
+    })
     this.aiController = createAiController(
       {
         aiStatus: () => this.backend.aiStatus(),
         aiListModels: (refresh) => this.backend.aiListModels(refresh),
         aiGenerateTests: (request, onProgress) => this.backend.aiGenerateTests(request, onProgress),
-        reviewAiCode: (request, onProgress) => this.backend.reviewAiCode(request, onProgress),
+        reviewAiCode: (request, onProgress, onEvent) => this.backend.reviewAiCode(request, onProgress, onEvent),
+        askAiReviewFollowUp: (request, onEvent) => this.backend.askAiReviewFollowUp(request, onEvent),
         currentTarget: () => ({
           repoPath: this.state.repoPath,
           path: this.state.selectedPath,
@@ -670,6 +701,7 @@ export class LeetcoderApp {
           if (aiFillMayTakeFocus(this.root, button)) this.editor.focus()
         },
         readSource: () => this.state.selectedSource,
+        replaceSource: (code) => this.editor.replaceValue(code),
         reviewTestRun: () => {
           const source = this.testRunController.resultSource
           return aiReviewTestRunSelection(
@@ -682,7 +714,10 @@ export class LeetcoderApp {
         responseLanguage: () => readLlmResponseLanguage(this.storage),
       },
       {
-        requestChanged: () => this.controlsView.updateAiButton(),
+        requestChanged: () => {
+          this.controlsView.updateAiButton()
+          this.updateFollowUpComposer()
+        },
         showMessage: (message, tone) => this.setMessage(message, tone),
         showMissingKey: () => this.overlay.openSettingsDialog('llm'),
         generationFinished: () => this.llmSettings.refreshUsageIfVisible(),
@@ -693,7 +728,37 @@ export class LeetcoderApp {
           this.renderReviewPanel()
           this.selectBottomPanelTab('review')
         },
+        reviewStreamChanged: (stream) => {
+          const view = this.aiReviewStreamView
+          if (stream === null) {
+            view.hide()
+            this.renderReviewPanel()
+            this.restoreReviewButtonFocus()
+          } else if (view.stream !== stream) {
+            this.aiUsageMeter.reset()
+            view.show(stream)
+            this.updateUsageMeter()
+            this.selectBottomPanelTab('review')
+          } else {
+            view.update()
+            this.updateUsageMeter()
+          }
+        },
+        usageChanged: () => this.updateUsageMeter(),
         chooseReviewModel: (request) => this.aiReviewModelDialog.show(request),
+        followUpsChanged: () => {
+          const added = this.aiReview?.followUps.at(-1)?.status === 'streaming'
+          this.renderReviewPanel()
+          if (added) this.aiFollowUpView.scrollToEnd()
+        },
+        followUpAnswerChanged: (turn) => {
+          this.aiFollowUpView.updateTurn(turn)
+          this.updateUsageMeter()
+        },
+        proposalArrived: (stored, turn) => {
+          // Another dialog keeps the user's attention; the card's View diff button opens it later.
+          if (stored === this.aiReview && !this.modalOpen()) this.openProposal(turn)
+        },
       },
     )
     this.controlsView = new ShellControlsView({
@@ -706,6 +771,7 @@ export class LeetcoderApp {
       aiRequestKind: () => this.aiController.requestKind,
       aiTestStub: () => this.editor.aiTestStub(),
       aiCaseTestAvailable: () => this.editor.aiCaseTestAvailable(),
+      testMethodAtCursor: () => findJavaTestMethodAt(this.editor.view.state),
     })
     this.aiCaseDialog = new AiCaseDialog({
       root: this.root,
@@ -774,6 +840,10 @@ export class LeetcoderApp {
     this.aiController.dispose()
     this.aiCaseDialog.dispose()
     this.aiReviewModelDialog.dispose()
+    this.aiFollowUpView.dispose()
+    this.aiEditDiffDialog.dispose()
+    this.aiReviewStreamView.dispose()
+    this.aiUsageMeter.dispose()
     this.projectContentSearchController.dispose()
     this.psLibraryController.dispose()
     this.javaTypeMembersController.dispose()
@@ -884,6 +954,14 @@ export class LeetcoderApp {
         void this.testRunController.runCurrentTest()
       }
     })
+    this.listen(this.element<HTMLButtonElement>('#run-selected-test'), 'click', () => {
+      // The button is disabled off a test method; re-read the cursor so a
+      // stale enabled state never widens this into an all-tests run.
+      const methodName = findJavaTestMethodAt(this.editor.view.state)
+      if (methodName) {
+        void this.testRunController.runCurrentTest(methodName)
+      }
+    })
     this.listen(this.element<HTMLButtonElement>('#ai-generate-tests'), 'click', () => {
       const mode = aiButtonMode(
         this.state.selectedPath,
@@ -952,6 +1030,7 @@ export class LeetcoderApp {
     this.fileDialogs.bindEvents()
     this.aiCaseDialog.bindEvents()
     this.aiReviewModelDialog.bindEvents()
+    this.aiFollowUpView.bindEvents()
     this.listen(window, 'pointerdown', this.handleContextMenuOutside)
     this.listen(window, 'keydown', this.handleContextMenuKeydown)
     this.listen(window, 'keydown', this.handleGlobalKeydown)
@@ -1010,6 +1089,8 @@ export class LeetcoderApp {
       // The workspace has just become measurable; reclamp persisted width
       // against its actual client width instead of the hidden-panel fallback.
       this.paneLayout.applyGitFileListWidth()
+    } else if (tab === 'tests') {
+      this.paneLayout.applyTestListWidth()
     }
     if (focus) {
       this.element<HTMLButtonElement>(`#${tab}-tab`).focus()
@@ -1021,7 +1102,7 @@ export class LeetcoderApp {
   }
 
   private runWorkspaceShortcut(id: WorkspaceShortcutId): void {
-    if (this.gitController.commitPushInProgress || this.gitCommitDialog.isOpen) {
+    if (this.gitController.commitPushInProgress || this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) {
       return
     }
     switch (id) {
@@ -1139,7 +1220,73 @@ export class LeetcoderApp {
   }
 
   private renderReviewPanel(): void {
-    renderAiReviewPanel(this.element<HTMLElement>('#review-body'), this.aiReview)
+    if (this.aiReviewStreamView.stream) {
+      this.aiReviewStreamView.render()
+    } else {
+      renderAiReviewPanel(
+        this.element<HTMLElement>('#review-body'),
+        this.aiReview,
+        this.aiFollowUpView.renderConversation(this.aiReview?.followUps ?? []),
+        this.aiReview ? this.aiUsageMeter.element : null,
+      )
+    }
+    this.updateUsageMeter()
+    this.updateFollowUpComposer()
+  }
+
+  /** Count the shown conversation, or the review on its way, on the usage meter. */
+  private updateUsageMeter(): void {
+    const state = aiMeterState(this.aiReview, this.aiReviewStreamView.stream)
+    if (state) this.aiUsageMeter.update(state)
+  }
+
+  /**
+   * The review button loses focus while it is disabled for its request. Give
+   * it back once the review ends, unless the user has moved focus elsewhere.
+   */
+  private restoreReviewButtonFocus(): void {
+    const button = this.element<HTMLButtonElement>('#ai-review-code')
+    const { activeElement, body } = this.root.ownerDocument
+    if ((activeElement === null || activeElement === body) && !button.disabled && !button.hidden && !this.modalOpen()) {
+      button.focus()
+    }
+  }
+
+  /** A modal dialog or picker holds the user's attention. */
+  private modalOpen(): boolean {
+    return this.gitCommitDialog.isOpen
+      || this.aiEditDiffDialog.isOpen
+      || this.repository.pickerOpen
+      || this.root.querySelectorAll('.dialog-backdrop:not([hidden])').length > 0
+  }
+
+  /**
+   * Show the change `turn` proposed, with Accept and Reject. A follow-up that
+   * settles with a change opens it at once; the card's View diff button opens
+   * it again until it is decided.
+   */
+  private openProposal(turn: AiReviewFollowUp): void {
+    const stored = this.aiReview
+    if (!stored || !turn.proposal || !stored.followUps.includes(turn)) return
+    const { canAccept, note } = this.aiController.proposalState(stored, turn)
+    this.aiEditDiffDialog.open({ fileName: stored.fileName, proposal: turn.proposal, canAccept, note }, {
+      accept: () => {
+        if (this.aiController.acceptProposal(stored, turn)) {
+          this.editor.focus()
+          return
+        }
+        const blocked = this.aiController.proposalState(stored, turn).note
+        if (blocked) this.setMessage(blocked, 'error')
+      },
+      reject: () => this.aiController.rejectProposal(stored, turn),
+    })
+  }
+
+  private updateFollowUpComposer(): void {
+    this.aiFollowUpView.update({
+      hasReview: this.aiReview !== null,
+      busy: this.aiController.requestPath !== null,
+    })
   }
 
   private fileTabsModel(): FileTabsViewModel {
@@ -1288,6 +1435,7 @@ export class LeetcoderApp {
       },
     )
     this.testRunController.acceptRenderedSelection(output.selectedTestKey)
+    this.paneLayout.applyTestListWidth()
   }
 
   private setMessage(message: string, tone: 'info' | 'success' | 'error'): void {

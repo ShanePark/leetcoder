@@ -4,9 +4,10 @@ import type { AiRequestUsage, AiReview } from '../../../src/backend'
 import type { StoredAiReview } from '../../../src/app/ai-controller'
 import {
   AI_REVIEW_EMPTY_COPY,
-  aiReviewUsageRows,
   formatReviewCost,
   formatReviewTokens,
+  partialAiReview,
+  renderAiReviewDraft,
   renderAiReviewPanel,
 } from '../../../src/app/ai-review-view'
 
@@ -51,9 +52,9 @@ class FakeDocument {
   }
 }
 
-const render = (stored: StoredAiReview | null): FakeElement => {
+const render = (stored: StoredAiReview | null, conversation: FakeElement | null = null): FakeElement => {
   const body = new FakeDocument().createElement('div')
-  renderAiReviewPanel(body as unknown as HTMLElement, stored)
+  renderAiReviewPanel(body as unknown as HTMLElement, stored, conversation as unknown as HTMLElement | null)
   return body
 }
 
@@ -86,6 +87,18 @@ const stored = (
   servedModelName: 'Model A',
   testRunOmitted,
   usage: requestUsage,
+  pricing: null,
+  request: {
+    selectedModelId: 'model-a',
+    problemTitle: 'Two Sum',
+    problemContent: '<p>Two Sum</p>',
+    entryPoint: null,
+    source: 'class Q1TwoSum {}',
+    testRun: null,
+    language: 'english',
+  },
+  target: { repoPath: '/repo', path: 'src/Q1TwoSum.java', repositoryGeneration: 1 },
+  followUps: [],
 })
 
 describe('review panel', () => {
@@ -142,37 +155,22 @@ describe('review panel', () => {
   })
 })
 
-describe('review usage card', () => {
-  it('sits beside the review content with the cost, model, tokens, and test results', () => {
-    const body = render(stored(fullReview))
+describe('review usage slot', () => {
+  it('puts the usage meter beside the review content', () => {
+    const meter = new FakeDocument().createElement('aside')
+    meter.className = 'review-usage'
+    const body = new FakeDocument().createElement('div')
+    renderAiReviewPanel(body as unknown as HTMLElement, stored(fullReview), null, meter as unknown as HTMLElement)
 
     const layout = body.children[0]
     expect(layout.className).toBe('review-layout')
     expect(layout.children.map((child) => child.className)).toEqual(['review-head', 'review-usage', 'review-main'])
-    const card = body.all('review-usage')[0]
-    expect(card.tagName).toBe('aside')
-    expect(card.attributes.get('aria-label')).toBe('Request usage')
-    expect(body.texts('review-usage-cost')).toEqual(['$0.0123'])
-    expect(body.all('review-usage-model')[0]).toMatchObject({ textContent: 'Model A', title: 'model-a' })
-    expect(body.texts('review-usage-label')).toEqual(['Input', 'Output', 'Cache write'])
-    expect(body.texts('review-usage-value')).toEqual(['12,345', '1,234', '2,048'])
-    expect(body.all('review-usage-tests')[0]).toMatchObject({
-      className: 'review-usage-tests is-included',
-      textContent: 'Test results included',
-    })
+    expect(layout.children[1]).toBe(meter)
   })
 
-  it('says when the cost is unknown and the test results were left out', () => {
-    const body = render(stored(fullReview, 'changed', { ...usage, costUsd: null }))
-
-    expect(body.all('review-usage-cost')[0]).toMatchObject({
-      className: 'review-usage-cost is-unknown',
-      textContent: 'Cost unknown',
-    })
-    expect(body.all('review-usage-tests')[0]).toMatchObject({
-      className: 'review-usage-tests is-omitted',
-      textContent: 'Test results not included',
-    })
+  it('leaves the slot out without a meter', () => {
+    expect(render(stored(fullReview)).children[0].children.map((child) => child.className))
+      .toEqual(['review-head', 'review-main'])
   })
 
   it('formats costs by size and tokens with separators', () => {
@@ -186,17 +184,83 @@ describe('review usage card', () => {
     expect(formatReviewTokens(0)).toBe('0')
     expect(formatReviewTokens(1_234_567)).toBe('1,234,567')
   })
+})
 
-  it('always lists input and output tokens and cache tokens only when used', () => {
-    expect(aiReviewUsageRows({ ...usage, inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0 })).toEqual([
-      { label: 'Input', value: '0' },
-      { label: 'Output', value: '0' },
-    ])
-    expect(aiReviewUsageRows({ ...usage, cacheReadTokens: 9_000 }).map((row) => row.label)).toEqual([
-      'Input',
-      'Output',
-      'Cache read',
-      'Cache write',
-    ])
+describe('streamed review', () => {
+  it('keeps the fields that have the right shape and a verdict only once it is a whole word', () => {
+    expect(partialAiReview(undefined)).toEqual({})
+    expect(partialAiReview(['correct'])).toEqual({})
+    expect(partialAiReview({ verdict: 'incor' }).verdict).toBeUndefined()
+    expect(partialAiReview({
+      verdict: 'incorrect',
+      summary: 'Miss',
+      failureCause: null,
+      issues: ['a', 3],
+      missedCases: [{ input: '[3' }, 'x', null],
+      efficiency: { time: 'O(n)', space: 7 },
+      improvements: 'none',
+    })).toEqual({
+      verdict: 'incorrect',
+      summary: 'Miss',
+      failureCause: undefined,
+      issues: ['a'],
+      missedCases: [{ input: '[3', reason: undefined }],
+      efficiency: { time: 'O(n)', space: undefined, assessment: undefined },
+      improvements: undefined,
+    })
+  })
+
+  it('renders the sections so far with the status under the head and the meter beside them', () => {
+    const documentRef = new FakeDocument()
+    const body = documentRef.createElement('div')
+    const status = documentRef.createElement('p')
+    status.className = 'review-stream-status'
+    const meter = documentRef.createElement('aside')
+    meter.className = 'review-usage'
+    renderAiReviewDraft(body as unknown as HTMLElement, {
+      fileName: 'Q1TwoSum.java',
+      modelId: 'model-a',
+      testRunOmitted: 'no-run',
+      review: { summary: 'Misses dup', issues: ['Wrong order'], efficiency: { time: 'O(' } },
+    }, status as unknown as HTMLElement, meter as unknown as HTMLElement)
+
+    const layout = body.children[0]
+    expect(layout.children.map((child) => child.className)).toEqual(['review-head', 'review-usage', 'review-main'])
+    expect(body.all('review-verdict')).toHaveLength(0)
+    expect(body.texts('review-meta')).toEqual(['Q1TwoSum.java · model-a'])
+    expect(body.texts('review-context')).toEqual(['Based on the code only, because it had no test run.'])
+    expect(layout.children[0].children.at(-1)).toBe(status)
+    expect(body.all('review-main')[0].attributes.get('aria-busy')).toBe('true')
+    expect(body.texts('review-summary')).toEqual(['Misses dup'])
+    expect(body.texts('review-section-title')).toEqual(['Issues', 'Efficiency'])
+    expect(body.texts('review-efficiency-value')).toEqual(['O('])
+  })
+
+  it('shows the verdict once it arrives', () => {
+    const documentRef = new FakeDocument()
+    const body = documentRef.createElement('div')
+    renderAiReviewDraft(body as unknown as HTMLElement, {
+      fileName: 'Q1TwoSum.java',
+      modelId: 'model-a',
+      testRunOmitted: null,
+      review: { verdict: 'correct' },
+    }, documentRef.createElement('p') as unknown as HTMLElement)
+    expect(body.all('review-verdict')[0]).toMatchObject({ className: 'review-verdict is-correct', textContent: 'Correct' })
+    expect(body.all('review-section')).toHaveLength(0)
+  })
+})
+
+describe('review follow-up slot', () => {
+  it('puts the conversation after the review sections', () => {
+    const conversation = new FakeDocument().createElement('section')
+    conversation.className = 'review-follow-ups'
+    const body = render(stored(fullReview), conversation)
+    const main = body.all('review-main')[0]
+    expect(main.children.at(-1)).toBe(conversation)
+  })
+
+  it('leaves the conversation out of the empty state', () => {
+    const conversation = new FakeDocument().createElement('section')
+    expect(render(null, conversation).children.map((child) => child.className)).toEqual(['review-empty'])
   })
 })

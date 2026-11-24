@@ -14,6 +14,7 @@ const testMocks = vi.hoisted(() => ({
     emitChange: (source: string) => void
     triggerProjectSearch: () => void
     triggerWorkspaceShortcut: (id: WorkspaceShortcutId) => void
+    moveCursor: (testMethod: string | null) => void
     applyAiTests: (statements: readonly string[]) => unknown
     focus: () => void
     metadataUpdates: Array<PsLibraryMetadata | null>
@@ -24,8 +25,11 @@ const testMocks = vi.hoisted(() => ({
   }>,
   filenameMatchedPaths: [] as string[],
   testRunControllers: [] as Array<{
+    runCurrentTest: ReturnType<typeof vi.fn>
     stopCurrentRun: ReturnType<typeof vi.fn>
   }>,
+  /** What the mocked editor reports as the @Test method at the cursor. */
+  testMethodAtCursor: null as string | null,
   contentSearchControllers: [] as Array<{
     update: ReturnType<typeof vi.fn>
     reset: ReturnType<typeof vi.fn>
@@ -73,12 +77,14 @@ vi.mock('../../../src/editor', async () => {
       onChange?: (source: string) => void
       onSearchProject?: () => void
       onWorkspaceShortcut?: (id: WorkspaceShortcutId) => void
+      onCursorChange?: () => void
     }
 
     constructor(_parent: HTMLElement, callbacks: {
       onChange?: (source: string) => void
       onSearchProject?: () => void
       onWorkspaceShortcut?: (id: WorkspaceShortcutId) => void
+      onCursorChange?: () => void
     }) {
       this.callbacks = callbacks
       testMocks.editorInstances.push(this)
@@ -90,6 +96,11 @@ vi.mock('../../../src/editor', async () => {
 
     reloadExternalValue(source: string): void {
       this.source = source
+    }
+
+    replaceValue(source: string): void {
+      this.source = source
+      this.callbacks.onChange?.(source)
     }
 
     aiTestStub(): string {
@@ -150,11 +161,16 @@ vi.mock('../../../src/editor', async () => {
     triggerWorkspaceShortcut(id: WorkspaceShortcutId): void {
       this.callbacks.onWorkspaceShortcut?.(id)
     }
+
+    moveCursor(testMethod: string | null): void {
+      testMocks.testMethodAtCursor = testMethod
+      this.callbacks.onCursorChange?.()
+    }
   }
 
   return {
     JavaEditor: FakeJavaEditor,
-    findJavaTestMethodAt: () => null,
+    findJavaTestMethodAt: () => testMocks.testMethodAtCursor,
     isShortcutHelpAltShortcut: () => false,
   }
 })
@@ -275,6 +291,7 @@ vi.mock('../../../src/app/pane-layout', () => ({
       apply: vi.fn(),
       applyDailyDescriptionHeight: vi.fn(),
       applyGitFileListWidth: vi.fn(),
+      applyTestListWidth: vi.fn(),
       destroy: vi.fn(),
     }
     testMocks.paneLayouts.push(layout)
@@ -317,12 +334,12 @@ vi.mock('../../../src/app/overlay-controller', () => ({
 vi.mock('../../../src/app/test-run-controller', () => ({
   TestRunController: class {
     resultSource: null = null
+    runCurrentTest = vi.fn((_testMethod?: string): Promise<void> => Promise.resolve())
     stopCurrentRun = vi.fn()
 
     constructor(_options: unknown) {
       testMocks.testRunControllers.push(this)
     }
-    runCurrentTest(_testMethod?: string): Promise<void> { return Promise.resolve() }
     resetTestState(): void {}
     cancelCurrentRun(): void {}
     selectTestResult(_key: string, _focus: boolean): void {}
@@ -391,6 +408,7 @@ beforeEach(() => {
   testMocks.fileViewCallbacks.length = 0
   testMocks.filenameMatchedPaths = []
   testMocks.testRunControllers.length = 0
+  testMocks.testMethodAtCursor = null
   testMocks.contentSearchControllers.length = 0
   testMocks.paneLayouts.length = 0
   testMocks.overlayOptions.length = 0

@@ -4,6 +4,7 @@ import { countColumn, EditorSelection, type ChangeSpec, type SelectionRange } fr
 import type { EditorView } from '@codemirror/view'
 import { expandJavaPrintTemplate, expandJavaTestTemplate } from '../../completions'
 import { formatJavaSource } from '../../java-format'
+import { diffLines } from '../../line-diff'
 
 /** Compute one CodeMirror change for replacing the differing source suffix. */
 export function minimalDocumentChange(before: string, after: string) {
@@ -24,42 +25,30 @@ export function minimalDocumentChange(before: string, after: string) {
  * subsequence of lines. A single span would cover every line between the first
  * and last edit and collapse any cursor inside it to the span's start.
  */
-function lineDocumentChanges(before: string, after: string) {
-  const lines = (text: string) => text.split(/(?<=\n)/).filter((line) => line !== '')
-  const a = lines(before)
-  const b = lines(after)
-  // common[i][j] is the LCS length of a[i..] and b[j..].
-  const common = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0))
-  for (let i = a.length - 1; i >= 0; i -= 1) {
-    for (let j = b.length - 1; j >= 0; j -= 1) {
-      common[i][j] = a[i] === b[j] ? common[i + 1][j + 1] + 1 : Math.max(common[i + 1][j], common[i][j + 1])
-    }
-  }
+export function lineDocumentChanges(before: string, after: string) {
   const changes: Array<{ from: number; to: number; insert: string }> = []
-  let i = 0
-  let j = 0
   let offset = 0
-  while (i < a.length || j < b.length) {
-    if (i < a.length && j < b.length && a[i] === b[j]) {
-      offset += a[i].length
-      i += 1
-      j += 1
-      continue
-    }
-    let removed = ''
-    let inserted = ''
-    while (i < a.length || j < b.length) {
-      if (i < a.length && j < b.length && a[i] === b[j]) break
-      if (j >= b.length || (i < a.length && common[i + 1][j] >= common[i][j + 1])) {
-        removed += a[i++]
-      } else {
-        inserted += b[j++]
-      }
-    }
+  let removed = ''
+  let inserted = ''
+  const flush = () => {
+    if (removed === '' && inserted === '') return
     const change = minimalDocumentChange(removed, inserted)
     changes.push({ from: offset + change.from, to: offset + change.to, insert: change.insert })
     offset += removed.length
+    removed = ''
+    inserted = ''
   }
+  for (const entry of diffLines(before, after)) {
+    if (entry.kind === 'equal') {
+      flush()
+      offset += entry.line.length
+    } else if (entry.kind === 'delete') {
+      removed += entry.line
+    } else {
+      inserted += entry.line
+    }
+  }
+  flush()
   return changes
 }
 

@@ -143,7 +143,7 @@ describe('LeetcoderApp workspace shortcuts', () => {
     }
   })
 
-  it('ignores repeated commit shortcuts while the confirmation is open and keeps Cancel focused', async () => {
+  it('ignores repeated commit shortcuts while the confirmation is open and keeps the confirm action focused', async () => {
     const app = await startApp(dom, createBackend().backend)
     const commit = vi.spyOn(internals(app).gitController, 'commitSelectedFiles')
     const dialog = element('#commit-git-dialog') as FakeElement & {
@@ -161,14 +161,14 @@ describe('LeetcoderApp workspace shortcuts', () => {
         branch: 'main', paths: ['Q1.java'], message: 'Save Q1', pushAfterCommit: true,
       })
 
-      expect(dom.document.activeElement).toBe(element('#cancel-commit-git'))
+      expect(dom.document.activeElement).toBe(element('#confirm-commit-git'))
       dom.window.dispatch('keydown', { ...ctrlAltK(), repeat: true })
       testMocks.editorInstances.at(-1)?.triggerWorkspaceShortcut('git-commit-push')
       dom.window.dispatch('keydown', keydown({ key: 'Enter', code: 'Enter' }))
 
       expect(commit).not.toHaveBeenCalled()
       expect(dialog.open).toBe(true)
-      expect(dom.document.activeElement).toBe(element('#cancel-commit-git'))
+      expect(dom.document.activeElement).toBe(element('#confirm-commit-git'))
       element('#cancel-commit-git').click()
       await expect(confirmation).resolves.toBe(false)
       expect(dom.document.activeElement).toBe(element('#editor'))

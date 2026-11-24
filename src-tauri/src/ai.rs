@@ -12,15 +12,17 @@ mod key_store;
 mod ledger;
 mod prices;
 mod prompt;
+mod stream;
 
 #[cfg(test)]
 mod eval;
 #[cfg(test)]
 mod tests;
 
-use claude::{ApiError, MessageUsage, ReplyOutcome};
+use claude::{ApiError, MessageReply, MessageUsage, ReplyOutcome, ResolvedModel};
 use key_store::ApiKey;
 use serde_json::Value;
+use stream::{StreamUpdate, ToolUse};
 
 const API_BASE_URL: &str = "https://api.anthropic.com";
 const PRICES_URL: &str =
@@ -33,6 +35,11 @@ const MAX_FAILING_CASE_CHARS: usize = 32_768;
 const MAX_REVIEW_SOURCE_CHARS: usize = 200_000;
 /// All text of a test run taken together. The frontend truncates output first.
 const MAX_REVIEW_TEST_RUN_CHARS: usize = 64_000;
+const MAX_FOLLOW_UP_QUESTION_CHARS: usize = 4_000;
+const MAX_FOLLOW_UP_TURNS: usize = 20;
+/// Questions and answers of earlier turns taken together.
+const MAX_FOLLOW_UP_HISTORY_CHARS: usize = 64_000;
+const MAX_PROPOSAL_SUMMARY_CHARS: usize = 1_000;
 
 static PRICE_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -271,6 +278,129 @@ pub(crate) struct AiReviewResult {
     pub usage: AiRequestUsage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AiCodeProposalOutcome {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+/// A code change an earlier answer proposed, and what the user did with it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiProposalRecord {
+    pub summary: String,
+    pub outcome: AiCodeProposalOutcome,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiReviewFollowUpTurn {
+    pub question: String,
+    pub answer: String,
+    #[serde(default)]
+    pub proposal: Option<AiProposalRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiReviewFollowUpRequest {
+    /// The model that served the review.
+    pub selected_model_id: String,
+    /// The request the review was made from, unchanged.
+    pub review: AiReviewRequest,
+    pub review_answer: AiReview,
+    /// Earlier completed turns, oldest first.
+    pub history: Vec<AiReviewFollowUpTurn>,
+    pub question: String,
+    /// The editor's text now. Sent to the model only when it differs from
+    /// `review.source`; a proposed change is based on it.
+    pub current_code: String,
+}
+
+/// One streamed update of a review or a follow-up answer. A review's text is
+/// fragments of its JSON document.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub(crate) enum AiStreamEvent {
+    Text {
+        text: String,
+    },
+    /// The model is thinking. `chars` counts the thinking text this piece
+    /// added, zero when a block starts or the API omits the text.
+    Thinking {
+        chars: usize,
+    },
+    /// The model began writing a code change; its input arrives with the result.
+    ProposalStarted,
+    /// The token counts so far: once when the message starts, with the input
+    /// and cache counts, then once with the final counts.
+    Usage {
+        usage: AiStreamUsage,
+        #[serde(rename = "final")]
+        last: bool,
+    },
+}
+
+/// Token counts reported while a message streams. The cost comes with the result.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiStreamUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+/// The event a stream update becomes. A tool call other than a code change
+/// has none.
+fn stream_event(update: StreamUpdate<'_>) -> Option<AiStreamEvent> {
+    match update {
+        StreamUpdate::Text(text) => Some(AiStreamEvent::Text {
+            text: text.to_string(),
+        }),
+        StreamUpdate::Thinking(chars) => Some(AiStreamEvent::Thinking { chars }),
+        StreamUpdate::ToolUseStarted(name) => {
+            (name == prompt::PROPOSE_CODE_CHANGE).then_some(AiStreamEvent::ProposalStarted)
+        }
+        StreamUpdate::Usage { usage, last } => Some(AiStreamEvent::Usage {
+            usage: AiStreamUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+            },
+            last,
+        }),
+    }
+}
+
+/// A whole-file change the user asked for, shown as a diff before anything is applied.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiCodeProposal {
+    pub summary: String,
+    /// The complete new file.
+    pub code: String,
+    /// The `current_code` the change was made against.
+    pub base_code: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiReviewFollowUpResult {
+    pub outcome: String,
+    /// Everything streamed, partial when truncated, with a note when a started
+    /// code change could not be offered.
+    pub answer: String,
+    /// Present only when `outcome` is `ok` and the change is usable.
+    pub proposal: Option<AiCodeProposal>,
+    pub served_model: String,
+    pub fell_back: bool,
+    pub usage: AiRequestUsage,
+}
+
 /// The tokens and cost of one model request.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -488,6 +618,40 @@ fn check_review_request(request: &AiReviewRequest) -> Result<(), String> {
     Ok(())
 }
 
+fn check_follow_up_request(request: &AiReviewFollowUpRequest) -> Result<(), String> {
+    check_review_request(&request.review)?;
+    let question = request.question.trim();
+    if question.is_empty() {
+        return Err("Type a question first.".to_string());
+    }
+    if question.chars().count() > MAX_FOLLOW_UP_QUESTION_CHARS {
+        return Err(format!(
+            "The question is longer than {MAX_FOLLOW_UP_QUESTION_CHARS} characters."
+        ));
+    }
+    if request.current_code.chars().count() > MAX_REVIEW_SOURCE_CHARS {
+        return Err(format!(
+            "The solution file is longer than {MAX_REVIEW_SOURCE_CHARS} characters."
+        ));
+    }
+    let history_chars: usize = request
+        .history
+        .iter()
+        .map(|turn| {
+            turn.question.chars().count()
+                + turn.answer.chars().count()
+                + turn
+                    .proposal
+                    .as_ref()
+                    .map_or(0, |proposal| proposal.summary.chars().count())
+        })
+        .sum();
+    if request.history.len() > MAX_FOLLOW_UP_TURNS || history_chars > MAX_FOLLOW_UP_HISTORY_CHARS {
+        return Err("This conversation is too long. Run a new review to continue.".to_string());
+    }
+    Ok(())
+}
+
 /// One model call after its usage is recorded.
 struct Completion<T> {
     outcome: &'static str,
@@ -498,17 +662,19 @@ struct Completion<T> {
     usage: AiRequestUsage,
 }
 
-/// Resolves the model, sends one request, and records its usage. `body` builds
-/// the request for the resolved model and whether it supports low effort.
-async fn complete<T>(
+/// The key and model one call uses.
+struct CallTarget {
+    key: ApiKey,
+    catalog: Option<claude::Catalog>,
+    resolved: ResolvedModel,
+}
+
+/// Loads the key, refreshes a stale catalog, and resolves the model.
+async fn call_target(
     base_url: &str,
     paths: &AiPaths,
     selected_model_id: Option<&str>,
-    kind: &str,
-    body: impl Fn(&str, bool) -> Value,
-    parse: fn(&Value) -> Option<T>,
-    progress: &(dyn Fn(AiProgressEvent) + Sync),
-) -> Result<Completion<T>, String> {
+) -> Result<CallTarget, String> {
     let key = key_store::load(&paths.config)?
         .ok_or_else(|| "Add an API key in the LLM settings first.".to_string())?;
 
@@ -539,31 +705,42 @@ async fn complete<T>(
             "No default model is available. Choose a model in the LLM settings.".to_string()
         }
     })?;
-    let effort_low = catalog
-        .as_ref()
-        .is_some_and(|catalog| catalog.effort_low(&resolved.served));
+    Ok(CallTarget {
+        key,
+        catalog,
+        resolved,
+    })
+}
 
-    let body = body(&resolved.served, effort_low);
-    progress(AiProgressEvent::Requesting {
-        model: resolved.served.clone(),
-    });
-    let reply = match claude::send_message(base_url, &key, &resolved.served, &body, parse).await {
-        Ok(reply) => reply,
-        Err(
-            error @ ApiError::Status {
-                status: 400 | 403 | 404,
-                ..
-            },
-        ) => {
+/// The message for a call that failed before any reply arrived.
+async fn call_error(
+    base_url: &str,
+    paths: &AiPaths,
+    target: &CallTarget,
+    error: ApiError,
+) -> String {
+    match error {
+        ApiError::Status {
+            status: 400 | 403 | 404,
+            ..
+        } => {
             // The refresh corrects the list for next time. This call never
             // moves to another model on its own.
-            let _ = claude::refresh_catalog(base_url, &paths.cache, &key).await;
-            return Err(format!("Model {} failed: {error}", resolved.served));
+            let _ = claude::refresh_catalog(base_url, &paths.cache, &target.key).await;
+            format!("Model {} failed: {error}", target.resolved.served)
         }
-        Err(error) => return Err(error.to_string()),
-    };
-    progress(AiProgressEvent::Received);
+        error => error.to_string(),
+    }
+}
 
+/// Records a reply's usage. An unreadable reply is recorded as invalid and
+/// becomes an error.
+fn settle<T>(
+    paths: &AiPaths,
+    kind: &str,
+    reply: MessageReply<T>,
+    fell_back: bool,
+) -> Result<Completion<T>, String> {
     let record = |outcome: &str| {
         record_usage(
             paths,
@@ -595,9 +772,39 @@ async fn complete<T>(
         outcome,
         value,
         served_model: reply.model,
-        fell_back: resolved.fell_back,
+        fell_back,
         usage,
     })
+}
+
+/// Resolves the model, sends one request, and records its usage. `body` builds
+/// the request for the resolved model and whether it supports low effort.
+async fn complete<T>(
+    base_url: &str,
+    paths: &AiPaths,
+    selected_model_id: Option<&str>,
+    kind: &str,
+    body: impl Fn(&str, bool) -> Value,
+    parse: fn(&Value) -> Option<T>,
+    progress: &(dyn Fn(AiProgressEvent) + Sync),
+) -> Result<Completion<T>, String> {
+    let target = call_target(base_url, paths, selected_model_id).await?;
+    let served = &target.resolved.served;
+    let effort_low = target
+        .catalog
+        .as_ref()
+        .is_some_and(|catalog| catalog.effort_low(served));
+
+    let body = body(served, effort_low);
+    progress(AiProgressEvent::Requesting {
+        model: served.clone(),
+    });
+    let reply = match claude::send_message(base_url, &target.key, served, &body, parse).await {
+        Ok(reply) => reply,
+        Err(error) => return Err(call_error(base_url, paths, &target, error).await),
+    };
+    progress(AiProgressEvent::Received);
+    settle(paths, kind, reply, target.resolved.fell_back)
 }
 
 async fn generate_tests(
@@ -627,26 +834,170 @@ async fn generate_tests(
     })
 }
 
+/// Streams a review to `on_event` as it is written. The result is still the
+/// whole document, read and checked once the stream ends.
 async fn review_code(
     base_url: &str,
     paths: &AiPaths,
     request: &AiReviewRequest,
     progress: &(dyn Fn(AiProgressEvent) + Sync),
+    on_event: &(dyn Fn(AiStreamEvent) + Sync),
 ) -> Result<AiReviewResult, String> {
     check_review_request(request)?;
-    let completion = complete(
-        base_url,
-        paths,
-        request.selected_model_id.as_deref(),
-        ledger::KIND_REVIEW,
-        |model, _| claude::review_request_body(model, request),
-        claude::parse_review,
-        progress,
-    )
-    .await?;
+    let target = call_target(base_url, paths, request.selected_model_id.as_deref()).await?;
+    let served = &target.resolved.served;
+    let body = claude::review_request_body(served, request);
+    progress(AiProgressEvent::Requesting {
+        model: served.clone(),
+    });
+    let on_update = |update: StreamUpdate<'_>| {
+        if let Some(event) = stream_event(update) {
+            on_event(event);
+        }
+    };
+    let streamed =
+        match claude::stream_message(base_url, &target.key, served, &body, &on_update).await {
+            Ok(streamed) => streamed,
+            Err(error) => return Err(call_error(base_url, paths, &target, error).await),
+        };
+    progress(AiProgressEvent::Received);
+    let reply = claude::streamed_document(streamed.reply, &streamed.text, claude::parse_review);
+    let completion = settle(paths, ledger::KIND_REVIEW, reply, target.resolved.fell_back)?;
     Ok(AiReviewResult {
         outcome: completion.outcome.to_string(),
         review: completion.value,
+        served_model: completion.served_model,
+        fell_back: completion.fell_back,
+        usage: completion.usage,
+    })
+}
+
+/// Why a code change the model started is not offered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ProposalProblem {
+    CutOff,
+    Unreadable,
+    Unchanged,
+}
+
+/// Told in the answer, in its language, in place of the change.
+fn proposal_note(problem: ProposalProblem, language: AiResponseLanguage) -> &'static str {
+    use AiResponseLanguage::{English, Korean};
+    match (problem, language) {
+        (ProposalProblem::CutOff, English) => {
+            "The code change was cut off at the output limit, so there is nothing to apply. Ask again for a smaller change."
+        }
+        (ProposalProblem::CutOff, Korean) => {
+            "코드 변경이 출력 한도에서 잘려 적용할 내용이 없습니다. 더 작은 변경으로 다시 요청하세요."
+        }
+        (ProposalProblem::Unreadable, English) => {
+            "The code change could not be read, so there is nothing to apply. Ask again."
+        }
+        (ProposalProblem::Unreadable, Korean) => {
+            "코드 변경을 읽을 수 없어 적용할 내용이 없습니다. 다시 요청하세요."
+        }
+        (ProposalProblem::Unchanged, English) => {
+            "The proposed code is the same as the code in the editor, so there is nothing to apply."
+        }
+        (ProposalProblem::Unchanged, Korean) => {
+            "제안된 코드가 에디터의 코드와 같아 적용할 내용이 없습니다."
+        }
+    }
+}
+
+/// The change a finished tool call proposes against `base_code`. The new file
+/// takes the base file's final line breaks, which a model often drops, so they
+/// never show up as a change of their own.
+fn read_proposal(tool_use: &ToolUse, base_code: &str) -> Result<AiCodeProposal, ProposalProblem> {
+    if tool_use.name != prompt::PROPOSE_CODE_CHANGE {
+        return Err(ProposalProblem::Unreadable);
+    }
+    let field = |name: &str| {
+        tool_use
+            .input
+            .as_ref()
+            .and_then(|input| input.get(name))
+            .and_then(Value::as_str)
+    };
+    let (Some(summary), Some(code)) = (field("summary"), field("code")) else {
+        return Err(ProposalProblem::Unreadable);
+    };
+    let summary = summary.trim();
+    if summary.is_empty()
+        || summary.chars().count() > MAX_PROPOSAL_SUMMARY_CHARS
+        || code.trim().is_empty()
+        || code.chars().count() > MAX_REVIEW_SOURCE_CHARS
+    {
+        return Err(ProposalProblem::Unreadable);
+    }
+    let line_breaks = &base_code[base_code.trim_end_matches(['\r', '\n']).len()..];
+    let code = format!("{}{line_breaks}", code.trim_end_matches(['\r', '\n']));
+    if code == base_code {
+        return Err(ProposalProblem::Unchanged);
+    }
+    Ok(AiCodeProposal {
+        summary: summary.to_string(),
+        code,
+        base_code: base_code.to_string(),
+    })
+}
+
+/// Streams a free-text answer about a review, with a code change when the user
+/// asked for one. Text, thinking, usage, and the start of a change reach
+/// `on_event` as they arrive; the result carries all of the text and the
+/// checked change. A change that cannot be offered becomes a note at the end
+/// of the answer.
+async fn review_follow_up(
+    base_url: &str,
+    paths: &AiPaths,
+    request: &AiReviewFollowUpRequest,
+    on_event: &(dyn Fn(AiStreamEvent) + Sync),
+) -> Result<AiReviewFollowUpResult, String> {
+    check_follow_up_request(request)?;
+    let target = call_target(base_url, paths, Some(&request.selected_model_id)).await?;
+    let served = &target.resolved.served;
+    let body = claude::follow_up_request_body(served, request);
+    let on_update = |update: StreamUpdate<'_>| {
+        if let Some(event) = stream_event(update) {
+            on_event(event);
+        }
+    };
+    let streamed =
+        match claude::stream_message(base_url, &target.key, served, &body, &on_update).await {
+            Ok(streamed) => streamed,
+            Err(error) => return Err(call_error(base_url, paths, &target, error).await),
+        };
+    let completion = settle(
+        paths,
+        ledger::KIND_REVIEW_FOLLOW_UP,
+        streamed.reply,
+        target.resolved.fell_back,
+    )?;
+    let mut answer = streamed.text;
+    // A refusal already says that nothing came of the request.
+    let proposal = match streamed.tool_use {
+        Some(tool_use) if completion.outcome != "refused" => {
+            let read = if completion.outcome == "ok" && tool_use.stopped {
+                read_proposal(&tool_use, &request.current_code)
+            } else {
+                Err(ProposalProblem::CutOff)
+            };
+            read.map_err(|problem| {
+                let note = proposal_note(problem, request.review.language);
+                answer = if answer.trim().is_empty() {
+                    note.to_string()
+                } else {
+                    format!("{}\n\n{note}", answer.trim_end())
+                };
+            })
+            .ok()
+        }
+        _ => None,
+    };
+    Ok(AiReviewFollowUpResult {
+        outcome: completion.outcome.to_string(),
+        answer,
+        proposal,
         served_model: completion.served_model,
         fell_back: completion.fell_back,
         usage: completion.usage,
@@ -735,6 +1086,11 @@ fn send_progress(channel: &tauri::ipc::Channel<AiProgressEvent>, event: AiProgre
     let _ = channel.send(event);
 }
 
+/// A webview that went away must not fail a call that is being paid for.
+fn send_stream_event(channel: &tauri::ipc::Channel<AiStreamEvent>, event: AiStreamEvent) {
+    let _ = channel.send(event);
+}
+
 #[tauri::command]
 pub(crate) async fn ai_generate_tests(
     app: tauri::AppHandle,
@@ -754,11 +1110,30 @@ pub(crate) async fn ai_review_code(
     app: tauri::AppHandle,
     request: AiReviewRequest,
     on_progress: tauri::ipc::Channel<AiProgressEvent>,
+    on_event: tauri::ipc::Channel<AiStreamEvent>,
 ) -> Result<AiReviewResult, String> {
     let paths = ai_paths(&app)?;
     spawn_price_refresh(paths.clone());
-    review_code(API_BASE_URL, &paths, &request, &|event| {
-        send_progress(&on_progress, event)
+    review_code(
+        API_BASE_URL,
+        &paths,
+        &request,
+        &|event| send_progress(&on_progress, event),
+        &|event| send_stream_event(&on_event, event),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn ai_review_follow_up(
+    app: tauri::AppHandle,
+    request: AiReviewFollowUpRequest,
+    on_event: tauri::ipc::Channel<AiStreamEvent>,
+) -> Result<AiReviewFollowUpResult, String> {
+    let paths = ai_paths(&app)?;
+    spawn_price_refresh(paths.clone());
+    review_follow_up(API_BASE_URL, &paths, &request, &|event| {
+        send_stream_event(&on_event, event)
     })
     .await
 }

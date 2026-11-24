@@ -13,6 +13,7 @@ const OUTCOME_REFUSED: &str = "refused";
 /// What a call was for. Lines written before reviews existed are generations.
 pub(super) const KIND_TESTS: &str = "tests";
 pub(super) const KIND_REVIEW: &str = "review";
+pub(super) const KIND_REVIEW_FOLLOW_UP: &str = "review-follow-up";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

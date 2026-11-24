@@ -25,6 +25,7 @@ import {
   SIDEBAR_WIDTH_KEY,
   windowHeight,
 } from './layout'
+import { TestSplitLayout } from './test-split-layout'
 
 export interface PaneLayoutControllerOptions {
   storage?: Storage
@@ -55,6 +56,7 @@ export class PaneLayoutController {
   private dailyDescriptionHeight: number
   private dailyDescriptionResizeStartY: number | null = null
   private dailyDescriptionResizeStartHeight: number | null = null
+  private readonly testSplit: TestSplitLayout
   private destroyed = false
 
   private readonly handlePanelPointerMove = (event: PointerEvent): void => {
@@ -87,6 +89,7 @@ export class PaneLayoutController {
     this.handleGitSplitterPointerUp()
     this.handleSidebarSplitterPointerUp()
     this.handleDailyDescriptionResizePointerUp()
+    this.testSplit.endDrag()
   }
 
   private readonly handleWindowResize = (): void => {
@@ -242,6 +245,7 @@ export class PaneLayoutController {
     this.sidebarWidth = readSidebarWidth(this.storage)
     this.sidebarCollapsedState = readSidebarCollapsed(this.storage)
     this.dailyDescriptionHeight = readDailyDescriptionHeight(this.storage)
+    this.testSplit = new TestSplitLayout(root, this.storage, this.window)
     this.bindEvents()
   }
 
@@ -251,6 +255,10 @@ export class PaneLayoutController {
 
   get gitFileListWidthValue(): number {
     return this.gitFileListWidth
+  }
+
+  get testListWidthValue(): number {
+    return this.testSplit.value
   }
 
   get sidebarWidthValue(): number {
@@ -282,6 +290,7 @@ export class PaneLayoutController {
     this.applySidebarWidth()
     this.applyDailyDescriptionHeight()
     this.applyGitFileListWidth()
+    this.applyTestListWidth()
   }
 
   /** Reclamp dimensions against the current viewport and measurable panes. */
@@ -316,6 +325,7 @@ export class PaneLayoutController {
       this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
     }
     this.applyDailyDescriptionHeight()
+    this.testSplit.refresh()
   }
 
   /** Apply only the bottom panel height after a render or a panel drag. */
@@ -336,6 +346,11 @@ export class PaneLayoutController {
     const splitter = this.query<HTMLElement>('#git-splitter')
     splitter?.setAttribute('aria-valuenow', String(width))
     splitter?.setAttribute('aria-valuemax', String(maxGitFileListWidth(this.gitWorkspaceWidth())))
+  }
+
+  /** Apply only the test list width after a results render or a tab switch. */
+  applyTestListWidth(): void {
+    this.testSplit.apply()
   }
 
   /** Apply only the problem-files pane width. */
@@ -375,6 +390,7 @@ export class PaneLayoutController {
     }
     this.destroyed = true
     this.handleWindowBlur()
+    this.testSplit.destroy()
     this.removeElementEvent('#sidebar-splitter', 'pointerdown', this.handleSidebarSplitterPointerDown)
     this.removeElementEvent('#sidebar-splitter', 'keydown', this.handleSidebarSplitterKeydown)
     this.removeElementEvent('#sidebar-splitter', 'lostpointercapture', this.handleSidebarSplitterPointerUp)

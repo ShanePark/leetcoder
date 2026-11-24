@@ -17,9 +17,10 @@ import {
   sourcePathsMatch,
   validSourceLine,
 } from './path-helpers'
-import { formatDuration, liveRunPhaseLabel, testRunFacts } from './layout'
+import { formatDuration, liveRunPhaseLabel, MIN_TEST_LIST_WIDTH, testRunFacts } from './layout'
 import { shortcutLabel } from '../shortcuts'
 import { liveSnapshotResult } from './test-results'
+import { testRunVerdict, type TestRunVerdict } from './test-run-summary'
 import type { TestRunSnapshot } from './types'
 
 export const TEST_RUN_ROOT_KEY = '__leetcoder_test_run__'
@@ -54,32 +55,30 @@ export function renderTestResults(
   callbacks: TestResultsViewCallbacks,
 ): TestResultsViewOutput {
   const panel = requiredElement<HTMLElement>(root, '#tests-panel')
-  const statusRow = requiredElement<HTMLElement>(root, '#test-status-row')
   const body = requiredElement<HTMLElement>(root, '#test-body')
   const result = model.result ?? (model.liveRun ? liveSnapshotResult(model.liveRun) : null)
-  statusRow.className = 'test-status-row'
-  statusRow.removeAttribute('title')
-  statusRow.innerHTML = ''
   body.innerHTML = ''
   panel.setAttribute('aria-busy', model.liveRun ? 'true' : 'false')
 
   if (!result) {
-    statusRow.classList.add('is-idle')
-    const idle = document.createElement('span')
-    idle.className = 'test-idle-copy'
+    const idle = document.createElement('div')
+    idle.className = 'test-idle'
+    const copy = document.createElement('span')
+    copy.className = 'test-idle-copy'
     const kbd = document.createElement('kbd')
     const selectedKbd = document.createElement('kbd')
     kbd.textContent = shortcutLabel('run-test', model.macPlatform)
     selectedKbd.textContent = shortcutLabel('run-test-at-cursor', model.macPlatform)
-    idle.append(
+    copy.append(
       document.createTextNode('Run '),
       kbd,
       document.createTextNode(' to test the current file · '),
       selectedKbd,
       document.createTextNode(' for the selected test'),
     )
-    statusRow.append(idle)
-    appendLiveDiagnosticsStatus(statusRow, model.liveDiagnosticsError)
+    idle.append(copy)
+    appendLiveDiagnosticsStatus(idle, model.liveDiagnosticsError)
+    body.append(idle)
     return { selectedTestKey: model.selectedTestKey }
   }
 
@@ -91,80 +90,7 @@ export function renderTestResults(
   const diagnostics = filterTestDiagnostics(result.diagnostics)
   const errorDiagnostics = diagnostics.filter((entry) => entry.severity.trim().toLowerCase() === 'error')
   const warningDiagnostics = diagnostics.filter((entry) => entry.severity.trim().toLowerCase() === 'warning')
-
-  if (isRunning) {
-    statusRow.classList.add('is-running')
-    statusRow.append(iconFor('loader', 'test-status-svg is-spinning'))
-    const label = document.createElement('span')
-    label.className = 'test-verdict'
-    label.textContent = liveRunPhaseLabel(result.phase)
-    statusRow.append(label)
-    appendFacts(statusRow, testRunFacts(result.summary))
-  } else {
-    const verdict = document.createElement('span')
-    verdict.className = 'test-verdict'
-    const factParts: string[] = []
-    if (phase === 'cancelled') {
-      statusRow.classList.add('is-warning')
-      statusRow.append(iconFor('alert', 'test-status-svg'))
-      verdict.textContent = 'Stopped'
-    } else if (phase === 'timedOut') {
-      statusRow.classList.add('is-failure')
-      statusRow.append(iconFor('close', 'test-status-svg'))
-      verdict.textContent = 'Timed out after 5 seconds'
-    } else if (!hasFailure) {
-      statusRow.classList.add('is-success')
-      statusRow.append(iconFor('check', 'test-status-svg'))
-      verdict.textContent = 'Passed'
-      if (result.summary.total > 0) {
-        factParts.push(`${result.summary.total} test${result.summary.total === 1 ? '' : 's'}`)
-      }
-    } else if (phase === 'compile') {
-      statusRow.classList.add('is-failure')
-      statusRow.append(iconFor('close', 'test-status-svg'))
-      verdict.textContent = 'Compile error'
-      if (errorDiagnostics.length > 0) {
-        factParts.push(`${errorDiagnostics.length} error${errorDiagnostics.length === 1 ? '' : 's'}`)
-      }
-    } else if (phase === 'noTests') {
-      statusRow.classList.add('is-warning')
-      statusRow.append(iconFor('alert', 'test-status-svg'))
-      verdict.textContent = 'No tests ran'
-    } else if (isRunnerError) {
-      statusRow.classList.add('is-error')
-      statusRow.append(iconFor('alert', 'test-status-svg'))
-      verdict.textContent = 'Runner error'
-    } else {
-      statusRow.classList.add('is-failure')
-      statusRow.append(iconFor('close', 'test-status-svg'))
-      verdict.textContent = 'Failed'
-      const failedCount = result.summary.failed + result.summary.errors
-      if (failedCount > 0 && result.summary.total > 0) {
-        factParts.push(`${failedCount} of ${result.summary.total} failed`)
-      }
-    }
-    statusRow.append(verdict)
-    if (
-      result.summary.durationMs !== null
-      && result.summary.durationMs !== undefined
-      && phase !== 'compile'
-      && phase !== 'timedOut'
-    ) {
-      factParts.push(formatDuration(result.summary.durationMs))
-    }
-    appendFacts(statusRow, factParts)
-    if (hasFailure && presentation.failureMessage) {
-      statusRow.title = presentation.failureMessage
-    }
-  }
-  const targetedMethod = model.testMethod
-  if (targetedMethod) {
-    const target = document.createElement('span')
-    target.className = 'test-run-target'
-    target.textContent = `Only ${targetedMethod}()`
-    statusRow.append(target)
-  }
-  appendLiveDiagnosticsStatus(statusRow, model.liveDiagnosticsError)
+  const verdict = testRunVerdict(result, isRunning, isRunnerError, errorDiagnostics)
 
   if (!isRunning && phase !== 'cancelled' && phase !== 'timedOut') {
     for (const diagnostic of errorDiagnostics) {
@@ -236,9 +162,18 @@ export function renderTestResults(
   list.setAttribute('role', 'listbox')
   list.setAttribute('aria-label', 'Tests')
   list.setAttribute('aria-controls', 'test-detail-pane')
-  list.append(renderTestTreeItem(null, result, isRunning, selectedTestKey, callbacks.onSelectTest))
+  list.append(renderRunItem(
+    {
+      verdict,
+      testMethod: model.testMethod,
+      failureMessage: !isRunning && hasFailure ? presentation.failureMessage : null,
+      liveDiagnosticsError: model.liveDiagnosticsError,
+    },
+    selectedTestKey === null,
+    callbacks.onSelectTest,
+  ))
   for (const test of visibleTests) {
-    list.append(renderTestTreeItem(test, result, isRunning, selectedTestKey, callbacks.onSelectTest))
+    list.append(renderTestTreeItem(test, selectedTestKey, callbacks.onSelectTest))
   }
   if (isRunning && result.tests.length === 0) {
     const empty = document.createElement('div')
@@ -280,7 +215,7 @@ export function renderTestResults(
       detailPane.append(output)
     }
   }
-  workspace.append(list, detailPane)
+  workspace.append(list, renderSplitter(), detailPane)
   body.append(workspace)
   return { selectedTestKey }
 }
@@ -293,17 +228,7 @@ function requiredElement<T extends HTMLElement>(root: HTMLElement, selector: str
   return element
 }
 
-function appendFacts(row: HTMLElement, facts: string[]): void {
-  if (facts.length === 0) {
-    return
-  }
-  const element = document.createElement('span')
-  element.className = 'test-facts'
-  element.textContent = facts.join(' · ')
-  row.append(element)
-}
-
-function appendLiveDiagnosticsStatus(statusRow: HTMLElement, error: string | null): void {
+function appendLiveDiagnosticsStatus(parent: HTMLElement, error: string | null): void {
   if (!error) {
     return
   }
@@ -312,64 +237,93 @@ function appendLiveDiagnosticsStatus(statusRow: HTMLElement, error: string | nul
   status.textContent = 'Live checks unavailable'
   status.title = error
   status.setAttribute('aria-label', `Live checks unavailable: ${error}`)
-  statusRow.append(status)
+  parent.append(status)
+}
+
+interface RunItemModel {
+  verdict: TestRunVerdict
+  testMethod: string | null
+  failureMessage: string | null
+  liveDiagnosticsError: string | null
+}
+
+/** The list's first option: the run verdict, which also selects the run output. */
+function renderRunItem(
+  run: RunItemModel,
+  selected: boolean,
+  onSelectTest: (key: string, focus: boolean) => void,
+): HTMLButtonElement {
+  const { verdict } = run
+  const item = treeItem(`test-tree-item test-tree-root is-${verdict.tone}`, TEST_RUN_ROOT_KEY, selected, onSelectTest)
+  const icon = document.createElement('span')
+  icon.className = 'test-status-icon'
+  icon.append(iconFor(verdict.icon, verdict.tone === 'running' ? 'test-status-svg is-spinning' : 'test-status-svg'))
+  const label = document.createElement('span')
+  label.className = 'test-name test-verdict'
+  label.textContent = verdict.label
+  item.append(icon, label)
+  if (run.testMethod) {
+    const target = document.createElement('span')
+    target.className = 'test-run-target'
+    target.textContent = `Only ${run.testMethod}()`
+    item.append(target)
+  }
+  const facts = document.createElement('span')
+  facts.className = 'test-tree-facts'
+  facts.textContent = verdict.facts.join(' · ')
+  item.append(facts)
+  appendLiveDiagnosticsStatus(item, run.liveDiagnosticsError)
+  item.setAttribute('aria-label', [
+    `Test run: ${verdict.label}`,
+    ...(run.testMethod ? [`only ${run.testMethod}()`] : []),
+    ...verdict.facts,
+  ].join(', '))
+  if (run.failureMessage) {
+    item.title = run.failureMessage
+  }
+  return item
 }
 
 function renderTestTreeItem(
-  test: TestCaseResult | null,
-  result: TestResult,
-  isRunning: boolean,
+  test: TestCaseResult,
   selectedTestKey: string | null,
+  onSelectTest: (key: string, focus: boolean) => void,
+): HTMLButtonElement {
+  const key = testResultKey(test)
+  const item = treeItem(`test-tree-item test-row-${test.status}`, key, selectedTestKey === key, onSelectTest)
+  item.append(statusIcon(test.status))
+  const name = document.createElement('span')
+  name.className = 'test-name'
+  name.textContent = test.displayName || test.name
+  item.append(name)
+  const facts = document.createElement('span')
+  facts.className = 'test-tree-facts'
+  if (test.durationMs !== null && test.durationMs !== undefined) {
+    facts.textContent = formatDuration(test.durationMs)
+  }
+  item.setAttribute('aria-label', `${test.displayName || test.name}, ${testStatusLabel(test.status)}${facts.textContent ? `, ${facts.textContent}` : ''}`)
+  if (test.className) {
+    item.title = test.className
+  }
+  item.append(facts)
+  return item
+}
+
+function treeItem(
+  className: string,
+  key: string,
+  selected: boolean,
   onSelectTest: (key: string, focus: boolean) => void,
 ): HTMLButtonElement {
   const item = document.createElement('button')
   item.type = 'button'
-  item.className = test
-    ? `test-tree-item test-row-${test.status}`
-    : 'test-tree-item test-tree-root'
+  item.className = className
   item.setAttribute('role', 'option')
-  const key = test ? testResultKey(test) : TEST_RUN_ROOT_KEY
-  const selected = test
-    ? selectedTestKey === key
-    : selectedTestKey === null
   item.dataset.testKey = key
   item.setAttribute('aria-selected', String(selected))
   // Roving tab stop keeps keyboard navigation inside the test list while
   // allowing arrow keys to move through every result.
   item.tabIndex = selected ? 0 : -1
-  const status = test
-    ? test.status
-    : isRunning
-      ? 'running'
-        : result.success
-          ? 'passed'
-          : normalizeTestPhase(result.phase) === 'noTests'
-            ? 'skipped'
-            : normalizeTestPhase(result.phase) === 'cancelled'
-              ? 'cancelled'
-              : normalizeTestPhase(result.phase) === 'timedOut'
-                ? 'timedOut'
-                : 'failed'
-  item.append(statusIcon(status))
-  const name = document.createElement('span')
-  name.className = 'test-name'
-  name.textContent = test ? (test.displayName || test.name) : 'Test run'
-  item.append(name)
-  const facts = document.createElement('span')
-  facts.className = 'test-tree-facts'
-  if (test) {
-    if (test.durationMs !== null && test.durationMs !== undefined) {
-      facts.textContent = formatDuration(test.durationMs)
-    }
-    item.setAttribute('aria-label', `${test.displayName || test.name}, ${testStatusLabel(test.status)}${facts.textContent ? `, ${facts.textContent}` : ''}`)
-    if (test.className) {
-      item.title = test.className
-    }
-  } else {
-    facts.textContent = testRunFacts(result.summary).join(' · ')
-    item.setAttribute('aria-label', `Test run, ${testStatusLabel(status)}${facts.textContent ? `, ${facts.textContent}` : ''}`)
-  }
-  item.append(facts)
   item.addEventListener('click', () => {
     onSelectTest(key, true)
   })
@@ -395,6 +349,23 @@ function renderTestTreeItem(
     onSelectTest(nextKey, true)
   })
   return item
+}
+
+/** The draggable boundary; `TestSplitLayout` handles its events and width. */
+function renderSplitter(): HTMLElement {
+  const splitter = document.createElement('div')
+  splitter.id = 'test-splitter'
+  splitter.className = 'test-splitter'
+  splitter.setAttribute('role', 'separator')
+  splitter.setAttribute('aria-orientation', 'vertical')
+  splitter.setAttribute('aria-label', 'Resize test list pane')
+  splitter.setAttribute('aria-controls', 'test-detail-pane')
+  splitter.setAttribute('aria-valuemin', String(MIN_TEST_LIST_WIDTH))
+  splitter.tabIndex = 0
+  const grip = document.createElement('span')
+  grip.setAttribute('aria-hidden', 'true')
+  splitter.append(grip)
+  return splitter
 }
 
 function renderTestCase(

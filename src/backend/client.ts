@@ -1,10 +1,12 @@
-import type { AiProgressHandler, BackendClient, Invoke, Listen } from './contracts'
+import type { AiProgressHandler, AiStreamHandler, BackendClient, Invoke, Listen } from './contracts'
 import { BackendError } from './errors'
 import {
+  normalizeAiStreamEvent,
   normalizeAiGenerateResult,
   normalizeAiKeySaveResult,
   normalizeAiModelList,
   normalizeAiProgress,
+  normalizeAiReviewFollowUpResult,
   normalizeAiReviewResult,
   normalizeAiStatus,
   normalizeAiUsageSummary,
@@ -277,12 +279,21 @@ export function createBackendClient(
       return normalizeAiGenerateResult(response)
     },
 
-    async reviewAiCode(request, onProgress) {
+    async reviewAiCode(request, onProgress, onEvent) {
       const response = await invoke<unknown>('ai_review_code', {
         request,
         onProgress: aiProgressChannel(onProgress),
+        onEvent: aiStreamChannel(onEvent),
       })
       return normalizeAiReviewResult(response)
+    },
+
+    async askAiReviewFollowUp(request, onEvent) {
+      const response = await invoke<unknown>('ai_review_follow_up', {
+        request,
+        onEvent: aiStreamChannel(onEvent),
+      })
+      return normalizeAiReviewFollowUpResult(response)
     },
 
     async aiUsage(bucketStartsMs) {
@@ -293,6 +304,14 @@ export function createBackendClient(
 }
 
 /** The native commands always take the channel, so it is sent even without a handler. */
+/** The native commands always take the channel, so it is sent even without a handler. */
+function aiStreamChannel(onEvent: AiStreamHandler | undefined) {
+  return createProgressChannel((value) => {
+    const event = normalizeAiStreamEvent(value)
+    if (event) onEvent?.(event)
+  })
+}
+
 function aiProgressChannel(onProgress: AiProgressHandler | undefined) {
   return createProgressChannel((event) => {
     const progress = normalizeAiProgress(event)

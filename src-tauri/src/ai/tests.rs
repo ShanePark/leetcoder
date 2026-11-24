@@ -2,6 +2,7 @@ use super::claude::{self, ApiError, Capabilities, CatalogModel, ReplyOutcome, Re
 use super::key_store::{self, ApiKey};
 use super::ledger::{self, UsageRecord};
 use super::prices::{self, CachedPrice, PriceCache, Prices};
+use super::stream::{MessageStream, SseEvent, SseParser, StreamUpdate};
 use super::*;
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
@@ -14,6 +15,8 @@ use tempfile::TempDir;
 const SECRET: &str = "sk-test-secret-value";
 
 fn no_progress(_: AiProgressEvent) {}
+
+fn no_event(_: AiStreamEvent) {}
 
 fn fixture() -> (TempDir, AiPaths) {
     let root = tempfile::tempdir().unwrap();
@@ -2513,13 +2516,14 @@ fn haiku_paths() -> (TempDir, AiPaths) {
 #[test]
 fn a_review_sends_the_cached_prompt_and_the_run_and_returns_the_parsed_review() {
     let (_root, paths) = haiku_paths();
-    let (base_url, server) = serve(vec![message_reply("end_turn", &review_json())]);
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &[&review_json()])]);
     let events = recorder();
     let result = block_on(review_code(
         &base_url,
         &paths,
         &review_request(None),
         &|event| events.lock().unwrap().push(event),
+        &no_event,
     ))
     .unwrap();
     let requests = server.join().unwrap();
@@ -2544,6 +2548,7 @@ fn a_review_sends_the_cached_prompt_and_the_run_and_returns_the_parsed_review() 
     let body = request_body(&requests[0]);
     assert_eq!(body["model"], "model-a");
     assert_eq!(body["max_tokens"], 16000);
+    assert_eq!(body["stream"], true);
     assert_eq!(
         body["system"],
         json!([{
@@ -2590,6 +2595,107 @@ fn a_review_sends_the_cached_prompt_and_the_run_and_returns_the_parsed_review() 
 }
 
 #[test]
+fn a_review_streams_its_thinking_json_fragments_and_usage_then_reads_the_whole_document() {
+    let (_root, paths) = haiku_paths();
+    let json = review_json();
+    let (head, rest) = json.split_at(10);
+    let (middle, tail) = rest.split_at(rest.len() / 2);
+    let mut events = vec![
+        message_start_event(),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "thinking", "thinking": "" },
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "thinking_delta", "thinking": "Hmm…" },
+        }),
+        json!({ "type": "content_block_stop", "index": 0 }),
+        json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": { "type": "text", "text": "" },
+        }),
+    ];
+    for fragment in [head, middle, tail] {
+        let mut delta = text_delta_event(fragment);
+        delta["index"] = json!(1);
+        events.push(delta);
+    }
+    events.push(json!({ "type": "content_block_stop", "index": 1 }));
+    events.push(message_delta_event("end_turn", Value::Null));
+    events.push(json!({ "type": "message_stop" }));
+    let (base_url, server) = serve(vec![sse_response(&sse_body(&events))]);
+    let streamed = std::sync::Mutex::new(Vec::new());
+    let result = block_on(review_code(
+        &base_url,
+        &paths,
+        &review_request(None),
+        &no_progress,
+        &|event| streamed.lock().unwrap().push(event),
+    ))
+    .unwrap();
+    server.join().unwrap();
+
+    let usage = |output_tokens, last| AiStreamEvent::Usage {
+        usage: AiStreamUsage {
+            input_tokens: 1000,
+            output_tokens,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
+        },
+        last,
+    };
+    let text = |text: &str| AiStreamEvent::Text {
+        text: text.to_string(),
+    };
+    assert_eq!(
+        *streamed.lock().unwrap(),
+        [
+            usage(1, false),
+            AiStreamEvent::Thinking { chars: 0 },
+            AiStreamEvent::Thinking { chars: 4 },
+            text(head),
+            text(middle),
+            text(tail),
+            usage(500, true),
+        ]
+    );
+    assert_eq!(result.outcome, "ok");
+    assert_eq!(result.review, Some(sample_review()));
+    assert_eq!(result.usage.output_tokens, 500);
+    let (records, _) = ledger::read(&paths.data).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, "ok");
+}
+
+#[test]
+fn a_review_cut_off_mid_stream_is_an_error_that_still_records_usage() {
+    let (_root, paths) = haiku_paths();
+    let json = review_json();
+    let mut events = stream_events("end_turn", &[&json[..20]]);
+    // The connection closes after the text, before the stop.
+    events.truncate(events.len() - 3);
+    let (base_url, server) = serve(vec![sse_response(&sse_body(&events))]);
+    let error = block_on(review_code(
+        &base_url,
+        &paths,
+        &review_request(None),
+        &no_progress,
+        &no_event,
+    ))
+    .unwrap_err();
+    server.join().unwrap();
+    assert!(!error.is_empty());
+    let (records, _) = ledger::read(&paths.data).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, "invalid");
+    assert_eq!(records[0].input_tokens, 1000);
+}
+
+#[test]
 fn a_review_without_a_run_says_so_and_keeps_the_same_cached_prefix() {
     let mut request = review_request(None);
     request.test_run = None;
@@ -2620,8 +2726,11 @@ fn test_run_text_cannot_close_its_tag() {
 #[test]
 fn a_refused_or_truncated_review_has_no_review_and_is_recorded() {
     for (response, outcome) in [
-        (refusal_reply(json!({ "category": "cyber" })), "refused"),
-        (message_reply("max_tokens", r#"{"verdict":"#), "truncated"),
+        (
+            review_stream("refusal", json!({ "category": "cyber" }), &[]),
+            "refused",
+        ),
+        (stream_reply("max_tokens", &[r#"{"verdict":"#]), "truncated"),
     ] {
         let (_root, paths) = haiku_paths();
         let (base_url, server) = serve(vec![response]);
@@ -2630,6 +2739,7 @@ fn a_refused_or_truncated_review_has_no_review_and_is_recorded() {
             &paths,
             &review_request(None),
             &no_progress,
+            &no_event,
         ))
         .unwrap();
         server.join().unwrap();
@@ -2655,13 +2765,14 @@ fn an_unreadable_review_is_an_error_that_still_records_usage() {
         r#"{"statements":[]}"#.to_string(),
     ] {
         let (_root, paths) = haiku_paths();
-        let (base_url, server) = serve(vec![message_reply("end_turn", &text)]);
+        let (base_url, server) = serve(vec![stream_reply("end_turn", &[&text])]);
         let events = recorder();
         let error = block_on(review_code(
             &base_url,
             &paths,
             &review_request(None),
             &|event| events.lock().unwrap().push(event),
+            &no_event,
         ))
         .unwrap_err();
         server.join().unwrap();
@@ -2699,9 +2810,13 @@ fn an_empty_or_oversized_review_sends_nothing() {
         (many_diagnostics, "64000 characters"),
     ] {
         let events = recorder();
-        let error = block_on(review_code(&base_url, &paths, &request, &|event| {
-            events.lock().unwrap().push(event)
-        }))
+        let error = block_on(review_code(
+            &base_url,
+            &paths,
+            &request,
+            &|event| events.lock().unwrap().push(event),
+            &no_event,
+        ))
         .unwrap_err();
         assert!(error.contains(expected), "{error}");
         assert!(events.lock().unwrap().is_empty());
@@ -2726,8 +2841,15 @@ fn a_review_at_the_size_limits_is_sent() {
     test.actual = None;
     test.stdout = Some("y".repeat(64_000 - others));
 
-    let (base_url, server) = serve(vec![message_reply("end_turn", &review_json())]);
-    let result = block_on(review_code(&base_url, &paths, &request, &no_progress)).unwrap();
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &[&review_json()])]);
+    let result = block_on(review_code(
+        &base_url,
+        &paths,
+        &request,
+        &no_progress,
+        &no_event,
+    ))
+    .unwrap();
     assert_eq!(server.join().unwrap().len(), 1);
     assert_eq!(result.outcome, "ok");
 }
@@ -2736,12 +2858,13 @@ fn a_review_at_the_size_limits_is_sent() {
 fn a_review_reports_its_tokens_and_the_cost_the_ledger_computes() {
     let (_root, paths) = haiku_paths();
     write_price_cache(&paths, "model-a", PRICE_2_10);
-    let (base_url, server) = serve(vec![message_reply("end_turn", &review_json())]);
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &[&review_json()])]);
     let result = block_on(review_code(
         &base_url,
         &paths,
         &review_request(None),
         &no_progress,
+        &no_event,
     ))
     .unwrap();
     server.join().unwrap();
@@ -2771,12 +2894,13 @@ fn a_review_reports_its_tokens_and_the_cost_the_ledger_computes() {
 #[test]
 fn a_review_of_an_unpriced_model_has_no_cost() {
     let (_root, paths) = haiku_paths();
-    let (base_url, server) = serve(vec![message_reply("refusal", &review_json())]);
+    let (base_url, server) = serve(vec![stream_reply("refusal", &[&review_json()])]);
     let result = block_on(review_code(
         &base_url,
         &paths,
         &review_request(None),
         &no_progress,
+        &no_event,
     ))
     .unwrap();
     server.join().unwrap();
@@ -2789,13 +2913,14 @@ fn a_review_of_an_unpriced_model_has_no_cost() {
 #[test]
 fn a_review_resolves_and_falls_back_like_a_generation() {
     let (_root, paths) = haiku_paths();
-    let (base_url, server) = serve(vec![message_reply("end_turn", &review_json())]);
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &[&review_json()])]);
     let events = recorder();
     let result = block_on(review_code(
         &base_url,
         &paths,
         &review_request(Some("model-gone")),
         &|event| events.lock().unwrap().push(event),
+        &no_event,
     ))
     .unwrap();
     let requests = server.join().unwrap();
@@ -2859,6 +2984,7 @@ fn a_failed_call_reports_only_what_happened() {
         &paths,
         &review_request(None),
         &|event| events.lock().unwrap().push(event),
+        &no_event,
     ))
     .unwrap_err();
     server.join().unwrap();
@@ -3048,4 +3174,1056 @@ fn the_review_schema_requires_every_field_it_defines() {
     // A reply in the schema's shape parses back to the same review.
     let document: Value = serde_json::from_str(&review_json()).unwrap();
     assert_eq!(claude::parse_review(&document), Some(sample_review()));
+}
+
+// Follow-up questions
+
+fn follow_up_request(selected: &str) -> AiReviewFollowUpRequest {
+    let review = review_request(Some(selected));
+    AiReviewFollowUpRequest {
+        selected_model_id: selected.to_string(),
+        current_code: review.source.clone(),
+        review,
+        review_answer: sample_review(),
+        history: vec![AiReviewFollowUpTurn {
+            question: "Why are they reversed?".to_string(),
+            answer: "Because SENTINELANSWER swaps them.".to_string(),
+            proposal: None,
+        }],
+        question: "  How do I fix it?\n".to_string(),
+    }
+}
+
+fn message_start_event() -> Value {
+    json!({
+        "type": "message_start",
+        "message": {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "model-a",
+            "content": [],
+            "stop_reason": null,
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 20,
+                "cache_creation_input_tokens": 10,
+                "inference_geo": "global",
+                "service_tier": "standard",
+            },
+        },
+    })
+}
+
+fn text_delta_event(text: &str) -> Value {
+    json!({
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": { "type": "text_delta", "text": text },
+    })
+}
+
+fn message_delta_event(stop_reason: &str, stop_details: Value) -> Value {
+    json!({
+        "type": "message_delta",
+        "delta": { "stop_reason": stop_reason, "stop_sequence": null, "stop_details": stop_details },
+        "usage": { "output_tokens": 500 },
+    })
+}
+
+/// A whole stream: a text block with `deltas`, then the stop.
+fn stream_events(stop_reason: &str, deltas: &[&str]) -> Vec<Value> {
+    let mut events = vec![
+        message_start_event(),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" },
+        }),
+        json!({ "type": "ping" }),
+    ];
+    events.extend(deltas.iter().map(|text| text_delta_event(text)));
+    events.push(json!({ "type": "content_block_stop", "index": 0 }));
+    events.push(message_delta_event(stop_reason, Value::Null));
+    events.push(json!({ "type": "message_stop" }));
+    events
+}
+
+fn sse_body(events: &[Value]) -> String {
+    events
+        .iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+/// Has no length, so the body runs until the server closes the connection.
+fn sse_response(body: &str) -> String {
+    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}")
+}
+
+fn stream_reply(stop_reason: &str, deltas: &[&str]) -> String {
+    sse_response(&sse_body(&stream_events(stop_reason, deltas)))
+}
+
+/// A whole stream that stops with `stop_details`.
+fn review_stream(stop_reason: &str, stop_details: Value, deltas: &[&str]) -> String {
+    let mut events = stream_events(stop_reason, deltas);
+    let last = events.len() - 2;
+    events[last] = message_delta_event(stop_reason, stop_details);
+    sse_response(&sse_body(&events))
+}
+
+/// A text sink that keeps every delta in order.
+fn text_recorder() -> std::sync::Mutex<Vec<String>> {
+    std::sync::Mutex::new(Vec::new())
+}
+
+/// Records follow-up events: text as it streamed, a proposal start as a marker.
+/// Thinking and usage have tests of their own.
+fn record_event(texts: &std::sync::Mutex<Vec<String>>, event: AiStreamEvent) {
+    let entry = match event {
+        AiStreamEvent::Text { text } => text,
+        AiStreamEvent::ProposalStarted => "<proposal>".to_string(),
+        AiStreamEvent::Thinking { .. } | AiStreamEvent::Usage { .. } => return,
+    };
+    texts.lock().unwrap().push(entry);
+}
+
+fn feed(chunks: &[&[u8]]) -> (MessageStream, Vec<String>) {
+    let mut parser = SseParser::default();
+    let mut stream = MessageStream::default();
+    let deltas = std::cell::RefCell::new(Vec::new());
+    let mut events = Vec::new();
+    for chunk in chunks {
+        parser.push(chunk, &mut events).unwrap();
+        for event in events.drain(..) {
+            stream
+                .apply(&event, &|update| {
+                    if let StreamUpdate::Text(text) = update {
+                        deltas.borrow_mut().push(text.to_string());
+                    }
+                })
+                .unwrap();
+        }
+    }
+    (stream, deltas.into_inner())
+}
+
+#[test]
+fn sse_events_parse_the_same_however_the_stream_is_cut() {
+    let deltas = [
+        "다음 ",
+        "`nums[i]`",
+        " 줄에서\n```java\nint a = 1;\n```",
+        "끝.",
+    ];
+    let mut events = stream_events("end_turn", &deltas);
+    // A thinking block that runs before the text is never forwarded.
+    events.insert(
+        1,
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "thinking_delta", "thinking": "SENTINELTHINKING" },
+        }),
+    );
+    let mut body = String::from(": keep-alive comment\n\n");
+    body.push_str(&sse_body(&events[..3]));
+    // CRLF line ends, a data field split over two lines, and no event name.
+    body.push_str("data: {\"type\":\r\ndata: \"ping\"}\r\n\r\n");
+    body.push_str(&sse_body(&events[3..]));
+    let bytes = body.as_bytes();
+
+    let (whole, whole_deltas) = feed(&[bytes]);
+    assert_eq!(whole_deltas, deltas);
+    assert_eq!(whole.text, deltas.concat());
+    assert_eq!(whole.model.as_deref(), Some("model-a"));
+    assert_eq!(whole.stop_reason.as_deref(), Some("end_turn"));
+    assert!(whole.stopped);
+    assert_eq!(
+        whole.usage,
+        claude::MessageUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
+            inference_geo: Some("global".to_string()),
+            speed: None,
+            service_tier: Some("standard".to_string()),
+        }
+    );
+
+    let same = |(stream, chunk_deltas): (MessageStream, Vec<String>)| {
+        assert_eq!(chunk_deltas, whole_deltas);
+        assert_eq!(stream.text, whole.text);
+        assert_eq!(stream.usage, whole.usage);
+        assert_eq!(stream.stop_reason, whole.stop_reason);
+        assert!(stream.stopped);
+    };
+    // Every cut, including inside the multi-byte Korean characters.
+    for cut in 0..=bytes.len() {
+        same(feed(&[&bytes[..cut], &bytes[cut..]]));
+    }
+    let single_bytes: Vec<&[u8]> = bytes.chunks(1).collect();
+    same(feed(&single_bytes));
+    for size in [2, 3, 7, 64] {
+        let chunks: Vec<&[u8]> = bytes.chunks(size).collect();
+        same(feed(&chunks));
+    }
+}
+
+#[test]
+fn an_unfinished_event_is_not_dispatched() {
+    let mut parser = SseParser::default();
+    let mut events = Vec::new();
+    parser
+        .push(b"event: ping\ndata: {\"type\":\"ping\"}\n", &mut events)
+        .unwrap();
+    assert!(events.is_empty());
+    parser.push(b"\n", &mut events).unwrap();
+    assert_eq!(
+        events,
+        [SseEvent {
+            name: Some("ping".to_string()),
+            data: "{\"type\":\"ping\"}".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn a_follow_up_streams_the_answer_and_sends_the_review_as_cached_context() {
+    let (_root, paths) = haiku_paths();
+    let deltas = ["Swap ", "`i` and `j`", " back."];
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &deltas)]);
+    let texts = text_recorder();
+    let request = follow_up_request("model-a");
+    let result = block_on(review_follow_up(&base_url, &paths, &request, &|event| {
+        record_event(&texts, event)
+    }))
+    .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(*texts.lock().unwrap(), deltas);
+    assert_eq!(result.outcome, "ok");
+    assert_eq!(result.answer, "Swap `i` and `j` back.");
+    assert_eq!(result.proposal, None);
+    assert_eq!(result.served_model, "model-a");
+    assert!(!result.fell_back);
+    assert_eq!(
+        (
+            result.usage.input_tokens,
+            result.usage.output_tokens,
+            result.usage.cache_read_tokens,
+            result.usage.cache_write_tokens,
+        ),
+        (1000, 500, 20, 10)
+    );
+
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("POST /v1/messages "));
+    assert_eq!(header(&requests[0], "x-api-key"), Some(SECRET));
+    let body = request_body(&requests[0]);
+    assert_eq!(body["model"], "model-a");
+    assert_eq!(body["max_tokens"], 8000);
+    assert_eq!(body["stream"], true);
+    assert!(body.get("output_config").is_none());
+    assert!(body.get("thinking").is_none());
+    assert_eq!(
+        body["system"],
+        json!([{
+            "type": "text",
+            "text": prompt::FOLLOW_UP_SYSTEM_PROMPT,
+            "cache_control": { "type": "ephemeral" },
+        }])
+    );
+    assert_eq!(body["tools"], prompt::follow_up_tools());
+    assert_eq!(
+        body["tool_choice"],
+        json!({ "type": "auto", "disable_parallel_tool_use": true })
+    );
+    assert_eq!(body.to_string().matches("cache_control").count(), 2);
+    assert_eq!(
+        body["messages"],
+        json!([
+            {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": prompt::review_user_message(&request.review),
+                    "cache_control": { "type": "ephemeral" },
+                }],
+            },
+            { "role": "assistant", "content": review_json() },
+            { "role": "user", "content": "Why are they reversed?\n\nAnswer in Korean." },
+            { "role": "assistant", "content": "Because SENTINELANSWER swaps them." },
+            { "role": "user", "content": "How do I fix it?\n\nAnswer in Korean." },
+        ])
+    );
+    let review_context = body["messages"][0]["content"][0]["text"].as_str().unwrap();
+    assert!(review_context.contains("SENTINELSOURCE"));
+    assert!(review_context.contains("SENTINELSTDOUT"));
+    let prefix = outside_messages(&body);
+    for text in ["SENTINELSOURCE", "SENTINELANSWER", "Korean", "fix it"] {
+        assert!(
+            !prefix.contains(text),
+            "{text} would break the cached prefix"
+        );
+    }
+
+    // Another question keeps both cached blocks byte for byte.
+    let mut later = follow_up_request("model-a");
+    later.history.push(AiReviewFollowUpTurn {
+        question: "How do I fix it?".to_string(),
+        answer: result.answer.clone(),
+        proposal: None,
+    });
+    later.question = "Is it O(n)?".to_string();
+    let later_body = claude::follow_up_request_body("model-a", &later);
+    assert_eq!(outside_messages(&later_body), outside_messages(&body));
+    assert_eq!(later_body["messages"][0], body["messages"][0]);
+    assert_eq!(later_body["messages"][1], body["messages"][1]);
+    // The turn sent earlier reads the same as history.
+    assert_eq!(later_body["messages"][4], body["messages"][4]);
+    assert_eq!(later_body["messages"].as_array().unwrap().len(), 7);
+
+    let (records, _) = ledger::read(&paths.data).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, "review-follow-up");
+    assert_eq!(records[0].outcome, "ok");
+    assert_eq!(records[0].input_tokens, 1000);
+    assert_eq!(records[0].output_tokens, 500);
+    assert_eq!(usage(&paths, &[]).unwrap().all_time.requests, 1);
+}
+
+#[test]
+fn a_truncated_or_refused_follow_up_keeps_what_streamed_and_is_recorded() {
+    let refusal = {
+        let mut events = stream_events("refusal", &["I can"]);
+        let stop = events.len() - 2;
+        events[stop] = message_delta_event("refusal", json!({ "category": "cyber" }));
+        sse_response(&sse_body(&events))
+    };
+    for (response, outcome, answer, category) in [
+        (
+            stream_reply("max_tokens", &["Part one, ", "part two"]),
+            "truncated",
+            "Part one, part two",
+            None,
+        ),
+        (refusal, "refused", "I can", Some("cyber")),
+        (stream_reply("refusal", &[]), "refused", "", None),
+    ] {
+        let (_root, paths) = haiku_paths();
+        let (base_url, server) = serve(vec![response]);
+        let result = block_on(review_follow_up(
+            &base_url,
+            &paths,
+            &follow_up_request("model-a"),
+            &|_| {},
+        ))
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.outcome, outcome);
+        assert_eq!(result.answer, answer);
+        assert_eq!(result.usage.output_tokens, 500);
+        let (records, _) = ledger::read(&paths.data).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, outcome);
+        assert_eq!(records[0].kind, "review-follow-up");
+        assert_eq!(records[0].stop_category.as_deref(), category);
+    }
+}
+
+#[test]
+fn a_follow_up_stream_that_fails_after_a_2xx_is_an_error_that_still_records_usage() {
+    let started = sse_body(&[message_start_event(), text_delta_event("partial")]);
+    let error_event = format!(
+        "{started}event: error\ndata: {}\n\n",
+        json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } })
+    );
+    let unexpected_stop = sse_body(&stream_events("pause_turn", &["partial"]));
+    let cut_off = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n{started}"
+    );
+    for (response, expected) in [
+        (sse_response(&error_event), "overloaded_error"),
+        // The stream ends without `message_stop`.
+        (sse_response(&started), "unreadable"),
+        (cut_off, "Could not reach"),
+        (
+            sse_response(&format!("{started}data: not json\n\n")),
+            "unreadable",
+        ),
+        (sse_response(&unexpected_stop), "could not be read"),
+    ] {
+        let (_root, paths) = haiku_paths();
+        let (base_url, server) = serve(vec![response]);
+        let texts = text_recorder();
+        let error = block_on(review_follow_up(
+            &base_url,
+            &paths,
+            &follow_up_request("model-a"),
+            &|event| record_event(&texts, event),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains(SECRET));
+        assert_eq!(*texts.lock().unwrap(), ["partial"]);
+        let (records, _) = ledger::read(&paths.data).unwrap();
+        assert_eq!(records.len(), 1, "{expected}");
+        assert_eq!(records[0].outcome, "invalid");
+        assert_eq!(records[0].kind, "review-follow-up");
+        assert_eq!(records[0].model, "model-a");
+        assert_eq!(records[0].input_tokens, 1000);
+    }
+}
+
+#[test]
+fn a_follow_up_rejected_before_streaming_maps_errors_like_a_review() {
+    let (_root, paths) = haiku_paths();
+    let (base_url, server) = serve(vec![
+        http(404, r#"{"error":{"type":"not_found_error"}}"#),
+        haiku_catalog(),
+    ]);
+    let texts = text_recorder();
+    let error = block_on(review_follow_up(
+        &base_url,
+        &paths,
+        &follow_up_request("model-a"),
+        &|event| record_event(&texts, event),
+    ))
+    .unwrap_err();
+    let requests = server.join().unwrap();
+    assert!(error.contains("Model model-a failed"), "{error}");
+    assert!(error.contains("not_found_error"), "{error}");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].starts_with("GET /v1/models"));
+
+    let (base_url, server) = serve(vec![http(429, "{}")]);
+    let error = block_on(review_follow_up(
+        &base_url,
+        &paths,
+        &follow_up_request("model-a"),
+        &|event| record_event(&texts, event),
+    ))
+    .unwrap_err();
+    assert_eq!(server.join().unwrap().len(), 1);
+    assert!(error.contains("rate limit"), "{error}");
+
+    assert!(texts.lock().unwrap().is_empty());
+    assert!(ledger::read(&paths.data).unwrap().0.is_empty());
+}
+
+#[test]
+fn a_stalled_follow_up_stream_ends_as_an_unreadable_reply_that_may_have_been_charged() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_request(&mut stream);
+        let started = sse_body(&[message_start_event(), text_delta_event("partial")]);
+        stream.write_all(sse_response(&started).as_bytes()).unwrap();
+        stream.flush().unwrap();
+        // Holds the connection open until the client gives up.
+        let _ = stream.read(&mut [0_u8; 1]);
+    });
+    let key = ApiKey::new(SECRET).unwrap();
+    let texts = text_recorder();
+    let streamed = block_on(claude::stream_message_within(
+        &base_url,
+        &key,
+        "model-a",
+        &claude::follow_up_request_body("model-a", &follow_up_request("model-a")),
+        &|update| {
+            if let StreamUpdate::Text(text) = update {
+                texts.lock().unwrap().push(text.to_string());
+            }
+        },
+        Duration::from_millis(300),
+    ))
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(*texts.lock().unwrap(), ["partial"]);
+    assert_eq!(streamed.text, "partial");
+    assert_eq!(streamed.reply.model, "model-a");
+    assert_eq!(streamed.reply.usage.input_tokens, 1000);
+    assert_eq!(
+        streamed.reply.outcome,
+        ReplyOutcome::Unreadable(ApiError::MessageTimedOut)
+    );
+}
+
+#[test]
+fn an_invalid_or_oversized_follow_up_sends_nothing() {
+    let (_root, paths) = haiku_paths();
+    let (base_url, listener) = silent_server();
+    let turn = |chars: usize| AiReviewFollowUpTurn {
+        question: "q".repeat(chars),
+        answer: "a".repeat(chars),
+        proposal: None,
+    };
+
+    let mut blank_question = follow_up_request("model-a");
+    blank_question.question = " \n\t".to_string();
+    let mut long_question = follow_up_request("model-a");
+    long_question.question = "x".repeat(4_001);
+    let mut many_turns = follow_up_request("model-a");
+    many_turns.history = vec![turn(1); 21];
+    let mut long_history = follow_up_request("model-a");
+    long_history.history = vec![turn(1_600); 19];
+    long_history.history.push(turn(1_601));
+    let mut blank_source = follow_up_request("model-a");
+    blank_source.review.source = " ".to_string();
+
+    for (request, expected) in [
+        (blank_question, "Type a question"),
+        (long_question, "4000 characters"),
+        (many_turns, "too long"),
+        (long_history, "too long"),
+        (blank_source, "empty"),
+    ] {
+        let texts = text_recorder();
+        let error = block_on(review_follow_up(&base_url, &paths, &request, &|event| {
+            record_event(&texts, event)
+        }))
+        .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        assert!(texts.lock().unwrap().is_empty());
+    }
+
+    assert_no_connection(&listener);
+    assert!(ledger::read(&paths.data).unwrap().0.is_empty());
+}
+
+#[test]
+fn a_follow_up_at_the_limits_is_sent() {
+    let (_root, paths) = haiku_paths();
+    let mut request = follow_up_request("model-a");
+    // Surrounding whitespace does not count toward the question's limit.
+    request.question = format!("  {}\n", "x".repeat(4_000));
+    request.history = vec![
+        AiReviewFollowUpTurn {
+            question: "q".repeat(1_600),
+            answer: "a".repeat(1_600),
+            proposal: None,
+        };
+        20
+    ];
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &["ok"])]);
+    let result = block_on(review_follow_up(&base_url, &paths, &request, &|_| {})).unwrap();
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(result.outcome, "ok");
+    assert_eq!(
+        request_body(&requests[0])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        43
+    );
+}
+
+#[test]
+fn a_follow_up_falls_back_and_fills_an_empty_earlier_answer() {
+    let (_root, paths) = haiku_paths();
+    let mut request = follow_up_request("model-gone");
+    request.review.language = AiResponseLanguage::English;
+    request.history[0].answer = " ".to_string();
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &["ok"])]);
+    let result = block_on(review_follow_up(&base_url, &paths, &request, &|_| {})).unwrap();
+    let requests = server.join().unwrap();
+    assert!(result.fell_back);
+    assert_eq!(result.served_model, "model-a");
+    let body = request_body(&requests[0]);
+    assert_eq!(body["model"], "model-a");
+    assert_eq!(body["messages"][3]["content"], "(No answer.)");
+    assert_eq!(
+        body["messages"][4]["content"],
+        "How do I fix it?\n\nAnswer in English."
+    );
+}
+
+#[test]
+fn follow_up_dtos_match_the_contract() {
+    let request: AiReviewFollowUpRequest = serde_json::from_value(json!({
+        "selectedModelId": "model-a",
+        "review": {
+            "selectedModelId": "model-a",
+            "problemTitle": "T",
+            "problemContent": "C",
+            "entryPoint": null,
+            "source": "S",
+            "testRun": null,
+            "language": "korean",
+        },
+        "reviewAnswer": serde_json::to_value(sample_review()).unwrap(),
+        "history": [{ "question": "Q1", "answer": "A1" }],
+        "question": "Q2",
+        "currentCode": "S2",
+    }))
+    .unwrap();
+    assert_eq!(request.selected_model_id, "model-a");
+    assert_eq!(request.review.language, AiResponseLanguage::Korean);
+    assert_eq!(request.review_answer, sample_review());
+    assert_eq!(request.history[0].question, "Q1");
+    assert_eq!(request.history[0].answer, "A1");
+    assert_eq!(request.question, "Q2");
+
+    assert_eq!(request.history[0].proposal, None);
+    assert_eq!(request.current_code, "S2");
+
+    let with_proposal: AiReviewFollowUpTurn = serde_json::from_value(json!({
+        "question": "Q",
+        "answer": "A",
+        "proposal": { "summary": "Swap them", "outcome": "accepted" },
+    }))
+    .unwrap();
+    assert_eq!(
+        with_proposal.proposal,
+        Some(AiProposalRecord {
+            summary: "Swap them".to_string(),
+            outcome: AiCodeProposalOutcome::Accepted,
+        })
+    );
+    for outcome in ["pending", "rejected"] {
+        let turn: AiReviewFollowUpTurn = serde_json::from_value(json!({
+            "question": "Q",
+            "answer": "A",
+            "proposal": { "summary": "S", "outcome": outcome },
+        }))
+        .unwrap();
+        assert!(turn.proposal.is_some());
+    }
+    assert!(serde_json::from_value::<AiReviewFollowUpTurn>(json!({
+        "question": "Q",
+        "answer": "A",
+        "proposal": { "summary": "S", "outcome": "maybe" },
+    }))
+    .is_err());
+
+    assert_eq!(
+        serde_json::to_value(AiStreamEvent::Text {
+            text: "Hi".to_string()
+        })
+        .unwrap(),
+        json!({ "kind": "text", "text": "Hi" })
+    );
+    assert_eq!(
+        serde_json::to_value(AiStreamEvent::ProposalStarted).unwrap(),
+        json!({ "kind": "proposal-started" })
+    );
+    assert_eq!(
+        serde_json::to_value(AiStreamEvent::Thinking { chars: 3 }).unwrap(),
+        json!({ "kind": "thinking", "chars": 3 })
+    );
+    assert_eq!(
+        serde_json::to_value(AiStreamEvent::Usage {
+            usage: AiStreamUsage {
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_read_tokens: 3,
+                cache_write_tokens: 4,
+            },
+            last: true,
+        })
+        .unwrap(),
+        json!({
+            "kind": "usage",
+            "usage": { "inputTokens": 1, "outputTokens": 2, "cacheReadTokens": 3, "cacheWriteTokens": 4 },
+            "final": true,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(AiReviewFollowUpResult {
+            outcome: "truncated".to_string(),
+            answer: "Part".to_string(),
+            proposal: Some(AiCodeProposal {
+                summary: "Swap them".to_string(),
+                code: "new".to_string(),
+                base_code: "old".to_string(),
+            }),
+            served_model: "m".to_string(),
+            fell_back: true,
+            usage: AiRequestUsage {
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_read_tokens: 3,
+                cache_write_tokens: 4,
+                cost_usd: None,
+            },
+        })
+        .unwrap(),
+        json!({
+            "outcome": "truncated",
+            "answer": "Part",
+            "proposal": { "summary": "Swap them", "code": "new", "baseCode": "old" },
+            "servedModel": "m",
+            "fellBack": true,
+            "usage": {
+                "inputTokens": 1,
+                "outputTokens": 2,
+                "cacheReadTokens": 3,
+                "cacheWriteTokens": 4,
+                "costUsd": null,
+            },
+        })
+    );
+}
+
+/// A whole stream: a text block with `deltas`, then a `propose_code_change`
+/// call whose input arrives as `json_parts`.
+fn tool_use_events(stop_reason: &str, deltas: &[&str], json_parts: &[&str]) -> Vec<Value> {
+    let mut events = stream_events(stop_reason, deltas);
+    let stop = events.split_off(events.len() - 2);
+    events.push(json!({
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "propose_code_change",
+            "input": {},
+        },
+    }));
+    events.extend(json_parts.iter().map(|part| {
+        json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": { "type": "input_json_delta", "partial_json": part },
+        })
+    }));
+    events.push(json!({ "type": "content_block_stop", "index": 1 }));
+    events.extend(stop);
+    events
+}
+
+fn tool_use_reply(stop_reason: &str, deltas: &[&str], json_parts: &[&str]) -> String {
+    sse_response(&sse_body(&tool_use_events(stop_reason, deltas, json_parts)))
+}
+
+const EDITED_CODE: &str =
+    "class Q1TwoSum { int[] twoSum(int[] nums, int target) { return null; } }\n";
+
+#[test]
+fn a_tool_call_streams_its_input_however_the_stream_is_cut() {
+    let input = json!({ "summary": "Return the pair.", "code": "class A {\n  // 합\n}\n" });
+    let text = input.to_string();
+    let bytes = sse_body(&tool_use_events(
+        "tool_use",
+        &["Here you go."],
+        &[&text[..5], &text[5..30], &text[30..]],
+    ))
+    .into_bytes();
+    for cut in 0..=bytes.len() {
+        let (stream, deltas) = feed(&[&bytes[..cut], &bytes[cut..]]);
+        assert_eq!(deltas, ["Here you go."]);
+        assert_eq!(stream.text, "Here you go.");
+        assert_eq!(stream.stop_reason.as_deref(), Some("tool_use"));
+        let tool_use = stream.tool_use.expect("a tool call");
+        assert_eq!(tool_use.name, "propose_code_change");
+        assert!(tool_use.stopped);
+        assert_eq!(tool_use.input.as_ref(), Some(&input));
+    }
+
+    // Unfinished JSON is never repaired into an input.
+    let broken = sse_body(&tool_use_events(
+        "tool_use",
+        &[],
+        &[r#"{"summary":"S","code":"cl"#],
+    ));
+    let (stream, _) = feed(&[broken.as_bytes()]);
+    let tool_use = stream.tool_use.unwrap();
+    assert!(tool_use.stopped);
+    assert_eq!(tool_use.input, None);
+
+    // A call cut off before its block stops is not marked stopped.
+    let mut events = tool_use_events("max_tokens", &[], &[r#"{"summary":"S""#]);
+    events.retain(|event| event != &json!({ "type": "content_block_stop", "index": 1 }));
+    let (stream, _) = feed(&[sse_body(&events).as_bytes()]);
+    assert!(!stream.tool_use.unwrap().stopped);
+}
+
+#[test]
+fn a_follow_up_that_asks_for_a_change_returns_a_checked_proposal() {
+    let (_root, paths) = haiku_paths();
+    let mut request = follow_up_request("model-a");
+    request.current_code = EDITED_CODE.to_string();
+    let input = json!({
+        "summary": "  Return the pair of indices.  ",
+        // The base file's final line break is restored.
+        "code": "class Q1TwoSum { int[] twoSum(int[] nums, int target) { return new int[] {0, 1}; } }",
+    })
+    .to_string();
+    let (base_url, server) = serve(vec![tool_use_reply(
+        "tool_use",
+        &["I'll return ", "the indices."],
+        &[&input[..20], &input[20..]],
+    )]);
+    let texts = text_recorder();
+    let result = block_on(review_follow_up(&base_url, &paths, &request, &|event| {
+        record_event(&texts, event)
+    }))
+    .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(
+        *texts.lock().unwrap(),
+        ["I'll return ", "the indices.", "<proposal>"]
+    );
+    assert_eq!(result.outcome, "ok");
+    assert_eq!(result.answer, "I'll return the indices.");
+    assert_eq!(
+        result.proposal,
+        Some(AiCodeProposal {
+            summary: "Return the pair of indices.".to_string(),
+            code: "class Q1TwoSum { int[] twoSum(int[] nums, int target) { return new int[] {0, 1}; } }\n"
+                .to_string(),
+            base_code: EDITED_CODE.to_string(),
+        })
+    );
+    let body = request_body(&requests[0]);
+    let latest = body["messages"][4]["content"].as_str().unwrap();
+    assert!(
+        latest.starts_with("<current_code>\nclass Q1TwoSum"),
+        "{latest}"
+    );
+    assert!(
+        latest.ends_with("How do I fix it?\n\nAnswer in Korean."),
+        "{latest}"
+    );
+    let (records, _) = ledger::read(&paths.data).unwrap();
+    assert_eq!(records[0].outcome, "ok");
+}
+
+#[test]
+fn a_change_that_cannot_be_offered_becomes_a_note_in_the_answer() {
+    let english = |problem| proposal_note(problem, AiResponseLanguage::English);
+    let base = follow_up_request("model-a").current_code;
+    let same = json!({ "summary": "Nothing", "code": base.trim_end() }).to_string();
+    let blank_summary = json!({ "summary": " ", "code": "class B {}" }).to_string();
+    let blank_code = json!({ "summary": "S", "code": "\n" }).to_string();
+    let long_summary = json!({ "summary": "s".repeat(1_001), "code": "class B {}" }).to_string();
+    let wrong_types = json!({ "summary": "S", "code": 1 }).to_string();
+    let cases: Vec<(String, &str, &str, AiResponseLanguage)> = vec![
+        (
+            tool_use_reply("tool_use", &["Done."], &[&same]),
+            "ok",
+            "Done.\n\nThe proposed code is the same as the code in the editor, so there is nothing to apply.",
+            AiResponseLanguage::English,
+        ),
+        (
+            tool_use_reply("tool_use", &[], &[&same]),
+            "ok",
+            "제안된 코드가 에디터의 코드와 같아 적용할 내용이 없습니다.",
+            AiResponseLanguage::Korean,
+        ),
+        (
+            tool_use_reply("tool_use", &["Done.\n"], &[r#"{"summary":"S","code":"#]),
+            "ok",
+            "Done.\n\nThe code change could not be read, so there is nothing to apply. Ask again.",
+            AiResponseLanguage::English,
+        ),
+        (
+            tool_use_reply("tool_use", &[], &[r#"{"code":"class B {}"}"#]),
+            "ok",
+            english(ProposalProblem::Unreadable),
+            AiResponseLanguage::English,
+        ),
+        (
+            tool_use_reply("tool_use", &[], &[&blank_summary]),
+            "ok",
+            english(ProposalProblem::Unreadable),
+            AiResponseLanguage::English,
+        ),
+        (
+            tool_use_reply("tool_use", &[], &[&blank_code]),
+            "ok",
+            english(ProposalProblem::Unreadable),
+            AiResponseLanguage::English,
+        ),
+        (
+            tool_use_reply("tool_use", &[], &[&long_summary]),
+            "ok",
+            english(ProposalProblem::Unreadable),
+            AiResponseLanguage::English,
+        ),
+        (
+            tool_use_reply("tool_use", &[], &[&wrong_types]),
+            "ok",
+            english(ProposalProblem::Unreadable),
+            AiResponseLanguage::English,
+        ),
+        (
+            tool_use_reply("max_tokens", &["Here."], &[r#"{"summary":"S","code":"class"#]),
+            "truncated",
+            "Here.\n\nThe code change was cut off at the output limit, so there is nothing to apply. Ask again for a smaller change.",
+            AiResponseLanguage::English,
+        ),
+        (
+            tool_use_reply("max_tokens", &[], &[r#"{"summary":"S","code":"class"#]),
+            "truncated",
+            "코드 변경이 출력 한도에서 잘려 적용할 내용이 없습니다. 더 작은 변경으로 다시 요청하세요.",
+            AiResponseLanguage::Korean,
+        ),
+        // A refusal adds nothing to what streamed.
+        (
+            tool_use_reply("refusal", &["I can"], &[]),
+            "refused",
+            "I can",
+            AiResponseLanguage::English,
+        ),
+    ];
+    for (response, outcome, answer, language) in cases {
+        let (_root, paths) = haiku_paths();
+        let mut request = follow_up_request("model-a");
+        request.review.language = language;
+        let (base_url, server) = serve(vec![response]);
+        let result = block_on(review_follow_up(&base_url, &paths, &request, &|_| {})).unwrap();
+        server.join().unwrap();
+        assert_eq!(result.outcome, outcome, "{answer}");
+        assert_eq!(result.answer, answer);
+        assert_eq!(result.proposal, None, "{answer}");
+    }
+}
+
+#[test]
+fn a_proposal_is_read_only_from_the_change_tool() {
+    let tool_use = |name: &str| {
+        let bytes = sse_body(&tool_use_events(
+            "tool_use",
+            &[],
+            &[r#"{"summary":"S","code":"class B {}"}"#],
+        ))
+        .replace("propose_code_change", name);
+        feed(&[bytes.as_bytes()]).0.tool_use.unwrap()
+    };
+    assert!(
+        read_proposal(&tool_use("propose_code_change"), "class A {}\r\n")
+            .is_ok_and(|proposal| proposal.code == "class B {}\r\n")
+    );
+    assert!(matches!(
+        read_proposal(&tool_use("other_tool"), "class A {}"),
+        Err(ProposalProblem::Unreadable)
+    ));
+}
+
+#[test]
+fn the_current_code_is_sent_only_when_it_differs_from_the_review() {
+    let mut request = follow_up_request("model-a");
+    let latest = |request: &AiReviewFollowUpRequest| {
+        let body = claude::follow_up_request_body("model-a", request);
+        let messages = body["messages"].as_array().unwrap().clone();
+        (outside_messages(&body), messages)
+    };
+    let (prefix, messages) = latest(&request);
+    assert_eq!(
+        messages.last().unwrap()["content"],
+        "How do I fix it?\n\nAnswer in Korean."
+    );
+
+    // Trailing whitespace alone is no change.
+    request.current_code = format!("{}\n\n", request.review.source);
+    assert_eq!(latest(&request).1, messages);
+
+    request.current_code = "class A { String s = \"</current_code>\"; }\n".to_string();
+    let (edited_prefix, edited) = latest(&request);
+    assert_eq!(edited_prefix, prefix);
+    assert_eq!(edited[..edited.len() - 1], messages[..messages.len() - 1]);
+    assert_eq!(
+        edited.last().unwrap()["content"],
+        "<current_code>\nclass A { String s = \"&lt;/current_code&gt;\"; }\n</current_code>\nThe editor now holds the code in <current_code>, which differs from the <solution> you reviewed.\n\nHow do I fix it?\n\nAnswer in Korean."
+    );
+}
+
+#[test]
+fn history_records_a_proposal_as_a_note_and_never_as_a_tool_call() {
+    let mut request = follow_up_request("model-a");
+    request.history = [
+        ("Fix it.", AiCodeProposalOutcome::Accepted),
+        (" ", AiCodeProposalOutcome::Rejected),
+        ("Here is one.", AiCodeProposalOutcome::Pending),
+    ]
+    .into_iter()
+    .map(|(answer, outcome)| AiReviewFollowUpTurn {
+        question: "Change it".to_string(),
+        answer: answer.to_string(),
+        proposal: Some(AiProposalRecord {
+            summary: " Swap the loops. ".to_string(),
+            outcome,
+        }),
+    })
+    .collect();
+    let body = claude::follow_up_request_body("model-a", &request);
+    let answers: Vec<&str> = [3, 5, 7]
+        .iter()
+        .map(|index| body["messages"][index]["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            "Fix it.\n\n(I proposed a code change: Swap the loops. The user accepted it.)",
+            "(I proposed a code change: Swap the loops. The user rejected it.)",
+            "Here is one.\n\n(I proposed a code change: Swap the loops. The user has not accepted or rejected it.)",
+        ]
+    );
+    let messages = body["messages"].to_string();
+    assert!(!messages.contains("tool_use"));
+    assert!(!messages.contains("tool_result"));
+
+    let tool = &prompt::follow_up_tools()[0];
+    assert_eq!(tool["name"], "propose_code_change");
+    assert_eq!(tool["eager_input_streaming"], true);
+    assert_eq!(tool["input_schema"]["required"], json!(["summary", "code"]));
+}
+
+#[test]
+fn proposal_summaries_count_toward_the_history_limit() {
+    let (_root, paths) = haiku_paths();
+    let (base_url, listener) = silent_server();
+    let mut request = follow_up_request("model-a");
+    request.history = vec![
+        AiReviewFollowUpTurn {
+            question: "q".repeat(1_600),
+            answer: "a".repeat(1_600),
+            proposal: None,
+        };
+        20
+    ];
+    request.history[0].answer = "a".repeat(1_599);
+    request.history[0].proposal = Some(AiProposalRecord {
+        summary: "ss".to_string(),
+        outcome: AiCodeProposalOutcome::Pending,
+    });
+    let error = block_on(review_follow_up(&base_url, &paths, &request, &|_| {})).unwrap_err();
+    assert!(error.contains("too long"), "{error}");
+
+    let mut long_code = follow_up_request("model-a");
+    long_code.current_code = "x".repeat(200_001);
+    let error = block_on(review_follow_up(&base_url, &paths, &long_code, &|_| {})).unwrap_err();
+    assert!(error.contains("200000 characters"), "{error}");
+    assert_no_connection(&listener);
+}
+
+#[test]
+fn code_the_model_writes_follows_the_no_comment_no_field_simplicity_rules() {
+    let follow_up = prompt::FOLLOW_UP_SYSTEM_PROMPT;
+    assert!(follow_up.contains("Never add comments of any kind"));
+    assert!(follow_up.contains("Never add fields, static or instance"));
+    assert!(follow_up.contains("Keep the code as simple as possible"));
+    assert!(prompt::REVIEW_SYSTEM_PROMPT.contains("no comments and no fields"));
+    let code = &prompt::follow_up_tools()[0]["input_schema"]["properties"]["code"]["description"];
+    assert!(code
+        .as_str()
+        .unwrap()
+        .contains("Add no comments and no fields"));
 }

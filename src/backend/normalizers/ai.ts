@@ -1,4 +1,5 @@
 import type {
+  AiCodeProposal,
   AiGenerateResult,
   AiKeySaveResult,
   AiModel,
@@ -7,9 +8,11 @@ import type {
   AiProgress,
   AiRequestUsage,
   AiReview,
+  AiReviewFollowUpResult,
   AiReviewMissedCase,
   AiReviewResult,
   AiStatus,
+  AiStreamEvent,
   AiUsageBucket,
   AiUsageSummary,
   AiUsageTotals,
@@ -144,6 +147,73 @@ export function normalizeAiReviewResult(value: unknown): AiReviewResult {
     fellBack: value.fellBack,
     usage: normalizeAiRequestUsage(value.usage),
   }
+}
+
+export function normalizeAiReviewFollowUpResult(value: unknown): AiReviewFollowUpResult {
+  if (
+    !isRecord(value)
+    || !isAiOutcome(value.outcome)
+    || typeof value.answer !== 'string'
+    || !isNonEmptyString(value.servedModel)
+    || typeof value.fellBack !== 'boolean'
+  ) {
+    throw new Error('The AI follow-up response was invalid.')
+  }
+  return {
+    outcome: value.outcome,
+    answer: value.answer,
+    proposal: value.proposal === null ? null : normalizeAiCodeProposal(value.proposal),
+    servedModel: value.servedModel,
+    fellBack: value.fellBack,
+    usage: normalizeAiRequestUsage(value.usage),
+  }
+}
+
+function normalizeAiCodeProposal(value: unknown): AiCodeProposal {
+  if (
+    !isRecord(value)
+    || !isNonEmptyString(value.summary)
+    || !isNonEmptyString(value.code)
+    || typeof value.baseCode !== 'string'
+    || value.code === value.baseCode
+  ) {
+    throw new Error('The AI follow-up response contained an invalid code change.')
+  }
+  return { summary: value.summary, code: value.code, baseCode: value.baseCode }
+}
+
+/** One streamed follow-up event, or null for an event this client does not understand. */
+export function normalizeAiStreamEvent(value: unknown): AiStreamEvent | null {
+  if (!isRecord(value)) return null
+  if (value.kind === 'text' && typeof value.text === 'string' && value.text) {
+    return { kind: 'text', text: value.text }
+  }
+  if (value.kind === 'proposal-started') return { kind: 'proposal-started' }
+  if (value.kind === 'thinking' && isNonNegativeInteger(value.chars)) {
+    return { kind: 'thinking', chars: value.chars }
+  }
+  if (value.kind === 'usage' && typeof value.final === 'boolean') {
+    const usage = value.usage
+    if (
+      isRecord(usage)
+      && isNonNegativeInteger(usage.inputTokens)
+      && isNonNegativeInteger(usage.outputTokens)
+      && isNonNegativeInteger(usage.cacheReadTokens)
+      && isNonNegativeInteger(usage.cacheWriteTokens)
+    ) {
+      return {
+        kind: 'usage',
+        usage: {
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheWriteTokens: usage.cacheWriteTokens,
+        },
+        final: value.final,
+      }
+    }
+  }
+  return null
 }
 
 function normalizeAiRequestUsage(value: unknown): AiRequestUsage {

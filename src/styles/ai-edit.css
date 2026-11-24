@@ -1,0 +1,194 @@
+/* ---------------------------------------------------------------- */
+/* AI proposed code changes                                          */
+/* ---------------------------------------------------------------- */
+
+/* Review tab: the change an answer proposed, and the cue while it arrives. */
+.review-proposal-preparing {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.review-proposal-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-proposal-spinner {
+    animation-duration: 2.5s;
+  }
+}
+
+.review-proposal {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.review-proposal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.review-proposal-title {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.review-proposal-stats,
+.ai-edit-stats {
+  display: inline-flex;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.review-proposal-stats .is-added,
+.ai-edit-stats .is-added {
+  color: var(--green);
+}
+
+.review-proposal-stats .is-removed,
+.ai-edit-stats .is-removed {
+  color: var(--red);
+}
+
+.review-proposal-status {
+  height: 18px;
+  margin-left: auto;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.review-proposal-status.is-accepted {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.review-proposal-status.is-rejected {
+  color: var(--text-faint);
+}
+
+.review-proposal-summary {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+/* The diff dialog: most of the window, so the whole file reads at once. */
+.ai-edit-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 90vw;
+  max-width: 90vw;
+  height: 85vh;
+  max-height: 85vh;
+  margin: auto;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--panel-radius) + 2px);
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  color: var(--text);
+  animation: dialog-in 160ms ease-out both;
+}
+
+.ai-edit-dialog:not([open]) {
+  display: none;
+}
+
+.ai-edit-dialog::backdrop {
+  background: var(--dialog-backdrop);
+  backdrop-filter: blur(6px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-edit-dialog {
+    animation: none;
+  }
+}
+
+.ai-edit-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+}
+
+.ai-edit-title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-edit-file {
+  font-family: var(--font-mono);
+}
+
+.ai-edit-close {
+  margin-left: auto;
+}
+
+.ai-edit-summary {
+  flex: none;
+  max-height: 20vh;
+  overflow-y: auto;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.ai-edit-diff {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.ai-edit-lines {
+  padding: 8px 0;
+}
+
+.ai-edit-footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-edit-note {
+  margin-right: auto;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.ai-edit-note.is-blocked {
+  color: var(--amber);
+}

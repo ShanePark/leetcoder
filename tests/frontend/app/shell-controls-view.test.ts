@@ -31,7 +31,7 @@ class FakeTabElement {
 
 function tabsRoot(): { root: HTMLElement; element: (selector: string) => FakeTabElement } {
   const elements = new Map(
-    ['#tests-tab', '#review-tab', '#git-tab', '#tests-panel', '#review-panel', '#git-panel', '#run-test', '#git-tab-indicator']
+    ['#tests-tab', '#review-tab', '#git-tab', '#tests-panel', '#review-panel', '#git-panel', '#run-test', '#run-selected-test', '#git-tab-indicator']
       .map((selector) => [selector, new FakeTabElement()]),
   )
   const root = {
@@ -73,7 +73,7 @@ describe('bottom panel tabs', () => {
     expect(indicator.hidden).toBe(true)
   })
 
-  it('shows only the selected panel of the three, and Run only with Tests', () => {
+  it('shows only the selected panel of the three, and both run buttons only with Tests', () => {
     const { root, element } = tabsRoot()
     const state = { bottomPanelTab: 'review', git: createGitState() } as AppState
     const controls = new ShellControlsView({
@@ -94,12 +94,84 @@ describe('bottom panel tabs', () => {
     expect(element('#tests-panel').hidden).toBe(true)
     expect(element('#git-panel').hidden).toBe(true)
     expect(element('#run-test').hidden).toBe(true)
+    expect(element('#run-selected-test').hidden).toBe(true)
 
     state.bottomPanelTab = 'tests'
     controls.renderBottomPanelTabs()
     expect(element('#review-panel').hidden).toBe(true)
     expect(element('#tests-panel').hidden).toBe(false)
     expect(element('#run-test').hidden).toBe(false)
+    expect(element('#run-selected-test').hidden).toBe(false)
+
+    state.bottomPanelTab = 'git'
+    controls.renderBottomPanelTabs()
+    expect(element('#git-panel').hidden).toBe(false)
+    expect(element('#run-test').hidden).toBe(true)
+    expect(element('#run-selected-test').hidden).toBe(true)
+  })
+})
+
+class FakeRunButton {
+  disabled = false
+  title = ''
+  readonly attributes = new Map<string, string>()
+
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value)
+  }
+}
+
+describe('Run selected button', () => {
+  function runSelected(state: Partial<AppState>, method: string | null, mac = false): FakeRunButton {
+    const button = new FakeRunButton()
+    const root = {
+      querySelector: (selector: string) => selector === '#run-selected-test' ? button : null,
+    } as unknown as HTMLElement
+    const controls = new ShellControlsView({
+      root,
+      state: { busy: false, testRun: null, selectedFqcn: 'easy.Q1TwoSum', ...state } as AppState,
+      pickerOpen: () => false,
+      macPlatform: () => mac,
+      invalidatePendingNavigation: () => {},
+      aiRequestPath: () => null,
+      aiRequestKind: () => null,
+      aiTestStub: () => 'filled',
+      aiCaseTestAvailable: () => false,
+      testMethodAtCursor: () => method,
+    })
+    controls.updateRunSelectedButton()
+    return button
+  }
+
+  it('targets the @Test method at the cursor with the shortcut from the registry', () => {
+    const button = runSelected({}, 'returnsPair')
+    expect(button.disabled).toBe(false)
+    expect(button.title).toBe('Run returnsPair() (Ctrl+Shift+R)')
+    expect(button.attributes.get('aria-label')).toBe('Run returnsPair() (Ctrl+Shift+R)')
+    expect(runSelected({}, 'returnsPair', true).title).toBe('Run returnsPair() (⌃⇧R)')
+  })
+
+  it('is disabled with a reason off a test method, without a problem file, or while busy', () => {
+    const offMethod = runSelected({}, null)
+    expect(offMethod.disabled).toBe(true)
+    expect(offMethod.title).toBe('Put the cursor in an @Test method to run only that test')
+    expect(offMethod.attributes.get('aria-label')).toBe('Run selected test (Ctrl+Shift+R)')
+
+    const noFile = runSelected({ selectedFqcn: null }, 'returnsPair')
+    expect(noFile.disabled).toBe(true)
+    expect(noFile.title).toBe('Select a Java problem file to run')
+
+    expect(runSelected({ busy: true }, 'returnsPair').disabled).toBe(true)
+  })
+
+  it('stays disabled during a run instead of becoming a second Stop button', () => {
+    const button = runSelected({
+      busy: true,
+      testRun: { status: 'running', stopRequested: false } as AppState['testRun'],
+    }, 'returnsPair')
+    expect(button.disabled).toBe(true)
+    expect(button.title).toBe('Wait for the current test run to finish')
+    expect(button.attributes.get('aria-label')).toBe('Run selected test (Ctrl+Shift+R)')
   })
 })
 

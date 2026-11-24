@@ -125,6 +125,17 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
     entries: [
       { id: 'git-commit', bindings: ['Mod-k', 'Alt-k'], description: 'Commit, or focus the commit message' },
       { id: 'git-commit-push', bindings: ['Mod-Alt-k'], description: 'Commit and push, or focus the commit message' },
+      { id: 'git-confirm-commit', bindings: ['Enter'], description: 'Confirm the commit dialog' },
+      // The native dialog cancels on Escape; this entry only supplies its label.
+      { id: 'git-cancel-commit', bindings: ['Escape'], description: 'Cancel the commit dialog' },
+    ],
+  },
+  {
+    title: 'AI review',
+    entries: [
+      { id: 'ai-accept-change', bindings: ['Enter'], description: 'Accept the proposed code change' },
+      // The native dialog closes on Escape; this entry only supplies its label.
+      { id: 'ai-close-change', bindings: ['Escape'], description: 'Close the proposed change without deciding' },
     ],
   },
 ]
@@ -148,6 +159,9 @@ const OTHER_NAMES: Readonly<Record<string, string>> = {
 /** How non-macOS platforms conventionally order modifier names. */
 const OTHER_ORDER: readonly string[] = ['Ctrl', 'Alt', 'Shift']
 
+/** Shorter display names for CodeMirror key names. */
+const KEY_LABELS: Readonly<Record<string, string>> = { Escape: 'Esc' }
+
 /**
  * Render one CodeMirror binding for display. macOS uses the stacked modifier
  * glyphs; every other platform uses `+`-joined names.
@@ -156,7 +170,7 @@ export function formatShortcut(binding: string, macPlatform: boolean): string {
   const parts = binding.split(/-(?!$)/)
   const key = parts[parts.length - 1]
   const modifiers = parts.slice(0, -1)
-  const label = key.length === 1 ? key.toUpperCase() : key
+  const label = key.length === 1 ? key.toUpperCase() : KEY_LABELS[key] ?? key
   if (macPlatform) {
     // The bindings are already authored in Apple's reading order.
     return `${modifiers.map((modifier) => MAC_SYMBOLS[modifier] ?? modifier).join('')}${label}`
@@ -254,6 +268,18 @@ export function isSettingsShortcut(event: ShortcutKeyEvent, macPlatform: boolean
 /** Match the platform-specific shortcut that focuses the file explorer search. */
 export function isFileSearchShortcut(event: ShortcutKeyEvent, macPlatform: boolean): boolean {
   return platformShortcutBindings('focus-file-search', macPlatform)
+    .some((binding) => matchesShortcutBinding(event, binding))
+}
+
+/** Match the key that confirms the open commit dialog. */
+export function isCommitConfirmShortcut(event: ShortcutKeyEvent): boolean {
+  return shortcutBindings('git-confirm-commit')
+    .some((binding) => matchesShortcutBinding(event, binding))
+}
+
+/** Match the key that accepts the change in the open proposed-change dialog. */
+export function isProposalAcceptShortcut(event: ShortcutKeyEvent): boolean {
+  return shortcutBindings('ai-accept-change')
     .some((binding) => matchesShortcutBinding(event, binding))
 }
 
