@@ -135,6 +135,7 @@ describe('Run selected button', () => {
       invalidatePendingNavigation: () => {},
       aiRequestPath: () => null,
       aiRequestKind: () => null,
+      aiRequestReviewMode: () => null,
       aiTestStub: () => 'filled',
       aiCaseTestAvailable: () => false,
       testMethodAtCursor: () => method,
@@ -214,7 +215,12 @@ describe('AI action buttons', () => {
       frontendId: '1',
       content: '<p>Example</p>',
     } as AppState['dailyProblem']
-    const state = { selectedPath: 'src/Q1TwoSum.java', busy: false, dailyProblem: problem } as AppState
+    const state = {
+      selectedPath: 'src/Q1TwoSum.java',
+      selectedSource: 'class Q1TwoSum {\n    int solve() {\n        return 0;\n    }\n}',
+      busy: false,
+      dailyProblem: problem,
+    } as AppState
     let stub: 'bare' | 'filled' = 'bare'
     const controls = new ShellControlsView({
       root,
@@ -224,6 +230,7 @@ describe('AI action buttons', () => {
       invalidatePendingNavigation: () => {},
       aiRequestPath: () => null,
       aiRequestKind: () => null,
+      aiRequestReviewMode: () => null,
       aiTestStub: () => stub,
       aiCaseTestAvailable: () => true,
     })
@@ -250,5 +257,13 @@ describe('AI action buttons', () => {
       { className: 'ai-action-label', textContent: 'Add case' },
     ])
     expect(generate.attributes.get('aria-label')).toBe('Add a failing case with AI')
+
+    state.selectedSource = 'class Q1TwoSum {\n    int solve() {\n        // later\n    }\n}'
+    controls.updateAiButton()
+    expect(review.children).toEqual([
+      { icon: 'lightbulb', className: 'button-icon' },
+      { className: 'ai-action-label', textContent: 'AI help' },
+    ])
+    expect(review.attributes.get('aria-label')).toBe('Get hints from AI')
   })
 })

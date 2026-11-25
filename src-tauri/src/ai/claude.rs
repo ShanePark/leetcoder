@@ -12,8 +12,8 @@ use super::key_store::ApiKey;
 use super::prices::PriceCache;
 use super::stream::{MessageStream, SseParser, StreamUpdate, ToolUse};
 use super::{
-    now_ms, prompt, write_cache_file, AiGenerateRequest, AiModel, AiReview,
-    AiReviewFollowUpRequest, AiReviewRequest, DAY_MS,
+    now_ms, prompt, write_cache_file, AiGenerateRequest, AiModel, AiProblemHelp, AiReview,
+    AiReviewFollowUpRequest, AiReviewMode, AiReviewRequest, DAY_MS,
 };
 
 const API_VERSION: &str = "2026-10-21";
@@ -517,45 +517,66 @@ pub(super) fn request_body(model_id: &str, effort_low: bool, request: &AiGenerat
     )
 }
 
-/// A review judges correctness, so it keeps the model's default effort.
-/// A review streams, so the panel can show it as it is written. The JSON is
-/// still read only once the stream ends.
+/// A review judges correctness, so it keeps the model's default effort, and
+/// help does the same. Both stream, so the panel can show them as they are
+/// written. The JSON is still read only once the stream ends. Each mode has its
+/// own system prompt and schema, so each keeps its own cached prefix.
 pub(super) fn review_request_body(model_id: &str, request: &AiReviewRequest) -> Value {
-    let mut body = message_body(
-        model_id,
-        false,
-        prompt::REVIEW_SYSTEM_PROMPT,
-        prompt::review_user_message(request),
-        prompt::review_output_schema(),
-    );
+    let (system, user, schema) = match request.mode {
+        AiReviewMode::Review => (
+            prompt::REVIEW_SYSTEM_PROMPT,
+            prompt::review_user_message(request),
+            prompt::review_output_schema(),
+        ),
+        AiReviewMode::Help => (
+            prompt::HELP_SYSTEM_PROMPT,
+            prompt::help_user_message(request),
+            prompt::help_output_schema(),
+        ),
+    };
+    let mut body = message_body(model_id, false, system, user, schema);
     body["stream"] = json!(true);
     body
 }
 
-/// The second breakpoint ends the review context, which stays the same for every
-/// question about one review. The conversation after it changes each time, and
-/// the editor's code joins only its latest question. The tool list renders
-/// before the system prompt, so it is part of the cached prefix.
+/// The second breakpoint ends the review or help context, which stays the same
+/// for every question about one answer. The conversation after it changes each
+/// time, and the editor's code joins only its latest question. The tool list
+/// renders before the system prompt, so it is part of the cached prefix. The
+/// request was checked first, so the answer its mode needs is present.
 pub(super) fn follow_up_request_body(model_id: &str, request: &AiReviewFollowUpRequest) -> Value {
     let language = request.review.language;
+    let mode = request.review.mode;
+    let (system, context, answer) = match mode {
+        AiReviewMode::Review => (
+            prompt::FOLLOW_UP_SYSTEM_PROMPT,
+            prompt::review_user_message(&request.review),
+            serde_json::to_string(&request.review_answer),
+        ),
+        AiReviewMode::Help => (
+            prompt::HELP_FOLLOW_UP_SYSTEM_PROMPT,
+            prompt::help_user_message(&request.review),
+            serde_json::to_string(&request.help_answer),
+        ),
+    };
     let mut messages = vec![
         json!({
             "role": "user",
             "content": [{
                 "type": "text",
-                "text": prompt::review_user_message(&request.review),
+                "text": context,
                 "cache_control": { "type": "ephemeral" },
             }],
         }),
         json!({
             "role": "assistant",
-            "content": serde_json::to_string(&request.review_answer).unwrap_or_default(),
+            "content": answer.unwrap_or_default(),
         }),
     ];
     for turn in &request.history {
         messages.push(json!({
             "role": "user",
-            "content": prompt::follow_up_question(&turn.question, language, None),
+            "content": prompt::follow_up_question(&turn.question, language, mode, None),
         }));
         messages.push(json!({
             "role": "assistant",
@@ -566,7 +587,7 @@ pub(super) fn follow_up_request_body(model_id: &str, request: &AiReviewFollowUpR
         .filter(|code| code.trim_end() != request.review.source.trim_end());
     messages.push(json!({
         "role": "user",
-        "content": prompt::follow_up_question(&request.question, language, current_code),
+        "content": prompt::follow_up_question(&request.question, language, mode, current_code),
     }));
     json!({
         "model": model_id,
@@ -576,7 +597,7 @@ pub(super) fn follow_up_request_body(model_id: &str, request: &AiReviewFollowUpR
         "tool_choice": { "type": "auto", "disable_parallel_tool_use": true },
         "system": [{
             "type": "text",
-            "text": prompt::FOLLOW_UP_SYSTEM_PROMPT,
+            "text": system,
             "cache_control": { "type": "ephemeral" },
         }],
         "messages": messages,
@@ -629,6 +650,10 @@ pub(super) fn parse_statements(document: &Value) -> Option<Vec<String>> {
 
 pub(super) fn parse_review(document: &Value) -> Option<AiReview> {
     AiReview::deserialize(document).ok()
+}
+
+pub(super) fn parse_help(document: &Value) -> Option<AiProblemHelp> {
+    AiProblemHelp::deserialize(document).ok()
 }
 
 /// `stop_reason` decides before any content is read: a refused or cut-off reply

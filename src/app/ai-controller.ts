@@ -3,11 +3,13 @@ import {
   type AiGenerateResult,
   type AiModelList,
   type AiModelPricing,
+  type AiProblemHelp,
   type AiProgress,
   type AiProviderInfo,
   type AiRequestUsage,
   type AiResponseLanguage,
   type AiReview,
+  type AiReviewMode,
   type AiReviewRequest,
   type AiReviewResult,
   type AiReviewTestCase,
@@ -26,6 +28,7 @@ import type {
   AiTestResult,
   AiTestStub,
 } from '../editor'
+import { isJavaSolutionUnimplemented } from '../editor/solution-stub'
 import type { AppIcon } from '../icons'
 import { runAiReviewFollowUp, type AiReviewFollowUp } from './ai-follow-up'
 import { emptyLiveUsage, recordStreamUsage, type AiLiveUsage } from './ai-usage-meter'
@@ -36,9 +39,10 @@ import type { TestRunSourceSnapshot } from './types'
 
 /**
  * What a request does: write the examples into `test()`, write one failing case
- * into a new method, review the open solution, or answer a question about the
- * shown review. A review or a follow-up streams into the Review tab, shows no
- * progress popup, and leaves the editor usable.
+ * into a new method, review the open solution (or, in help mode, explain the
+ * unsolved problem with hints), or answer a question about the shown review. A
+ * review or a follow-up streams into the AI tab, shows no progress popup, and
+ * leaves the editor usable.
  */
 export type AiRequestKind = 'examples' | 'case' | 'review' | 'follow-up'
 
@@ -64,9 +68,13 @@ export interface AiReviewTestRunSelection {
   omitted: AiReviewTestRunOmission | null
 }
 
-/** The last review the app shows, with what it was based on and what it cost. */
+/**
+ * The last review or help answer the app shows, with what it was based on and
+ * what it cost. `request.mode` says which of `review` and `help` is set.
+ */
 export interface StoredAiReview {
-  review: AiReview
+  review: AiReview | null
+  help: AiProblemHelp | null
   fileName: string
   servedModel: string
   /** The served model's catalog name, or its id when the catalog does not list it. */
@@ -75,7 +83,7 @@ export interface StoredAiReview {
   pricing: AiModelPricing | null
   testRunOmitted: AiReviewTestRunOmission | null
   usage: AiRequestUsage
-  /** The request the review answered; follow-ups resend it unchanged. */
+  /** The request the answer is for; follow-ups resend it unchanged. */
   request: AiReviewRequest
   /** The document that was reviewed; proposed changes apply only to it. */
   target: AiTarget
@@ -83,8 +91,9 @@ export interface StoredAiReview {
   followUps: AiReviewFollowUp[]
 }
 
-/** A review on its way, shown in the Review tab until its result replaces it. */
+/** A review or help answer on its way, shown in the AI tab until its result replaces it. */
 export interface AiReviewStream {
+  mode: AiReviewMode
   fileName: string
   /** The model asked for, then the one the request names once it is sent. */
   modelId: string
@@ -94,13 +103,14 @@ export interface AiReviewStream {
   testRunOmitted: AiReviewTestRunOmission | null
   /** When the request was sent, as `Date.now()`. */
   startedAt: number
-  /** The review's JSON so far. */
+  /** The answer's JSON so far. */
   text: string
   live: AiLiveUsage
 }
 
 /** What the review model picker shows. Nothing is sent until a model is chosen. */
 export interface AiReviewModelRequest {
+  mode: AiReviewMode
   fileName: string
   provider: AiProviderInfo | null
   /** The cached model catalog, or null when it could not be read. */
@@ -178,12 +188,16 @@ export interface AiController {
    */
   readonly requestPath: string | null
   readonly requestKind: AiRequestKind | null
+  /** What the running `review` request asks for; null for any other request or while idle. */
+  readonly reviewMode: AiReviewMode | null
   generate: () => Promise<void>
   /** Add one pasted failing case to the open file as a new test method. */
   generateCase: (failingCase: string) => Promise<void>
   /**
    * Ask for a review model, then review the open solution with its test
-   * results when they are current. Cancelling the picker sends nothing.
+   * results when they are current, or ask for help when the solution is still
+   * unimplemented, as the source shows at the click. Cancelling the picker
+   * sends nothing.
    */
   review: () => Promise<void>
   /**
@@ -349,38 +363,71 @@ export function aiButtonPresentation(
   }
 }
 
-const REVIEW_LABEL = 'Review code with AI'
-const REVIEW_TEXT = 'AI review'
+const REVIEW_COPY: Readonly<Record<AiReviewMode, {
+  icon: AppIcon
+  text: string
+  label: string
+  busyLabel: string
+  busyTitle: (name: string) => string
+}>> = {
+  review: {
+    icon: 'review',
+    text: 'AI review',
+    label: 'Review code with AI',
+    busyLabel: 'Reviewing code with AI',
+    busyTitle: (name) => `Reviewing ${name}…`,
+  },
+  help: {
+    icon: 'lightbulb',
+    text: 'AI help',
+    label: 'Get hints from AI',
+    busyLabel: 'Getting AI help',
+    busyTitle: (name) => `Getting help for ${name}…`,
+  },
+}
 
-/** The review button: shown for the loaded problem's file, and disabled while anything else runs. */
+/** What a click on the review button asks for: help while the solution is unimplemented. */
+export function aiReviewMode(source: string): AiReviewMode {
+  return isJavaSolutionUnimplemented(source) ? 'help' : 'review'
+}
+
+/**
+ * The review button: shown for the loaded problem's file, and disabled while
+ * anything else runs. `mode` is what a click would ask for, and `requestMode`
+ * what the running review asks for.
+ */
 export function aiReviewButtonPresentation(
   path: string | null,
   requestPath: string | null,
   requestKind: AiRequestKind | null,
   appBusy: boolean,
   problem: DailyProblem | null,
+  mode: AiReviewMode,
+  requestMode: AiReviewMode | null,
 ): AiButtonPresentation {
   if (requestPath !== null && requestKind === 'review') {
+    const copy = REVIEW_COPY[requestMode ?? 'review']
     return {
       icon: 'loader',
       busy: true,
       hidden: false,
       disabled: true,
-      text: REVIEW_TEXT,
-      label: 'Reviewing code with AI',
-      title: `Reviewing ${sourceBasename(requestPath)}…`,
+      text: copy.text,
+      label: copy.busyLabel,
+      title: copy.busyTitle(sourceBasename(requestPath)),
     }
   }
+  const copy = REVIEW_COPY[mode]
   const hidden = !problemReady(path, problem)
   return {
-    icon: 'review',
+    icon: copy.icon,
     busy: false,
     hidden,
     disabled: hidden || appBusy || requestPath !== null,
-    text: REVIEW_TEXT,
-    label: REVIEW_LABEL,
+    text: copy.text,
+    label: copy.label,
     title: hidden || (!appBusy && requestPath === null)
-      ? REVIEW_LABEL
+      ? copy.label
       : appBusy ? APP_BUSY : AI_REQUEST_RUNNING,
   }
 }
@@ -535,12 +582,21 @@ function problemEntryPoint(problem: DailyProblem): {
 
 /** A review's request: no popup, and a stream that starts once the request is sent. */
 interface ReviewTracker extends ProgressTracker {
-  startStream: (fileName: string, modelId: string | null, testRunOmitted: AiReviewTestRunOmission | null) => void
+  startStream: (
+    mode: AiReviewMode,
+    fileName: string,
+    modelId: string | null,
+    testRunOmitted: AiReviewTestRunOmission | null,
+  ) => void
   onEvent: AiStreamHandler
 }
 
-/** The picked review model, with the catalog it was picked from for naming the served model. */
+/**
+ * The picked review model, with the catalog it was picked from for naming the
+ * served model, and what the click asked for.
+ */
 interface ReviewChoice {
+  mode: AiReviewMode
   modelId: string | null
   models: AiModelList | null
 }
@@ -570,6 +626,7 @@ interface ProgressTracker {
 export function createAiController(api: AiControllerApi, ui: AiControllerUi): AiController {
   let requestPath: string | null = null
   let requestKind: AiRequestKind | null = null
+  let reviewMode: AiReviewMode | null = null
   let provider: AiProviderInfo | null = null
   let progress: ProgressTracker | null = null
   /** The review picker is being prepared or is open; no other request may start. */
@@ -639,6 +696,7 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         progress = null
         requestPath = null
         requestKind = null
+        reviewMode = null
         if (disposed) return
         // The button is enabled again before the stream ends, so the end can hand it focus.
         ui.requestChanged()
@@ -654,9 +712,10 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         stream.pricing = modelEntry(event.model)?.pricing ?? null
         ui.reviewStreamChanged(stream)
       },
-      startStream(fileName, modelId, testRunOmitted) {
+      startStream(mode, fileName, modelId, testRunOmitted) {
         const id = modelId ?? models?.defaultModelId ?? ''
         stream = {
+          mode,
           fileName,
           modelId: id,
           modelName: modelEntry(id)?.displayName ?? (id || 'the default model'),
@@ -859,13 +918,17 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     progress: ProgressTracker,
   ): void => {
     const notice = fellBackNotice(result)
+    const help = request.mode === 'help'
     if (result.outcome === 'refused') {
-      showMessage(`The model declined to review ${name}. ${MAY_BE_CHARGED}${notice}`, 'error')
+      const declined = help ? `help with ${name}` : `review ${name}`
+      showMessage(`The model declined to ${declined}. ${MAY_BE_CHARGED}${notice}`, 'error')
       return
     }
-    if (result.outcome === 'truncated' || result.review === null) {
+    const review = help ? null : result.review
+    const helpAnswer = help ? result.help : null
+    if (result.outcome === 'truncated' || (review === null && helpAnswer === null)) {
       showMessage(
-        `The response hit the output limit before it finished, so no review is shown. ${STILL_CHARGED}${notice}`,
+        `The response hit the output limit before it finished, so no ${help ? 'help' : 'review'} is shown. ${STILL_CHARGED}${notice}`,
         'error',
       )
       return
@@ -873,7 +936,8 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     progress.close()
     const served = models?.models.find((model) => model.id === result.servedModel)
     ui.reviewed({
-      review: result.review,
+      review,
+      help: helpAnswer,
       fileName: name,
       servedModel: result.servedModel,
       servedModelName: served?.displayName ?? result.servedModel,
@@ -904,7 +968,8 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
       const problem = loadedProblem(problemNumber)
       if (!problem) return
       if (!problem.content?.trim()) {
-        showMessage(`Problem #${problemNumber} has no description to review against.`, 'error')
+        const purpose = choice.mode === 'help' ? 'explain' : 'review against'
+        showMessage(`Problem #${problemNumber} has no description to ${purpose}.`, 'error')
         return
       }
       const source = api.readSource()
@@ -912,10 +977,14 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         showMessage(`${name} is empty. No request was sent.`, 'error')
         return
       }
-      const { testRun, omitted } = api.reviewTestRun()
+      // Help is about the problem, so no test run goes with it.
+      const { testRun, omitted } = choice.mode === 'help'
+        ? { testRun: null, omitted: 'no-run' as const }
+        : api.reviewTestRun()
 
-      action = 'review the code'
+      action = choice.mode === 'help' ? 'get help' : 'review the code'
       const request: AiReviewRequest = {
+        mode: choice.mode,
         selectedModelId: choice.modelId,
         problemTitle: problem.title,
         problemContent: problem.content,
@@ -924,7 +993,7 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         testRun,
         language: api.responseLanguage(),
       }
-      progress.startStream(name, choice.modelId, omitted)
+      progress.startStream(choice.mode, name, choice.modelId, omitted)
       const result = await api.reviewAiCode(request, progress.onProgress, progress.onEvent).finally(() => {
         if (!disposed) ui.generationFinished()
       })
@@ -947,6 +1016,7 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     requestKind = kind
     const name = sourceBasename(target.path)
     if (kind === 'review') {
+      reviewMode = reviewChoice?.mode ?? 'review'
       const tracker = trackReview(reviewChoice?.models ?? null)
       progress = tracker
       ui.requestChanged()
@@ -974,7 +1044,7 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
    * local, so no popup is shown. Null means nothing is to be sent; any reason
    * has been shown already.
    */
-  const chooseReview = async (target: AiTarget, name: string): Promise<ReviewChoice | null> => {
+  const chooseReview = async (target: AiTarget, name: string, mode: AiReviewMode): Promise<ReviewChoice | null> => {
     let configured: boolean
     try {
       const status = await api.aiStatus()
@@ -997,13 +1067,14 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
       return null
     }
     const choice = await ui.chooseReviewModel({
+      mode,
       fileName: name,
       provider,
       models,
       testModelId: api.selectedModelId(),
       testRun: api.reviewTestRun(),
     })
-    return choice && !disposed ? { modelId: choice.modelId, models } : null
+    return choice && !disposed ? { mode, modelId: choice.modelId, models } : null
   }
 
   const review = async (): Promise<void> => {
@@ -1011,9 +1082,10 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     const target = api.currentTarget()
     if (target.path === null || aiProblemNumber(target.path) === null) return
     choosingReview = true
+    const mode = aiReviewMode(api.readSource())
     let choice: ReviewChoice | null
     try {
-      choice = await chooseReview(target, sourceBasename(target.path))
+      choice = await chooseReview(target, sourceBasename(target.path), mode)
     } finally {
       choosingReview = false
     }
@@ -1079,6 +1151,9 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     },
     get requestKind() {
       return requestKind
+    },
+    get reviewMode() {
+      return reviewMode
     },
     generate: () => start('examples', null),
     generateCase: (failingCase) => start('case', failingCase),

@@ -308,14 +308,18 @@ export interface AiReviewTestRun {
   diagnostics: string[]
 }
 
+/** `review` reviews the written solution; `help` explains an unimplemented problem with hints. */
+export type AiReviewMode = 'review' | 'help'
+
 export interface AiReviewRequest {
+  mode: AiReviewMode
   selectedModelId: string | null
   problemTitle: string
   problemContent: string
   entryPoint: string | null
   /** The whole open solution file. */
   source: string
-  /** Present only when the last run was made on exactly this source. */
+  /** Present only when the last run was made on exactly this source; always null for help. */
   testRun: AiReviewTestRun | null
   language: AiResponseLanguage
 }
@@ -341,10 +345,22 @@ export interface AiReview {
   improvements: string[]
 }
 
+/** Help for a problem not yet solved; prose is in the requested language. */
+export interface AiProblemHelp {
+  /** The problem restated plainly: what is asked, inputs/outputs, what the examples show. */
+  overview: string
+  /** Constraints, edge cases, and observations that matter for choosing an approach. */
+  keyPoints: string[]
+  /** Progressively more specific hints, first gentlest; no full algorithm, no code. */
+  hints: string[]
+}
+
 export interface AiReviewResult {
   outcome: 'ok' | 'refused' | 'truncated'
-  /** Non-null only when `outcome` is `ok`. */
+  /** Non-null only when `outcome` is `ok` for a review request. */
   review: AiReview | null
+  /** Non-null only when `outcome` is `ok` for a help request. */
+  help: AiProblemHelp | null
   servedModel: string
   /** A pinned model left the list, so the default was used. */
   fellBack: boolean
@@ -374,8 +390,10 @@ export interface AiReviewFollowUpRequest {
   selectedModelId: string
   /** The original review request, unchanged. */
   review: AiReviewRequest
-  /** The review the model returned. */
-  reviewAnswer: AiReview
+  /** The review the model returned; set exactly when `review.mode` is `review`. */
+  reviewAnswer: AiReview | null
+  /** The help the model returned; set exactly when `review.mode` is `help`. */
+  helpAnswer: AiProblemHelp | null
   /** Earlier completed turns, oldest first. */
   history: AiReviewFollowUpTurn[]
   question: string

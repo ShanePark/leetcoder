@@ -334,6 +334,7 @@ export function createBackend(): BackendHarness {
     reviewAiCode: vi.fn().mockResolvedValue({
       outcome: 'refused',
       review: null,
+      help: null,
       servedModel: '',
       fellBack: false,
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null },

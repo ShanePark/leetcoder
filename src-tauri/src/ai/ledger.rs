@@ -14,6 +14,8 @@ const OUTCOME_REFUSED: &str = "refused";
 pub(super) const KIND_TESTS: &str = "tests";
 pub(super) const KIND_REVIEW: &str = "review";
 pub(super) const KIND_REVIEW_FOLLOW_UP: &str = "review-follow-up";
+pub(super) const KIND_HELP: &str = "help";
+pub(super) const KIND_HELP_FOLLOW_UP: &str = "help-follow-up";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

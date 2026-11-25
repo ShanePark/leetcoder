@@ -31,6 +31,7 @@ const requestUsage = {
 }
 
 const reviewRequest: AiReviewRequest = {
+  mode: 'review',
   selectedModelId: 'model-a',
   problemTitle: 'Two Sum',
   problemContent: '<p>Input: nums = [2,7]</p>',
@@ -308,7 +309,9 @@ describe('AI generation responses', () => {
 })
 
 describe('AI review responses', () => {
-  const result = { outcome: 'ok', review, servedModel: 'model-a', fellBack: true, usage: requestUsage }
+  const result = { outcome: 'ok', review, help: null, servedModel: 'model-a', fellBack: true, usage: requestUsage }
+  const help = { overview: 'Find two indices.', keyPoints: ['Exactly one answer exists.'], hints: ['Remember what you saw.'] }
+  const helpResult = { ...result, review: null, help }
 
   it('normalizes each outcome and drops fields outside the contract', async () => {
     const extra = {
@@ -324,6 +327,8 @@ describe('AI review responses', () => {
       const empty = { ...result, outcome, review: null }
       await expect(clientReturning(empty).reviewAiCode(reviewRequest)).resolves.toEqual(empty)
     }
+    const extraHelp = { ...helpResult, help: { ...help, extra: 1 } }
+    await expect(clientReturning(extraHelp).reviewAiCode(reviewRequest)).resolves.toEqual(helpResult)
     const unpriced = { ...result, usage: { ...requestUsage, costUsd: null } }
     await expect(clientReturning(unpriced).reviewAiCode(reviewRequest)).resolves.toEqual(unpriced)
   })
@@ -342,10 +347,17 @@ describe('AI review responses', () => {
     )
   })
 
+  it('reads a missing help key as null, as older responses have', async () => {
+    const { help: _help, ...older } = result
+    await expect(clientReturning(older).reviewAiCode(reviewRequest)).resolves.toEqual(result)
+  })
+
   it.each([
     ['a non-object', null],
     ['an unknown outcome', { ...result, outcome: 'error' }],
     ['a missing review on success', { ...result, review: null }],
+    ['both a review and help', { ...result, help }],
+    ['help on a refusal', { ...helpResult, outcome: 'refused' }],
     ['a review on a refusal', { ...result, outcome: 'refused' }],
     ['a review on a truncated result', { ...result, outcome: 'truncated' }],
     ['an empty served model', { ...result, servedModel: '' }],
@@ -368,6 +380,15 @@ describe('AI review responses', () => {
   ])('rejects a review with %s', async (_name, change) => {
     await expect(clientReturning({ ...result, review: { ...review, ...change } }).reviewAiCode(reviewRequest))
       .rejects.toThrow('The AI review response contained an invalid review.')
+  })
+
+  it.each([
+    ['a missing overview', { overview: undefined }],
+    ['non-string key points', { keyPoints: [1] }],
+    ['missing hints', { hints: undefined }],
+  ])('rejects help with %s', async (_name, change) => {
+    await expect(clientReturning({ ...helpResult, help: { ...help, ...change } }).reviewAiCode(reviewRequest))
+      .rejects.toThrow('The AI review response contained invalid help.')
   })
 
   it('rejects a review that is missing rather than null', async () => {

@@ -13,7 +13,8 @@ const TEST_RUN_NOTES: Readonly<Record<AiReviewTestRunOmission | 'included', stri
   changed: 'Based on the code only, because it changed after the last test run.',
 }
 
-export const AI_REVIEW_EMPTY_COPY = 'No review yet. Review the open solution from the editor toolbar.'
+export const AI_REVIEW_EMPTY_COPY =
+  'Nothing from AI yet. From the editor toolbar, review the open solution, or get hints while it is still unimplemented.'
 
 /** What the review was based on, for the line under its verdict. */
 export function aiReviewTestRunNote(omitted: AiReviewTestRunOmission | null): string {
@@ -48,6 +49,13 @@ export interface PartialAiReview {
   missedCases?: Array<{ input?: string; reason?: string }>
   efficiency?: { time?: string; space?: string; assessment?: string }
   improvements?: string[]
+}
+
+/** Help as far as its streamed JSON has arrived. Any field may be missing. */
+export interface PartialAiProblemHelp {
+  overview?: string
+  keyPoints?: string[]
+  hints?: string[]
 }
 
 const isVerdict = (value: unknown): value is AiReviewVerdict =>
@@ -85,6 +93,17 @@ export function partialAiReview(value: unknown): PartialAiReview {
   }
 }
 
+/** The fields of partly parsed help that have the right shape. */
+export function partialAiProblemHelp(value: unknown): PartialAiProblemHelp {
+  const document = record(value)
+  if (!document) return {}
+  return {
+    overview: text(document.overview),
+    keyPoints: texts(document.keyPoints),
+    hints: texts(document.hints),
+  }
+}
+
 type Make = (tag: string, className: string, text?: string) => HTMLElement
 
 const maker = (documentRef: Document): Make => (tag, className, text) => {
@@ -95,10 +114,10 @@ const maker = (documentRef: Document): Make => (tag, className, text) => {
 }
 
 /**
- * Render the last review into the Review tab. Model text is set only through
- * `textContent`, so it can never become markup. Empty sections are left out.
- * `conversation`, the follow-up section, goes after the review sections, and
- * `meter`, the conversation's usage, beside them.
+ * Render the last review or help answer into the AI tab. Model text is set only
+ * through `textContent`, so it can never become markup. Empty sections are left
+ * out. `conversation`, the follow-up section, goes after the answer's sections,
+ * and `meter`, the conversation's usage, beside them.
  */
 export function renderAiReviewPanel(
   body: HTMLElement,
@@ -112,9 +131,16 @@ export function renderAiReviewPanel(
     return
   }
   const main = make('div', 'review-main')
-  main.append(...reviewSections(make, stored.review))
+  const meta = `${stored.fileName} · ${stored.servedModel}`
+  let head: HTMLElement
+  if (stored.help) {
+    main.append(...helpSections(make, stored.help))
+    head = helpHead(make, meta)
+  } else {
+    main.append(...(stored.review ? reviewSections(make, stored.review) : []))
+    head = reviewHead(make, stored.review?.verdict ?? null, meta, stored.testRunOmitted)
+  }
   if (conversation) main.append(conversation)
-  const head = reviewHead(make, stored.review.verdict, `${stored.fileName} · ${stored.servedModel}`, stored.testRunOmitted)
   layout(body, make, head, meter, main)
 }
 
@@ -147,6 +173,29 @@ export function renderAiReviewDraft(
   layout(body, make, head, meter, main)
 }
 
+/** What the AI tab shows while help streams in. */
+export interface AiHelpDraft {
+  fileName: string
+  modelId: string
+  help: PartialAiProblemHelp
+}
+
+/** Render help on its way as `renderAiReviewDraft` renders a review. */
+export function renderAiHelpDraft(
+  body: HTMLElement,
+  draft: AiHelpDraft,
+  status: HTMLElement,
+  meter: HTMLElement | null = null,
+): void {
+  const make = maker(body.ownerDocument)
+  const head = helpHead(make, `${draft.fileName} · ${draft.modelId}`)
+  head.append(status)
+  const main = make('div', 'review-main')
+  main.setAttribute('aria-busy', 'true')
+  main.append(...helpSections(make, draft.help))
+  layout(body, make, head, meter, main)
+}
+
 function layout(body: HTMLElement, make: Make, head: HTMLElement, meter: HTMLElement | null, main: HTMLElement): void {
   const element = make('div', 'review-layout')
   element.append(head, ...(meter ? [meter] : []), main)
@@ -167,23 +216,51 @@ function reviewHead(
   return head
 }
 
+/** Help has no verdict, and no test run went with it. */
+function helpHead(make: Make, meta: string): HTMLElement {
+  const head = make('div', 'review-head')
+  const header = make('div', 'review-header')
+  header.append(make('span', 'review-meta', meta))
+  head.append(header)
+  return head
+}
+
+const sectionMaker = (make: Make) => (title: string, ...content: HTMLElement[]): HTMLElement => {
+  const element = make('section', 'review-section')
+  element.append(make('h3', 'review-section-title', title), ...content)
+  return element
+}
+
+/** A list of the non-blank items, or null when none is left. */
+const listMaker = (make: Make) => (items: readonly string[] | undefined, tag: 'ul' | 'ol' = 'ul'): HTMLElement | null => {
+  const entries = (items ?? []).map((item) => item.trim()).filter(Boolean)
+  if (entries.length === 0) return null
+  const element = make(tag, 'review-list')
+  element.append(...entries.map((entry) => make('li', 'review-item', entry)))
+  return element
+}
+
+/** Overview, key points, then the hints in order, gentlest first. */
+function helpSections(make: Make, help: PartialAiProblemHelp): HTMLElement[] {
+  const nodes: HTMLElement[] = []
+  const section = sectionMaker(make)
+  const list = listMaker(make)
+  const overview = help.overview?.trim()
+  if (overview) nodes.push(section('Overview', make('p', 'review-text', overview)))
+  const keyPoints = list(help.keyPoints)
+  if (keyPoints) nodes.push(section('Key points', keyPoints))
+  const hints = list(help.hints, 'ol')
+  if (hints) nodes.push(section('Hints', hints))
+  return nodes
+}
+
 function reviewSections(make: Make, review: PartialAiReview): HTMLElement[] {
   const nodes: HTMLElement[] = []
   const summary = review.summary?.trim()
   if (summary) nodes.push(make('p', 'review-summary', summary))
 
-  const section = (title: string, ...content: HTMLElement[]): HTMLElement => {
-    const element = make('section', 'review-section')
-    element.append(make('h3', 'review-section-title', title), ...content)
-    return element
-  }
-  const list = (items: readonly string[] | undefined): HTMLElement | null => {
-    const entries = (items ?? []).map((item) => item.trim()).filter(Boolean)
-    if (entries.length === 0) return null
-    const element = make('ul', 'review-list')
-    element.append(...entries.map((entry) => make('li', 'review-item', entry)))
-    return element
-  }
+  const section = sectionMaker(make)
+  const list = listMaker(make)
 
   const failureCause = review.failureCause?.trim()
   if (failureCause) nodes.push(section('Failure cause', make('p', 'review-text', failureCause)))

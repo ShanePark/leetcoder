@@ -216,6 +216,16 @@ pub(crate) struct AiReviewTestRun {
     pub diagnostics: Vec<String>,
 }
 
+/// What a review request asks for: a review of a written solution, or help
+/// with a problem before a solution exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AiReviewMode {
+    #[default]
+    Review,
+    Help,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiReviewRequest {
@@ -225,10 +235,13 @@ pub(crate) struct AiReviewRequest {
     pub entry_point: Option<String>,
     /// The whole open solution file.
     pub source: String,
-    /// Present only when the last run was made on exactly this source.
+    /// Present only when the last run was made on exactly this source. Help
+    /// ignores it.
     pub test_run: Option<AiReviewTestRun>,
     #[serde(default)]
     pub language: AiResponseLanguage,
+    #[serde(default)]
+    pub mode: AiReviewMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -267,12 +280,25 @@ pub(crate) struct AiReview {
     pub improvements: Vec<String>,
 }
 
+/// Help with a problem before a solution exists, through the help schema in
+/// `prompt.rs`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiProblemHelp {
+    pub overview: String,
+    pub key_points: Vec<String>,
+    /// Gentlest first.
+    pub hints: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiReviewResult {
     pub outcome: String,
-    /// Present only when `outcome` is `ok`.
+    /// Present only when `outcome` is `ok` in review mode.
     pub review: Option<AiReview>,
+    /// Present only when `outcome` is `ok` in help mode.
+    pub help: Option<AiProblemHelp>,
     pub served_model: String,
     pub fell_back: bool,
     pub usage: AiRequestUsage,
@@ -310,7 +336,11 @@ pub(crate) struct AiReviewFollowUpRequest {
     pub selected_model_id: String,
     /// The request the review was made from, unchanged.
     pub review: AiReviewRequest,
-    pub review_answer: AiReview,
+    /// Exactly one answer is present, the one `review.mode` asked for.
+    #[serde(default)]
+    pub review_answer: Option<AiReview>,
+    #[serde(default)]
+    pub help_answer: Option<AiProblemHelp>,
     /// Earlier completed turns, oldest first.
     pub history: Vec<AiReviewFollowUpTurn>,
     pub question: String,
@@ -589,7 +619,11 @@ fn check_review_request(request: &AiReviewRequest) -> Result<(), String> {
             "The solution file is longer than {MAX_REVIEW_SOURCE_CHARS} characters."
         ));
     }
-    if let Some(run) = &request.test_run {
+    let run = request
+        .test_run
+        .as_ref()
+        .filter(|_| request.mode == AiReviewMode::Review);
+    if let Some(run) = run {
         let optional =
             |text: &Option<String>| text.as_deref().map_or(0, |text| text.chars().count());
         let test_chars: usize = run
@@ -620,6 +654,13 @@ fn check_review_request(request: &AiReviewRequest) -> Result<(), String> {
 
 fn check_follow_up_request(request: &AiReviewFollowUpRequest) -> Result<(), String> {
     check_review_request(&request.review)?;
+    let answer_matches = match request.review.mode {
+        AiReviewMode::Review => request.review_answer.is_some() && request.help_answer.is_none(),
+        AiReviewMode::Help => request.review_answer.is_none() && request.help_answer.is_some(),
+    };
+    if !answer_matches {
+        return Err("The follow-up request was invalid.".to_string());
+    }
     let question = request.question.trim();
     if question.is_empty() {
         return Err("Type a question first.".to_string());
@@ -647,7 +688,13 @@ fn check_follow_up_request(request: &AiReviewFollowUpRequest) -> Result<(), Stri
         })
         .sum();
     if request.history.len() > MAX_FOLLOW_UP_TURNS || history_chars > MAX_FOLLOW_UP_HISTORY_CHARS {
-        return Err("This conversation is too long. Run a new review to continue.".to_string());
+        let restart = match request.review.mode {
+            AiReviewMode::Review => "Run a new review",
+            AiReviewMode::Help => "Ask for help again",
+        };
+        return Err(format!(
+            "This conversation is too long. {restart} to continue."
+        ));
     }
     Ok(())
 }
@@ -834,8 +881,8 @@ async fn generate_tests(
     })
 }
 
-/// Streams a review to `on_event` as it is written. The result is still the
-/// whole document, read and checked once the stream ends.
+/// Streams a review, or help in help mode, to `on_event` as it is written. The
+/// result is still the whole document, read and checked once the stream ends.
 async fn review_code(
     base_url: &str,
     paths: &AiPaths,
@@ -843,6 +890,60 @@ async fn review_code(
     progress: &(dyn Fn(AiProgressEvent) + Sync),
     on_event: &(dyn Fn(AiStreamEvent) + Sync),
 ) -> Result<AiReviewResult, String> {
+    Ok(match request.mode {
+        AiReviewMode::Review => {
+            let completion = stream_document(
+                base_url,
+                paths,
+                request,
+                ledger::KIND_REVIEW,
+                claude::parse_review,
+                progress,
+                on_event,
+            )
+            .await?;
+            AiReviewResult {
+                outcome: completion.outcome.to_string(),
+                review: completion.value,
+                help: None,
+                served_model: completion.served_model,
+                fell_back: completion.fell_back,
+                usage: completion.usage,
+            }
+        }
+        AiReviewMode::Help => {
+            let completion = stream_document(
+                base_url,
+                paths,
+                request,
+                ledger::KIND_HELP,
+                claude::parse_help,
+                progress,
+                on_event,
+            )
+            .await?;
+            AiReviewResult {
+                outcome: completion.outcome.to_string(),
+                review: None,
+                help: completion.value,
+                served_model: completion.served_model,
+                fell_back: completion.fell_back,
+                usage: completion.usage,
+            }
+        }
+    })
+}
+
+/// Sends one streamed request for a JSON document and records its usage.
+async fn stream_document<T>(
+    base_url: &str,
+    paths: &AiPaths,
+    request: &AiReviewRequest,
+    kind: &str,
+    parse: fn(&Value) -> Option<T>,
+    progress: &(dyn Fn(AiProgressEvent) + Sync),
+    on_event: &(dyn Fn(AiStreamEvent) + Sync),
+) -> Result<Completion<T>, String> {
     check_review_request(request)?;
     let target = call_target(base_url, paths, request.selected_model_id.as_deref()).await?;
     let served = &target.resolved.served;
@@ -861,15 +962,8 @@ async fn review_code(
             Err(error) => return Err(call_error(base_url, paths, &target, error).await),
         };
     progress(AiProgressEvent::Received);
-    let reply = claude::streamed_document(streamed.reply, &streamed.text, claude::parse_review);
-    let completion = settle(paths, ledger::KIND_REVIEW, reply, target.resolved.fell_back)?;
-    Ok(AiReviewResult {
-        outcome: completion.outcome.to_string(),
-        review: completion.value,
-        served_model: completion.served_model,
-        fell_back: completion.fell_back,
-        usage: completion.usage,
-    })
+    let reply = claude::streamed_document(streamed.reply, &streamed.text, parse);
+    settle(paths, kind, reply, target.resolved.fell_back)
 }
 
 /// Why a code change the model started is not offered.
@@ -967,12 +1061,11 @@ async fn review_follow_up(
             Ok(streamed) => streamed,
             Err(error) => return Err(call_error(base_url, paths, &target, error).await),
         };
-    let completion = settle(
-        paths,
-        ledger::KIND_REVIEW_FOLLOW_UP,
-        streamed.reply,
-        target.resolved.fell_back,
-    )?;
+    let kind = match request.review.mode {
+        AiReviewMode::Review => ledger::KIND_REVIEW_FOLLOW_UP,
+        AiReviewMode::Help => ledger::KIND_HELP_FOLLOW_UP,
+    };
+    let completion = settle(paths, kind, streamed.reply, target.resolved.fell_back)?;
     let mut answer = streamed.text;
     // A refusal already says that nothing came of the request.
     let proposal = match streamed.tool_use {

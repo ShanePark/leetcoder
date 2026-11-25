@@ -1,14 +1,16 @@
 import { parsePartialJson } from '../partial-json'
 import type { AiReviewStream } from './ai-controller'
-import { partialAiReview, renderAiReviewDraft } from './ai-review-view'
+import { partialAiProblemHelp, partialAiReview, renderAiHelpDraft, renderAiReviewDraft } from './ai-review-view'
 
 export const AI_REVIEW_THINKING = 'Thinking…'
 export const AI_REVIEW_WRITING = 'Writing the review…'
+export const AI_HELP_WRITING = 'Writing hints…'
 
 /** What the model is doing, the whole seconds since the request was sent, and the model. */
 export function aiReviewStreamStatus(stream: AiReviewStream, now: number): string {
   const seconds = Math.max(0, Math.floor((now - stream.startedAt) / 1000))
-  return `${stream.text ? AI_REVIEW_WRITING : AI_REVIEW_THINKING} ${seconds}s · ${stream.modelName}`
+  const writing = stream.mode === 'help' ? AI_HELP_WRITING : AI_REVIEW_WRITING
+  return `${stream.text ? writing : AI_REVIEW_THINKING} ${seconds}s · ${stream.modelName}`
 }
 
 export interface AiReviewStreamViewOptions {
@@ -19,7 +21,7 @@ export interface AiReviewStreamViewOptions {
 }
 
 /**
- * Shows a review in the Review tab while its JSON streams in. Each frame
+ * Shows a review or help answer in the AI tab while its JSON streams in. Each frame
  * parses the text so far and renders the sections that have arrived with the
  * finished review's renderer; deltas between frames are coalesced. The status
  * line ticks every second without a render, so its spinner keeps turning.
@@ -67,12 +69,21 @@ export class AiReviewStreamView {
   render(): void {
     const stream = this.current
     if (!stream) return
-    renderAiReviewDraft(this.options.body(), {
-      fileName: stream.fileName,
-      modelId: stream.modelId,
-      testRunOmitted: stream.testRunOmitted,
-      review: partialAiReview(parsePartialJson(stream.text)),
-    }, this.statusElement(), this.options.meter())
+    const parsed = parsePartialJson(stream.text)
+    if (stream.mode === 'help') {
+      renderAiHelpDraft(this.options.body(), {
+        fileName: stream.fileName,
+        modelId: stream.modelId,
+        help: partialAiProblemHelp(parsed),
+      }, this.statusElement(), this.options.meter())
+    } else {
+      renderAiReviewDraft(this.options.body(), {
+        fileName: stream.fileName,
+        modelId: stream.modelId,
+        testRunOmitted: stream.testRunOmitted,
+        review: partialAiReview(parsed),
+      }, this.statusElement(), this.options.meter())
+    }
     this.tick()
   }
 

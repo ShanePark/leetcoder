@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AiReviewFollowUp } from '../../../src/app/ai-follow-up'
 import { emptyLiveUsage } from '../../../src/app/ai-usage-meter'
 import {
+  AI_FOLLOW_UP_HELP_PLACEHOLDER,
   AI_FOLLOW_UP_NO_REVIEW_PLACEHOLDER,
   AI_FOLLOW_UP_PLACEHOLDER,
   AI_PROPOSAL_PREPARING,
@@ -136,16 +137,23 @@ const turn = (overrides: Partial<AiReviewFollowUp> = {}): AiReviewFollowUp => ({
 describe('follow-up composer', () => {
   it('is disabled without a review and says why', () => {
     const { view, input, sendButton, type } = setup()
-    view.update({ hasReview: false, busy: false })
+    view.update({ hasReview: false, help: false, busy: false })
     type('question')
     expect(input.disabled).toBe(true)
     expect(input.placeholder).toBe(AI_FOLLOW_UP_NO_REVIEW_PLACEHOLDER)
     expect(sendButton.disabled).toBe(true)
   })
 
+  it('asks about the problem after AI help', () => {
+    const { view, input } = setup()
+    view.update({ hasReview: true, help: true, busy: false })
+    expect(input.disabled).toBe(false)
+    expect(input.placeholder).toBe(AI_FOLLOW_UP_HELP_PLACEHOLDER)
+  })
+
   it('enables Send only for a non-empty question while no AI request runs', () => {
     const { view, input, sendButton, type } = setup()
-    view.update({ hasReview: true, busy: false })
+    view.update({ hasReview: true, help: false, busy: false })
     expect(input.disabled).toBe(false)
     expect(input.placeholder).toBe(AI_FOLLOW_UP_PLACEHOLDER)
     expect(sendButton.disabled).toBe(true)
@@ -153,7 +161,7 @@ describe('follow-up composer', () => {
     expect(sendButton.disabled).toBe(true)
     type('Why?')
     expect(sendButton.disabled).toBe(false)
-    view.update({ hasReview: true, busy: true })
+    view.update({ hasReview: true, help: false, busy: true })
     expect(sendButton.disabled).toBe(true)
     expect(sendButton.title).toBe('Available when the current AI request finishes')
     // The draft stays editable while a request runs.
@@ -163,7 +171,7 @@ describe('follow-up composer', () => {
   it('sends on Enter, clears the input, and keeps focus in it', () => {
     const send = vi.fn(async () => true)
     const { view, input, type, key, document } = setup(send)
-    view.update({ hasReview: true, busy: false })
+    view.update({ hasReview: true, help: false, busy: false })
     type('  Why O(n)?  ')
     const event = key()
     expect(event.preventDefault).toHaveBeenCalled()
@@ -175,7 +183,7 @@ describe('follow-up composer', () => {
   it('leaves Shift+Enter, modified Enter, and IME composition to the textarea', () => {
     const send = vi.fn(async () => true)
     const { view, type, key } = setup(send)
-    view.update({ hasReview: true, busy: false })
+    view.update({ hasReview: true, help: false, busy: false })
     type('line one')
     for (const init of [{ shiftKey: true }, { isComposing: true }, { keyCode: 229 }, { ctrlKey: true }, { metaKey: true }, { altKey: true }]) {
       expect(key(init).preventDefault).not.toHaveBeenCalled()
@@ -187,13 +195,13 @@ describe('follow-up composer', () => {
   it('sends nothing on Enter while busy, empty, or without a review, and inserts no newline', () => {
     const send = vi.fn(async () => true)
     const { view, type, key, input } = setup(send)
-    view.update({ hasReview: true, busy: true })
+    view.update({ hasReview: true, help: false, busy: true })
     type('Why?')
     expect(key().preventDefault).toHaveBeenCalled()
-    view.update({ hasReview: true, busy: false })
+    view.update({ hasReview: true, help: false, busy: false })
     type(' ')
     key()
-    view.update({ hasReview: false, busy: false })
+    view.update({ hasReview: false, help: false, busy: false })
     type('Why?')
     key()
     expect(send).not.toHaveBeenCalled()
@@ -203,7 +211,7 @@ describe('follow-up composer', () => {
   it('sends from the form submit and returns focus to the input', () => {
     const send = vi.fn(async () => true)
     const { view, type, element, input, sendButton, document } = setup(send)
-    view.update({ hasReview: true, busy: false })
+    view.update({ hasReview: true, help: false, busy: false })
     type('Why?')
     sendButton.focus()
     const preventDefault = vi.fn()
@@ -219,7 +227,7 @@ describe('follow-up composer', () => {
       answer = resolve
     }))
     const { view, type, key, input, sendButton } = setup(send)
-    view.update({ hasReview: true, busy: false })
+    view.update({ hasReview: true, help: false, busy: false })
     type('First?')
     key()
     type('next draft')
@@ -260,7 +268,7 @@ describe('follow-up composer', () => {
     }
     // A border-box textarea with 1px borders: offsetHeight - clientHeight is 2.
     const box = Object.assign(input, { style, offsetHeight: 30, clientHeight: 28, scrollHeight: 28 })
-    view.update({ hasReview: true, busy: false })
+    view.update({ hasReview: true, help: false, busy: false })
     const section = view.renderConversation([turn({ answer: 'Each element is visited once.', status: 'done' })])!
     review.append(section)
     const rendered = [...section.children]

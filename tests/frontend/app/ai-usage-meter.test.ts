@@ -105,6 +105,7 @@ const storedReview = (followUps: AiReviewFollowUp[] = []): StoredAiReview => ({
     efficiency: { time: '', space: '', assessment: '' },
     improvements: [],
   },
+  help: null,
   fileName: 'Q1TwoSum.java',
   servedModel: 'model-a',
   servedModelName: 'Model A',
@@ -112,6 +113,7 @@ const storedReview = (followUps: AiReviewFollowUp[] = []): StoredAiReview => ({
   usage: settled(tokens(1_000, 100, 500), 0.0016),
   pricing,
   request: {
+    mode: 'review',
     selectedModelId: 'model-a',
     problemTitle: 'Two Sum',
     problemContent: '<p>Two Sum</p>',
@@ -135,6 +137,7 @@ const followUp = (usage: AiRequestUsage | null, liveUsage: AiLiveUsage = emptyLi
 })
 
 const stream = (overrides: Partial<AiReviewStream> = {}): AiReviewStream => ({
+  mode: 'review',
   fileName: 'Q1TwoSum.java',
   modelId: 'model-a',
   modelName: 'Model A',
@@ -192,8 +195,20 @@ describe('meter state', () => {
       entries: [{ label: 'Review', tokens: tokens(2_000, 10), costUsd: 0.00205, estimated: true }],
       modelName: 'Model A',
       modelId: 'model-a',
+      help: false,
       testRunOmitted: 'changed',
     })
+  })
+
+  it('labels a help answer as help, on its way and settled', () => {
+    expect(aiMeterState(null, stream({ mode: 'help', testRunOmitted: 'no-run' }))).toMatchObject({
+      entries: [{ label: 'Help' }],
+      help: true,
+    })
+    const stored = storedReview([followUp(settled(tokens(1, 1), 0))])
+    const state = aiMeterState({ ...stored, request: { ...stored.request, mode: 'help' } }, null)!
+    expect(state.entries.map(({ label }) => label)).toEqual(['Help', 'Follow-up 1'])
+    expect(state.help).toBe(true)
   })
 
   it('counts the review and each follow-up, settled or still running', () => {
@@ -240,6 +255,7 @@ describe('usage meter', () => {
     entries,
     modelName: 'Model A',
     modelId: 'model-a',
+    help: false,
     testRunOmitted: null,
     ...overrides,
   })
@@ -280,7 +296,10 @@ describe('usage meter', () => {
     expect(element.texts('review-usage-cost')).toEqual(['≈ $0.2500'])
     expect(element.all('review-usage-request')[0].className).toBe('review-usage-request is-estimated')
     expect(element.texts('review-usage-summary')).toEqual(['1 request'])
-    expect(element.all('review-usage-tests')[0].textContent).toBe('Test results not included')
+    expect(element.all('review-usage-tests')[0]).toMatchObject({ textContent: 'Test results not included', hidden: false })
+
+    meter.update(state([entry(tokens(10, 2), 0.25, true, 'Help')], { help: true, testRunOmitted: 'no-run' }))
+    expect(element.all('review-usage-tests')[0].hidden).toBe(true)
 
     meter.update(state([entry(tokens(10, 2), null)]))
     expect(element.all('review-usage-cost')[0]).toMatchObject({ className: 'review-usage-cost is-unknown', textContent: 'Cost unknown' })

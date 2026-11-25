@@ -37,6 +37,7 @@ import {
   AI_FOLLOW_UP_TOKENS,
   AI_GENERATION_USAGE,
   AI_MODELS,
+  AI_PROBLEM_HELP,
   AI_REVIEW,
   AI_REVIEW_TOKENS,
   AI_STATEMENTS,
@@ -399,19 +400,20 @@ function createMockAi(): MockAi {
         throw new Error('The solution file is empty.')
       }
       const { servedModel, fellBack } = mockServedModel(request.selectedModelId)
-      const failed = request.testRun !== null && !request.testRun.success
-      const review = failed ? AI_FAILING_REVIEW : AI_REVIEW
+      const help = request.mode === 'help'
+      const failed = !help && request.testRun !== null && !request.testRun.success
+      const review = help ? null : failed ? AI_FAILING_REVIEW : AI_REVIEW
       await delay(100)
       onProgress?.({ stage: 'requesting', model: servedModel })
       await delay(400)
       onEvent?.(mockStreamUsage(AI_REVIEW_TOKENS, false))
-      // A thinking pause, then the review's JSON in small pieces over about 2.5 seconds.
+      // A thinking pause, then the answer's JSON in small pieces over about 2.5 seconds.
       onEvent?.({ kind: 'thinking', chars: 0 })
       for (let step = 0; step < 6; step += 1) {
         await delay(250)
         onEvent?.({ kind: 'thinking', chars: 40 })
       }
-      const pieces = JSON.stringify(review).match(/[\s\S]{1,16}/g) ?? []
+      const pieces = JSON.stringify(review ?? AI_PROBLEM_HELP).match(/[\s\S]{1,16}/g) ?? []
       for (const piece of pieces) {
         onEvent?.({ kind: 'text', text: piece })
         await delay(Math.round(2_500 / pieces.length))
@@ -424,6 +426,7 @@ function createMockAi(): MockAi {
       return {
         outcome: 'ok',
         review,
+        help: help ? AI_PROBLEM_HELP : null,
         servedModel,
         fellBack,
         usage: requestUsage,
@@ -439,6 +442,11 @@ function createMockAi(): MockAi {
       }
       if (request.question.trim() === '') {
         throw new Error('The question is empty.')
+      }
+      const help = request.review.mode === 'help'
+      if ((help ? request.helpAnswer : request.reviewAnswer) === null
+        || (help ? request.reviewAnswer : request.helpAnswer) !== null) {
+        throw new Error('The follow-up answer does not match the request mode.')
       }
       const { servedModel, fellBack } = mockServedModel(request.selectedModelId)
       const editing = AI_EDIT_REQUEST.test(request.question)

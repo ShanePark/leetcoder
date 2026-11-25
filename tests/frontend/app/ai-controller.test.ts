@@ -17,6 +17,7 @@ import type {
   AiGenerateResult,
   AiModelList,
   AiModelPricing,
+  AiProblemHelp,
   AiProgressHandler,
   AiRequestUsage,
   AiStreamHandler,
@@ -35,6 +36,7 @@ import {
   aiButtonPresentation,
   aiProblemNumber,
   aiReviewButtonPresentation,
+  aiReviewMode,
   aiReviewTestRun,
   aiReviewTestRunSelection,
   createAiController,
@@ -1139,6 +1141,39 @@ describe('AI test generation button', () => {
       expect(reviewButton().hidden).toBe(true)
     })
 
+    it('offers help while the solution is unimplemented and follows edits', async () => {
+      const backend = reviewBackend()
+      vi.mocked(backend.reviewAiCode).mockResolvedValue(helpResult)
+      const unimplemented = javaSource('        assertThat()').replace('        return new int[] {secretBodyValue};\n', '        // TODO\n')
+      await openStub(backend, unimplemented)
+
+      expect(reviewButton().dataset.icon).toBe('lightbulb')
+      expect(reviewButton().dataset.text).toBe('AI help')
+      expect(reviewButton().title).toBe('Get hints from AI')
+      editor().emitChange(filledSource)
+      expect(reviewButton().dataset.text).toBe('AI review')
+      editor().emitChange(unimplemented)
+      expect(reviewButton().dataset.text).toBe('AI help')
+
+      reviewButton().dispatch('click')
+      await vi.waitFor(() => {
+        expect(picker('title').textContent).toBe('Get help')
+      })
+      expect(picker('test-run').hidden).toBe(true)
+      picker('form').dispatch('submit', { preventDefault: vi.fn() })
+      await vi.waitFor(() => {
+        expect(reviewTab().attributes.get('aria-selected')).toBe('true')
+      })
+      expect(vi.mocked(backend.reviewAiCode).mock.calls[0][0]).toMatchObject({ mode: 'help', testRun: null })
+      await vi.waitFor(() => {
+        expect(reviewButton().disabled).toBe(false)
+      })
+      const main = dom.root.querySelector<FakeElement>('#review-body').children[0].children[2]
+      expect(main.children.map((section) => section.children[0]?.textContent)).toEqual(['Overview', 'Key points', 'Hints'])
+      expect((dom.root.querySelector<FakeElement>('#review-follow-up-input') as unknown as { placeholder: string }).placeholder)
+        .toBe('Ask about this problem (Shift+Enter for a new line)')
+    })
+
     const picker = (selector: string): FakeElement => dom.root.querySelector<FakeElement>(`#ai-review-model-${selector}`)
     type FakeRadio = FakeElement & { checked?: boolean }
     const pickerRows = (): FakeElement[] => picker('list').children
@@ -1648,7 +1683,18 @@ const reviewUsage: AiRequestUsage = {
 const classNames = (elements: readonly FakeElement[]): string[] =>
   elements.map((element) => (element as unknown as { className: string }).className)
 
-const reviewResult: AiReviewResult = { outcome: 'ok', review, servedModel: 'model-a', fellBack: false, usage: reviewUsage }
+const reviewResult: AiReviewResult = { outcome: 'ok', review, help: null, servedModel: 'model-a', fellBack: false, usage: reviewUsage }
+
+const problemHelp: AiProblemHelp = {
+  overview: 'Find two indices whose values add up to the target.',
+  keyPoints: ['Exactly one answer exists.'],
+  hints: ['Remember the values you have seen.'],
+}
+
+const helpResult: AiReviewResult = { ...reviewResult, review: null, help: problemHelp }
+
+/** The scaffold with an empty solution method. */
+const unimplementedSource = 'class Q1TwoSum {\n    public int[] twoSum(int[] nums, int target) {\n\n    }\n}'
 
 const pricing = (inputPerMTok: number, outputPerMTok: number): AiModelPricing => ({
   inputPerMTok,
@@ -1855,6 +1901,7 @@ describe('AI review', () => {
 
     expect(api.reviewAiCode).toHaveBeenCalledOnce()
     expect(vi.mocked(api.reviewAiCode).mock.calls[0][0]).toEqual({
+      mode: 'review',
       selectedModelId: 'model-review',
       problemTitle: problemOne.title,
       problemContent: problemOne.content,
@@ -1865,6 +1912,7 @@ describe('AI review', () => {
     })
     expect(ui.reviewed).toHaveBeenCalledWith({
       review,
+      help: null,
       fileName: 'Q1TwoSum.java',
       servedModel: 'model-a',
       servedModelName: 'model-a',
@@ -1928,6 +1976,7 @@ describe('AI review', () => {
     })
     const stream = vi.mocked(ui.reviewStreamChanged).mock.calls[0][0]!
     expect(stream).toEqual({
+      mode: 'review',
       fileName: 'Q1TwoSum.java',
       modelId: 'model-mid',
       modelName: 'Mid Name',
@@ -2018,6 +2067,7 @@ describe('AI review', () => {
     })
     expect(api.aiListModels).toHaveBeenCalledWith(false)
     expect(chooseReviewModel.mock.calls[0][0]).toEqual({
+      mode: 'review',
       fileName: 'Q1TwoSum.java',
       provider,
       models: reviewModels,
@@ -2101,6 +2151,80 @@ describe('AI review', () => {
     await empty.controller.review()
     expect(empty.api.reviewAiCode).not.toHaveBeenCalled()
     expect(empty.ui.showMessage).toHaveBeenCalledWith('Q1TwoSum.java is empty. No request was sent.', 'error')
+  })
+})
+
+describe('AI help', () => {
+  it('asks for help without the test run when the solution is unimplemented at the click', async () => {
+    const testRun = aiReviewTestRun(passingRun)
+    const { controller, api, ui } = unitController({
+      readSource: () => unimplementedSource,
+      reviewTestRun: () => ({ testRun, omitted: null }),
+      reviewAiCode: vi.fn(async () => helpResult),
+    })
+
+    await controller.review()
+
+    expect(vi.mocked(ui.chooseReviewModel).mock.calls[0][0].mode).toBe('help')
+    expect(vi.mocked(ui.reviewStreamChanged).mock.calls[0][0]).toMatchObject({ mode: 'help', testRunOmitted: 'no-run' })
+    expect(vi.mocked(api.reviewAiCode).mock.calls[0][0]).toMatchObject({
+      mode: 'help',
+      source: unimplementedSource,
+      testRun: null,
+    })
+    expect(ui.reviewed).toHaveBeenCalledWith(expect.objectContaining({
+      review: null,
+      help: problemHelp,
+      testRunOmitted: 'no-run',
+      request: expect.objectContaining({ mode: 'help' }),
+    }))
+  })
+
+  it('keeps the mode chosen at the click while the request runs', async () => {
+    let source = unimplementedSource
+    const choice = deferred<AiReviewModelChoice | null>()
+    const pending = deferred<AiReviewResult>()
+    const { controller, api } = unitController(
+      { readSource: () => source, reviewAiCode: vi.fn(() => pending.promise) },
+      { chooseReviewModel: vi.fn(() => choice.promise) },
+    )
+    expect(controller.reviewMode).toBeNull()
+    const asking = controller.review()
+    await vi.waitFor(() => {
+      expect(api.aiListModels).toHaveBeenCalled()
+    })
+    source = 'class Q1TwoSum { int[] twoSum() { return null; } }'
+    choice.resolve({ modelId: 'model-mid' })
+    await vi.waitFor(() => {
+      expect(api.reviewAiCode).toHaveBeenCalledOnce()
+    })
+    expect(controller.reviewMode).toBe('help')
+    expect(vi.mocked(api.reviewAiCode).mock.calls[0][0].mode).toBe('help')
+    pending.resolve(helpResult)
+    await asking
+    expect(controller.reviewMode).toBeNull()
+  })
+
+  it.each([
+    ['refused', 'The model declined to help with Q1TwoSum.java.'],
+    ['truncated', 'The response hit the output limit before it finished, so no help is shown.'],
+  ] as const)('shows %s help as an error', async (outcome, message) => {
+    const { controller, ui } = unitController({
+      readSource: () => unimplementedSource,
+      reviewAiCode: vi.fn(async () => ({ ...helpResult, outcome, help: null })),
+    })
+    await controller.review()
+    expect(ui.reviewed).not.toHaveBeenCalled()
+    expect(ui.showMessage).toHaveBeenCalledWith(expect.stringContaining(message), 'error')
+  })
+
+  it('names help in a failed call', async () => {
+    const { controller, ui } = unitController({
+      readSource: () => unimplementedSource,
+      reviewAiCode: vi.fn(async () => { throw new Error('too long') }),
+    })
+    await controller.review()
+    expect(ui.showMessage).toHaveBeenCalledWith('Could not get help: too long', 'error')
   })
 })
 
@@ -2197,7 +2321,7 @@ describe('AI review button', () => {
   const path = 'src/main/java/easy/Q1TwoSum.java'
 
   it('shows for the loaded problem file and waits for other work', () => {
-    expect(aiReviewButtonPresentation(path, null, null, false, problemOne)).toMatchObject({
+    expect(aiReviewButtonPresentation(path, null, null, false, problemOne, 'review', null)).toMatchObject({
       icon: 'review',
       hidden: false,
       disabled: false,
@@ -2205,19 +2329,39 @@ describe('AI review button', () => {
       label: 'Review code with AI',
       title: 'Review code with AI',
     })
-    expect(aiReviewButtonPresentation(path, null, null, true, problemOne)).toMatchObject({ hidden: false, disabled: true })
-    expect(aiReviewButtonPresentation(path, path, 'examples', false, problemOne)).toMatchObject({
+    expect(aiReviewButtonPresentation(path, null, null, true, problemOne, 'review', null)).toMatchObject({ hidden: false, disabled: true })
+    expect(aiReviewButtonPresentation(path, path, 'examples', false, problemOne, 'review', null)).toMatchObject({
       hidden: false,
       disabled: true,
       busy: false,
     })
-    expect(aiReviewButtonPresentation(path, null, null, false, { ...problemOne, frontendId: '9' }).hidden).toBe(true)
-    expect(aiReviewButtonPresentation(path, null, null, false, { ...problemOne, content: null }).hidden).toBe(true)
-    expect(aiReviewButtonPresentation(null, null, null, false, problemOne).hidden).toBe(true)
+    expect(aiReviewButtonPresentation(path, null, null, false, { ...problemOne, frontendId: '9' }, 'review', null).hidden).toBe(true)
+    expect(aiReviewButtonPresentation(path, null, null, false, { ...problemOne, content: null }, 'review', null).hidden).toBe(true)
+    expect(aiReviewButtonPresentation(null, null, null, false, problemOne, 'review', null).hidden).toBe(true)
+  })
+
+  it('offers help while the solution is unimplemented', () => {
+    expect(aiReviewMode(unimplementedSource)).toBe('help')
+    expect(aiReviewMode('class Q1TwoSum { int[] twoSum() { return null; } }')).toBe('review')
+    expect(aiReviewButtonPresentation(path, null, null, false, problemOne, 'help', null)).toMatchObject({
+      icon: 'lightbulb',
+      hidden: false,
+      disabled: false,
+      text: 'AI help',
+      label: 'Get hints from AI',
+      title: 'Get hints from AI',
+    })
+    expect(aiReviewButtonPresentation(path, path, 'review', false, problemOne, 'review', 'help')).toMatchObject({
+      icon: 'loader',
+      busy: true,
+      text: 'AI help',
+      label: 'Getting AI help',
+      title: 'Getting help for Q1TwoSum.java…',
+    })
   })
 
   it('spins while a review runs, and the generate button waits for it', () => {
-    expect(aiReviewButtonPresentation(path, path, 'review', false, problemOne)).toMatchObject({
+    expect(aiReviewButtonPresentation(path, path, 'review', false, problemOne, 'help', 'review')).toMatchObject({
       icon: 'loader',
       busy: true,
       disabled: true,

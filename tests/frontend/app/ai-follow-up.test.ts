@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type {
   AiStreamEvent,
   AiGenerateResult,
+  AiProblemHelp,
   AiRequestUsage,
   AiReview,
   AiReviewFollowUpResult,
@@ -37,6 +38,7 @@ const review: AiReview = {
 }
 
 const reviewRequest: AiReviewRequest = {
+  mode: 'review',
   selectedModelId: 'model-picked',
   problemTitle: 'Two Sum',
   problemContent: '<p>Two Sum</p>',
@@ -67,7 +69,8 @@ const turn = (overrides: Partial<AiReviewFollowUp>): AiReviewFollowUp => ({
 })
 
 const target = { repoPath: '/repo', path: 'src/Q1TwoSum.java', repositoryGeneration: 1 }
-const editedSource = 'class Q1TwoSum { /* edited since */ }'
+// Written code, so the editor toolbar offers a review rather than help.
+const editedSource = 'class Q1TwoSum { int solve() { return 0; /* edited since */ } }'
 
 const pendingProposal = (baseCode = editedSource) => aiFollowUpProposal({
   summary: 'Return early',
@@ -77,6 +80,7 @@ const pendingProposal = (baseCode = editedSource) => aiFollowUpProposal({
 
 const storedReview = (followUps: AiReviewFollowUp[] = []): StoredAiReview => ({
   review,
+  help: null,
   fileName: 'Q1TwoSum.java',
   servedModel: 'model-served',
   servedModelName: 'Served',
@@ -105,7 +109,7 @@ function setup(api: Partial<AiControllerApi> = {}, ui: Partial<AiControllerUi> =
     aiListModels: vi.fn(async () => ({ models: [], defaultModelId: null, fetchedAt: null, error: null })),
     aiGenerateTests: vi.fn(async (): Promise<AiGenerateResult> => ({ outcome: 'ok', statements: [], servedModel: 'm', fellBack: false })),
     reviewAiCode: vi.fn(async (): Promise<AiReviewResult> => ({
-      outcome: 'ok', review, servedModel: 'model-new', fellBack: false, usage,
+      outcome: 'ok', review, help: null, servedModel: 'model-new', fellBack: false, usage,
     })),
     askAiReviewFollowUp: vi.fn(async () => okResult),
     currentTarget: () => target,
@@ -177,6 +181,7 @@ describe('review follow-up flow', () => {
       selectedModelId: 'model-served',
       review: reviewRequest,
       reviewAnswer: review,
+      helpAnswer: null,
       history: [{ question: 'Q1', answer: 'A1' }, { question: 'Q2', answer: 'part' }],
       question: 'Why O(n)?',
       currentCode: editedSource,
@@ -209,6 +214,24 @@ describe('review follow-up flow', () => {
     expect(ui.showProgress).not.toHaveBeenCalled()
     expect(ui.showMessage).not.toHaveBeenCalled()
     expect(ui.proposalArrived).not.toHaveBeenCalled()
+  })
+
+  it('sends the help answer instead of a review for help', async () => {
+    const { controller, api } = setup({ askAiReviewFollowUp: vi.fn(async () => okResult) })
+    const help: AiProblemHelp = { overview: 'Find two indices.', keyPoints: [], hints: ['Remember what you saw.'] }
+    const stored: StoredAiReview = {
+      ...storedReview(),
+      review: null,
+      help,
+      request: { ...reviewRequest, mode: 'help' },
+    }
+
+    await expect(controller.askFollowUp(stored, 'What is the approach?')).resolves.toBe(true)
+    expect(vi.mocked(api.askAiReviewFollowUp).mock.calls[0][0]).toMatchObject({
+      review: { mode: 'help' },
+      reviewAnswer: null,
+      helpAnswer: help,
+    })
   })
 
   it('counts streamed usage and thinking without redrawing the answer', async () => {
@@ -333,7 +356,7 @@ describe('review follow-up flow', () => {
       expect(controller.requestKind).toBe('review')
     })
     await expect(controller.askFollowUp(storedReview(), 'Q')).resolves.toBe(false)
-    pendingReview.resolve({ outcome: 'ok', review, servedModel: 'model-new', fellBack: false, usage })
+    pendingReview.resolve({ outcome: 'ok', review, help: null, servedModel: 'model-new', fellBack: false, usage })
     await reviewing
     expect(api.askAiReviewFollowUp).not.toHaveBeenCalled()
   })
@@ -347,7 +370,7 @@ describe('review follow-up flow', () => {
     expect(next).not.toBe(stored)
     expect(next.followUps).toEqual([])
     expect(next.request).toEqual(vi.mocked(api.reviewAiCode).mock.calls[0][0])
-    expect(next.request.source).toBe('class Q1TwoSum { /* edited since */ }')
+    expect(next.request.source).toBe(editedSource)
     expect(stored.followUps).toHaveLength(1)
   })
 

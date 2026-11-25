@@ -2469,6 +2469,7 @@ fn review_request(selected: Option<&str>) -> AiReviewRequest {
             diagnostics: vec!["SENTINELDIAGNOSTIC".to_string()],
         }),
         language: AiResponseLanguage::Korean,
+        mode: AiReviewMode::Review,
     }
 }
 
@@ -3027,6 +3028,7 @@ fn review_request_deserializes_from_camel_case_with_an_english_default() {
     }))
     .unwrap();
     assert_eq!(request.language, AiResponseLanguage::English);
+    assert_eq!(request.mode, AiReviewMode::Review);
     assert!(request.test_run.is_none());
 
     let request: AiReviewRequest = serde_json::from_value(json!({
@@ -3069,6 +3071,7 @@ fn review_and_progress_dtos_serialize_the_contract_shapes() {
         serde_json::to_value(AiReviewResult {
             outcome: "ok".to_string(),
             review: Some(sample_review()),
+            help: None,
             served_model: "m".to_string(),
             fell_back: false,
             usage: AiRequestUsage {
@@ -3098,6 +3101,7 @@ fn review_and_progress_dtos_serialize_the_contract_shapes() {
                 },
                 "improvements": [],
             },
+            "help": null,
             "servedModel": "m",
             "fellBack": false,
             "usage": {
@@ -3128,6 +3132,7 @@ fn review_and_progress_dtos_serialize_the_contract_shapes() {
         serde_json::to_value(AiReviewResult {
             outcome: "refused".to_string(),
             review: None,
+            help: None,
             served_model: "m".to_string(),
             fell_back: true,
             usage: AiRequestUsage {
@@ -3176,6 +3181,271 @@ fn the_review_schema_requires_every_field_it_defines() {
     assert_eq!(claude::parse_review(&document), Some(sample_review()));
 }
 
+// Help
+
+fn help_request() -> AiReviewRequest {
+    let mut request = review_request(None);
+    request.mode = AiReviewMode::Help;
+    request.source =
+        "class Q1TwoSum { int[] twoSum(int[] nums, int target) { SENTINELSTARTER } }".to_string();
+    request
+}
+
+fn sample_help() -> AiProblemHelp {
+    AiProblemHelp {
+        overview: "Return the indices of the two numbers that add up to target.".to_string(),
+        key_points: vec![
+            "Exactly one pair is a valid answer.".to_string(),
+            "With 10^4 numbers, checking every pair is slow.".to_string(),
+        ],
+        hints: vec![
+            "For nums[i], which value would complete the pair?".to_string(),
+            "Remember the values you have already passed.".to_string(),
+        ],
+    }
+}
+
+fn help_json() -> String {
+    serde_json::to_string(&sample_help()).unwrap()
+}
+
+#[test]
+fn help_sends_its_own_cached_prompt_without_the_run_and_returns_the_parsed_help() {
+    let (_root, paths) = haiku_paths();
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &[&help_json()])]);
+    let streamed = text_recorder();
+    let request = help_request();
+    let result = block_on(review_code(
+        &base_url,
+        &paths,
+        &request,
+        &no_progress,
+        &|event| record_event(&streamed, event),
+    ))
+    .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(result.outcome, "ok");
+    assert_eq!(result.help, Some(sample_help()));
+    assert_eq!(result.review, None);
+    assert_eq!(result.served_model, "model-a");
+    assert_eq!(streamed.lock().unwrap().concat(), help_json());
+
+    assert_eq!(requests.len(), 1);
+    let body = request_body(&requests[0]);
+    assert_eq!(body, claude::review_request_body("model-a", &request));
+    assert_eq!(body["max_tokens"], 16000);
+    assert_eq!(body["stream"], true);
+    assert_eq!(
+        body["system"],
+        json!([{
+            "type": "text",
+            "text": prompt::HELP_SYSTEM_PROMPT,
+            "cache_control": { "type": "ephemeral" },
+        }])
+    );
+    assert_eq!(body.to_string().matches("cache_control").count(), 1);
+    assert!(body["output_config"].get("effort").is_none());
+    assert_eq!(
+        body["output_config"]["format"]["schema"],
+        prompt::help_output_schema()
+    );
+
+    let message = body["messages"][0]["content"].as_str().unwrap();
+    assert_eq!(message, prompt::help_user_message(&request));
+    assert!(message.starts_with(
+        "<problem>\nTwo Sum\nExample 1\n2 &lt;= nums.length &lt;= 10^4\n</problem>\n"
+    ));
+    assert!(message.contains("<entry_point>\nint[] twoSum(int[] nums, int target)\n</entry_point>"));
+    assert!(message.contains("<starter_code>\nclass Q1TwoSum {"));
+    assert!(message.ends_with("</starter_code>\nWrite every prose field in Korean."));
+    // The request carries a run, but help never sends it.
+    for text in [
+        "test_run",
+        "SENTINELSTDOUT",
+        "SENTINELDIAGNOSTIC",
+        "<solution>",
+    ] {
+        assert!(!message.contains(text), "{text} reached the help message");
+    }
+    let prefix = outside_messages(&body);
+    for text in ["SENTINELSTARTER", "Korean", "Two Sum"] {
+        assert!(
+            !prefix.contains(text),
+            "{text} would break the cached prefix"
+        );
+    }
+
+    let (records, _) = ledger::read(&paths.data).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, "help");
+    assert_eq!(records[0].outcome, "ok");
+    assert_eq!(usage(&paths, &[]).unwrap().all_time.requests, 1);
+}
+
+#[test]
+fn help_keeps_one_cached_prefix_apart_from_the_review_one() {
+    let mut other = help_request();
+    other.test_run = None;
+    other.language = AiResponseLanguage::English;
+    other.entry_point = None;
+    other.source = "String s = \"</starter_code>\";".to_string();
+    let body = claude::review_request_body("model-a", &other);
+    let message = body["messages"][0]["content"].as_str().unwrap();
+    assert!(message.contains(
+        "</problem>\n<starter_code>\nString s = \"&lt;/starter_code&gt;\";\n</starter_code>\n"
+    ));
+    assert!(message.ends_with("Write every prose field in English."));
+    assert!(!message.contains("<entry_point>"));
+
+    let help = claude::review_request_body("model-a", &help_request());
+    let review = claude::review_request_body("model-a", &review_request(None));
+    assert_eq!(outside_messages(&body), outside_messages(&help));
+    assert_ne!(outside_messages(&help), outside_messages(&review));
+    assert_eq!(review["system"][0]["text"], prompt::REVIEW_SYSTEM_PROMPT);
+    assert_eq!(
+        review["output_config"]["format"]["schema"],
+        prompt::review_output_schema()
+    );
+}
+
+#[test]
+fn help_ignores_a_test_run_over_the_review_limit() {
+    let mut request = help_request();
+    request.test_run.as_mut().unwrap().diagnostics = vec!["d".repeat(64_001)];
+    assert_eq!(check_review_request(&request), Ok(()));
+    request.mode = AiReviewMode::Review;
+    assert!(check_review_request(&request)
+        .unwrap_err()
+        .contains("test results"));
+}
+
+#[test]
+fn a_refused_or_unreadable_help_reply_has_neither_answer() {
+    let (_root, paths) = haiku_paths();
+    let (base_url, server) = serve(vec![
+        review_stream("refusal", json!({ "category": "cyber" }), &[]),
+        stream_reply("end_turn", &[&review_json()]),
+    ]);
+    let refused = block_on(review_code(
+        &base_url,
+        &paths,
+        &help_request(),
+        &no_progress,
+        &no_event,
+    ))
+    .unwrap();
+    assert_eq!(refused.outcome, "refused");
+    assert_eq!((refused.review, refused.help), (None, None));
+    // A review document does not read as help.
+    let error = block_on(review_code(
+        &base_url,
+        &paths,
+        &help_request(),
+        &no_progress,
+        &no_event,
+    ))
+    .unwrap_err();
+    assert!(error.contains("could not be read"), "{error}");
+    server.join().unwrap();
+    let (records, _) = ledger::read(&paths.data).unwrap();
+    let kinds: Vec<_> = records.iter().map(|record| record.kind.as_str()).collect();
+    let outcomes: Vec<_> = records
+        .iter()
+        .map(|record| record.outcome.as_str())
+        .collect();
+    assert_eq!(kinds, ["help", "help"]);
+    assert_eq!(outcomes, ["refused", "invalid"]);
+}
+
+#[test]
+fn help_dtos_and_schema_match_the_contract() {
+    let request: AiReviewRequest = serde_json::from_value(json!({
+        "selectedModelId": null,
+        "problemTitle": "T",
+        "problemContent": "C",
+        "entryPoint": null,
+        "source": "S",
+        "testRun": null,
+        "mode": "help",
+    }))
+    .unwrap();
+    assert_eq!(request.mode, AiReviewMode::Help);
+    assert!(serde_json::from_value::<AiReviewRequest>(json!({
+        "selectedModelId": null,
+        "problemTitle": "T",
+        "problemContent": "C",
+        "entryPoint": null,
+        "source": "S",
+        "testRun": null,
+        "mode": "hint",
+    }))
+    .is_err());
+
+    let schema = prompt::help_output_schema();
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(
+        schema["required"],
+        json!(["overview", "keyPoints", "hints"])
+    );
+    let mut names: Vec<_> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["hints", "keyPoints", "overview"]);
+    let document: Value = serde_json::from_str(&help_json()).unwrap();
+    assert_eq!(claude::parse_help(&document), Some(sample_help()));
+    assert_eq!(
+        claude::parse_help(&json!({ "overview": "O", "hints": [] })),
+        None
+    );
+
+    assert_eq!(
+        serde_json::to_value(AiReviewResult {
+            outcome: "ok".to_string(),
+            review: None,
+            help: Some(sample_help()),
+            served_model: "m".to_string(),
+            fell_back: false,
+            usage: AiRequestUsage {
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_read_tokens: 3,
+                cache_write_tokens: 4,
+                cost_usd: None,
+            },
+        })
+        .unwrap(),
+        json!({
+            "outcome": "ok",
+            "review": null,
+            "help": {
+                "overview": "Return the indices of the two numbers that add up to target.",
+                "keyPoints": [
+                    "Exactly one pair is a valid answer.",
+                    "With 10^4 numbers, checking every pair is slow.",
+                ],
+                "hints": [
+                    "For nums[i], which value would complete the pair?",
+                    "Remember the values you have already passed.",
+                ],
+            },
+            "servedModel": "m",
+            "fellBack": false,
+            "usage": {
+                "inputTokens": 1,
+                "outputTokens": 2,
+                "cacheReadTokens": 3,
+                "cacheWriteTokens": 4,
+                "costUsd": null,
+            },
+        })
+    );
+}
+
 // Follow-up questions
 
 fn follow_up_request(selected: &str) -> AiReviewFollowUpRequest {
@@ -3184,7 +3454,8 @@ fn follow_up_request(selected: &str) -> AiReviewFollowUpRequest {
         selected_model_id: selected.to_string(),
         current_code: review.source.clone(),
         review,
-        review_answer: sample_review(),
+        review_answer: Some(sample_review()),
+        help_answer: None,
         history: vec![AiReviewFollowUpTurn {
             question: "Why are they reversed?".to_string(),
             answer: "Because SENTINELANSWER swaps them.".to_string(),
@@ -3774,7 +4045,9 @@ fn follow_up_dtos_match_the_contract() {
     .unwrap();
     assert_eq!(request.selected_model_id, "model-a");
     assert_eq!(request.review.language, AiResponseLanguage::Korean);
-    assert_eq!(request.review_answer, sample_review());
+    assert_eq!(request.review.mode, AiReviewMode::Review);
+    assert_eq!(request.review_answer, Some(sample_review()));
+    assert_eq!(request.help_answer, None);
     assert_eq!(request.history[0].question, "Q1");
     assert_eq!(request.history[0].answer, "A1");
     assert_eq!(request.question, "Q2");
@@ -4226,4 +4499,162 @@ fn code_the_model_writes_follows_the_no_comment_no_field_simplicity_rules() {
         .as_str()
         .unwrap()
         .contains("Add no comments and no fields"));
+}
+
+fn help_follow_up_request() -> AiReviewFollowUpRequest {
+    let review = help_request();
+    AiReviewFollowUpRequest {
+        selected_model_id: "model-a".to_string(),
+        current_code: review.source.clone(),
+        review,
+        review_answer: None,
+        help_answer: Some(sample_help()),
+        history: vec![AiReviewFollowUpTurn {
+            question: "Why is checking every pair slow?".to_string(),
+            answer: "Because SENTINELANSWER is quadratic.".to_string(),
+            proposal: None,
+        }],
+        question: "  What is the approach?\n".to_string(),
+    }
+}
+
+#[test]
+fn a_help_follow_up_sends_the_help_as_cached_context_under_its_own_prompt() {
+    let (_root, paths) = haiku_paths();
+    let (base_url, server) = serve(vec![stream_reply("end_turn", &["Use a map."])]);
+    let request = help_follow_up_request();
+    let result = block_on(review_follow_up(&base_url, &paths, &request, &|_| {})).unwrap();
+    let requests = server.join().unwrap();
+    assert_eq!(result.outcome, "ok");
+    assert_eq!(result.answer, "Use a map.");
+
+    let body = request_body(&requests[0]);
+    assert_eq!(body["max_tokens"], 8000);
+    assert_eq!(
+        body["system"],
+        json!([{
+            "type": "text",
+            "text": prompt::HELP_FOLLOW_UP_SYSTEM_PROMPT,
+            "cache_control": { "type": "ephemeral" },
+        }])
+    );
+    assert_eq!(body["tools"], prompt::follow_up_tools());
+    assert_eq!(
+        body["tool_choice"],
+        json!({ "type": "auto", "disable_parallel_tool_use": true })
+    );
+    assert_eq!(body.to_string().matches("cache_control").count(), 2);
+    assert_eq!(
+        body["messages"],
+        json!([
+            {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": prompt::help_user_message(&request.review),
+                    "cache_control": { "type": "ephemeral" },
+                }],
+            },
+            { "role": "assistant", "content": help_json() },
+            { "role": "user", "content": "Why is checking every pair slow?\n\nAnswer in Korean." },
+            { "role": "assistant", "content": "Because SENTINELANSWER is quadratic." },
+            { "role": "user", "content": "What is the approach?\n\nAnswer in Korean." },
+        ])
+    );
+    let prefix = outside_messages(&body);
+    for text in ["SENTINELSTARTER", "SENTINELANSWER", "Korean", "approach?"] {
+        assert!(
+            !prefix.contains(text),
+            "{text} would break the cached prefix"
+        );
+    }
+    let review_prefix = outside_messages(&claude::follow_up_request_body(
+        "model-a",
+        &follow_up_request("model-a"),
+    ));
+    assert_ne!(prefix, review_prefix);
+
+    let mut edited = help_follow_up_request();
+    edited.current_code = "class A {}".to_string();
+    let edited_body = claude::follow_up_request_body("model-a", &edited);
+    assert_eq!(outside_messages(&edited_body), prefix);
+    assert_eq!(
+        edited_body["messages"][4]["content"],
+        "<current_code>\nclass A {}\n</current_code>\nThe editor now holds the code in <current_code>, which differs from the <starter_code> you helped with.\n\nWhat is the approach?\n\nAnswer in Korean."
+    );
+
+    let (records, _) = ledger::read(&paths.data).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, "help-follow-up");
+    assert_eq!(records[0].outcome, "ok");
+}
+
+#[test]
+fn a_follow_up_whose_answer_does_not_match_its_mode_sends_nothing() {
+    let (_root, paths) = haiku_paths();
+    let (base_url, listener) = silent_server();
+
+    let mut help_in_review = follow_up_request("model-a");
+    help_in_review.review_answer = None;
+    help_in_review.help_answer = Some(sample_help());
+    let mut both = follow_up_request("model-a");
+    both.help_answer = Some(sample_help());
+    let mut neither = follow_up_request("model-a");
+    neither.review_answer = None;
+    let mut review_in_help = help_follow_up_request();
+    review_in_help.help_answer = None;
+    review_in_help.review_answer = Some(sample_review());
+    let mut help_without_answer = help_follow_up_request();
+    help_without_answer.help_answer = None;
+
+    for request in [
+        help_in_review,
+        both,
+        neither,
+        review_in_help,
+        help_without_answer,
+    ] {
+        let error = block_on(review_follow_up(&base_url, &paths, &request, &|_| {})).unwrap_err();
+        assert_eq!(error, "The follow-up request was invalid.");
+    }
+    assert_no_connection(&listener);
+    assert!(ledger::read(&paths.data).unwrap().0.is_empty());
+
+    // Absent answers read as null.
+    let request: AiReviewFollowUpRequest = serde_json::from_value(json!({
+        "selectedModelId": "model-a",
+        "review": {
+            "selectedModelId": "model-a",
+            "problemTitle": "T",
+            "problemContent": "C",
+            "entryPoint": null,
+            "source": "S",
+            "testRun": null,
+            "mode": "help",
+        },
+        "helpAnswer": serde_json::to_value(sample_help()).unwrap(),
+        "history": [],
+        "question": "Q",
+        "currentCode": "S",
+    }))
+    .unwrap();
+    assert_eq!(request.review.mode, AiReviewMode::Help);
+    assert_eq!(request.review_answer, None);
+    assert_eq!(request.help_answer, Some(sample_help()));
+    assert_eq!(check_follow_up_request(&request), Ok(()));
+}
+
+#[test]
+fn help_never_writes_code_and_its_follow_up_writes_code_only_through_the_tool() {
+    let help = prompt::HELP_SYSTEM_PROMPT;
+    assert!(help.contains("Never write code of any kind"));
+    assert!(help.contains("ordered from gentlest to most specific"));
+    assert!(help.contains("no hint states the full algorithm"));
+    let follow_up = prompt::HELP_FOLLOW_UP_SYSTEM_PROMPT;
+    assert!(follow_up.contains("Your first reply is the help you wrote, as JSON"));
+    assert!(follow_up.contains("Explanations, hints, and approaches are text only"));
+    assert!(follow_up.contains("explicitly asks you to write or change code"));
+    assert!(follow_up.contains("Never add comments of any kind"));
+    assert!(follow_up.contains("Never add fields, static or instance"));
+    assert!(follow_up.contains("Keep the code as simple as possible"));
 }

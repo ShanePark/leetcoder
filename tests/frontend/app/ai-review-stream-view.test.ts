@@ -82,6 +82,7 @@ class FakeDocument {
 }
 
 const stream = (overrides: Partial<AiReviewStream> = {}): AiReviewStream => ({
+  mode: 'review',
   fileName: 'Q1TwoSum.java',
   modelId: 'model-a',
   modelName: 'Model A',
@@ -120,6 +121,7 @@ describe('review stream status', () => {
     expect(aiReviewStreamStatus(stream(), 10_999)).toBe('Thinking… 0s · Model A')
     expect(aiReviewStreamStatus(stream(), 12_400)).toBe('Thinking… 2s · Model A')
     expect(aiReviewStreamStatus(stream({ text: '{' }), 13_000)).toBe('Writing the review… 3s · Model A')
+    expect(aiReviewStreamStatus(stream({ mode: 'help', text: '{' }), 13_000)).toBe('Writing hints… 3s · Model A')
     // A clock that runs back never shows negative time.
     expect(aiReviewStreamStatus(stream(), 9_000)).toBe('Thinking… 0s · Model A')
   })
@@ -159,6 +161,17 @@ describe('review stream view', () => {
     expect(body.texts('review-summary')).toEqual(['Misses dup'])
     expect(body.all('review-stream-status')[0]).toBe(status)
     expect(status.children[1].textContent).toBe('Writing the review… 0s · Model A')
+  })
+
+  it('renders partial help as its sections arrive, without a verdict', () => {
+    const { view, body } = setup()
+    view.show(stream({ mode: 'help', text: '{"overview":"Find two","keyPoints":["One answer"],"hints":["Look ba' }))
+
+    expect(body.all('review-verdict')).toEqual([])
+    expect(body.texts('review-section-title')).toEqual(['Overview', 'Key points', 'Hints'])
+    expect(body.texts('review-item')).toEqual(['One answer', 'Look ba'])
+    expect(body.texts('review-stream-text')).toEqual(['Writing hints… 0s · Model A'])
+    expect(body.all('review-main')[0].attributes.get('aria-busy')).toBe('true')
   })
 
   it('ticks the seconds without rendering the sections again', () => {

@@ -1,9 +1,11 @@
 import {
   aiButtonPresentation,
   aiReviewButtonPresentation,
+  aiReviewMode,
   type AiButtonPresentation,
   type AiRequestKind,
 } from './ai-controller'
+import type { AiReviewMode } from '../backend'
 import type { AppState, BottomPanelTab } from './types'
 import { gitFileName, hasPendingGitWork } from './git-helpers'
 import { updateGitCommitControls as updateGitCommitControlsView } from './git-view'
@@ -22,6 +24,8 @@ interface ShellControlsViewOptions {
   invalidatePendingNavigation: () => void
   aiRequestPath: () => string | null
   aiRequestKind: () => AiRequestKind | null
+  /** What the running review asks for, or null. */
+  aiRequestReviewMode: () => AiReviewMode | null
   aiTestStub: () => AiTestStub
   aiCaseTestAvailable: () => boolean
   /** The @Test method holding the editor cursor, which Run selected targets. */
@@ -107,7 +111,10 @@ export class ShellControlsView {
     this.updateGitCommitControls()
   }
 
-  /** The AI buttons: generation follows the open file (see `aiButtonMode`), and review sits beside it. */
+  /**
+   * The AI buttons: generation follows the open file (see `aiButtonMode`), and
+   * review sits beside it, offering help while the solution is unimplemented.
+   */
   updateAiButton(): void {
     this.renderAiButton('#ai-review-code', aiReviewButtonPresentation(
       this.state.selectedPath,
@@ -115,6 +122,8 @@ export class ShellControlsView {
       this.options.aiRequestKind(),
       this.state.busy,
       this.state.dailyProblem,
+      aiReviewMode(this.state.selectedSource),
+      this.options.aiRequestReviewMode(),
     ))
     this.renderAiButton('#ai-generate-tests', aiButtonPresentation(
       this.state.selectedPath,

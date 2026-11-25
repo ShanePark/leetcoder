@@ -2,7 +2,8 @@ import type { AiFollowUpProposal, AiReviewFollowUp } from './ai-follow-up'
 import { renderMarkdown } from './markdown-view'
 
 export const AI_FOLLOW_UP_PLACEHOLDER = 'Ask about this review (Shift+Enter for a new line)'
-export const AI_FOLLOW_UP_NO_REVIEW_PLACEHOLDER = 'Review the solution to ask about it'
+export const AI_FOLLOW_UP_HELP_PLACEHOLDER = 'Ask about this problem (Shift+Enter for a new line)'
+export const AI_FOLLOW_UP_NO_REVIEW_PLACEHOLDER = 'Review the solution or get hints to ask about it'
 const AI_REQUEST_RUNNING = 'Available when the current AI request finishes'
 const SEND_TITLE = 'Send the question'
 
@@ -37,6 +38,8 @@ export interface AiFollowUpViewOptions {
 
 export interface AiFollowUpComposerState {
   hasReview: boolean
+  /** The shown answer is help rather than a review. */
+  help: boolean
   /** Any AI request is running, a follow-up included. */
   busy: boolean
 }
@@ -53,7 +56,7 @@ export class AiFollowUpView {
   private readonly turnElements = new Map<AiReviewFollowUp, HTMLElement>()
   private readonly pendingTurns = new Set<AiReviewFollowUp>()
   private frame: number | null = null
-  private state: AiFollowUpComposerState = { hasReview: false, busy: false }
+  private state: AiFollowUpComposerState = { hasReview: false, help: false, busy: false }
 
   constructor(private readonly options: AiFollowUpViewOptions) {
     this.root = options.root
@@ -85,7 +88,9 @@ export class AiFollowUpView {
     this.state = state
     const input = this.input()
     input.disabled = !state.hasReview
-    input.placeholder = state.hasReview ? AI_FOLLOW_UP_PLACEHOLDER : AI_FOLLOW_UP_NO_REVIEW_PLACEHOLDER
+    input.placeholder = !state.hasReview
+      ? AI_FOLLOW_UP_NO_REVIEW_PLACEHOLDER
+      : state.help ? AI_FOLLOW_UP_HELP_PLACEHOLDER : AI_FOLLOW_UP_PLACEHOLDER
     this.updateSendButton()
   }
 

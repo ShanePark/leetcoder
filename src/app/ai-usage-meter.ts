@@ -90,6 +90,8 @@ export interface AiMeterState {
   entries: AiMeterEntry[]
   modelName: string
   modelId: string
+  /** A help answer has no tests to include, so the meter leaves that line out. */
+  help: boolean
   testRunOmitted: AiReviewTestRunOmission | null
 }
 
@@ -118,16 +120,17 @@ const liveEntry = (label: string, live: AiLiveUsage, pricing: AiModelPricing | n
 export function aiMeterState(stored: StoredAiReview | null, stream: AiReviewStream | null): AiMeterState | null {
   if (stream) {
     return {
-      entries: [liveEntry('Review', stream.live, stream.pricing)],
+      entries: [liveEntry(stream.mode === 'help' ? 'Help' : 'Review', stream.live, stream.pricing)],
       modelName: stream.modelName,
       modelId: stream.modelId,
+      help: stream.mode === 'help',
       testRunOmitted: stream.testRunOmitted,
     }
   }
   if (!stored) return null
   return {
     entries: [
-      settledEntry('Review', stored.usage),
+      settledEntry(stored.request.mode === 'help' ? 'Help' : 'Review', stored.usage),
       ...stored.followUps.map((turn, index) => {
         const label = `Follow-up ${index + 1}`
         return turn.usage ? settledEntry(label, turn.usage) : liveEntry(label, turn.live, stored.pricing)
@@ -135,6 +138,7 @@ export function aiMeterState(stored: StoredAiReview | null, stream: AiReviewStre
     ],
     modelName: stored.servedModelName,
     modelId: stored.servedModel,
+    help: stored.request.mode === 'help',
     testRunOmitted: stored.testRunOmitted,
   }
 }
@@ -226,6 +230,7 @@ export class AiUsageMeter {
     const included = state.testRunOmitted === null
     this.tests.className = `review-usage-tests ${included ? 'is-included' : 'is-omitted'}`
     this.tests.textContent = included ? 'Test results included' : 'Test results not included'
+    this.tests.hidden = state.help
     this.cost.className = totals.costUsd === null ? 'review-usage-cost is-unknown' : 'review-usage-cost'
     this.element.setAttribute('aria-busy', String(totals.estimated))
     this.renderRequests(state.entries)

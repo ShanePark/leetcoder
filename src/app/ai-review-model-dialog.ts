@@ -1,4 +1,4 @@
-import type { AiModel, AiModelList, AiModelPricing } from '../backend'
+import type { AiModel, AiModelList, AiModelPricing, AiReviewMode } from '../backend'
 import type {
   AiReviewModelChoice,
   AiReviewModelRequest,
@@ -7,6 +7,21 @@ import type {
 import { readReviewLlmModel, saveReviewLlmModel } from './llm-settings-controller'
 
 const RADIO_NAME = 'ai-review-model'
+
+const MODE_COPY: Readonly<Record<AiReviewMode, { title: string; purpose: string; submit: string; fallback: string }>> = {
+  review: {
+    title: 'Review code',
+    purpose: 'a review',
+    submit: 'Review',
+    fallback: 'No model list is cached yet, so the test generation model reviews the code. Settings can refresh the list.',
+  },
+  help: {
+    title: 'Get help',
+    purpose: 'hints',
+    submit: 'Get help',
+    fallback: 'No model list is cached yet, so the test generation model gives the hints. Settings can refresh the list.',
+  },
+}
 
 /**
  * The models a review may use, cheapest first by output then input price, with
@@ -83,8 +98,8 @@ interface OpenPicker {
 }
 
 /**
- * The picker shown before a review. Opening it sends nothing; only Review
- * does, after the dialog has closed and returned focus. The chosen model is
+ * The picker shown before a review or a help request. Opening it sends
+ * nothing; only its submit button does, after the dialog has closed and returned focus. The chosen model is
  * remembered apart from the test generation model.
  */
 export class AiReviewModelDialog {
@@ -138,13 +153,19 @@ export class AiReviewModelDialog {
       this.picker = { request, selected, resolve }
     })
 
+    const copy = MODE_COPY[request.mode]
+    this.element('#ai-review-model-title').textContent = copy.title
     this.element('#ai-review-model-file').textContent = request.fileName
     this.element('#ai-review-model-provider').textContent = request.provider?.displayName ?? 'the model'
+    this.element('#ai-review-model-purpose').textContent = copy.purpose
+    this.element('#confirm-ai-review-model').textContent = copy.submit
+    // Help sends no test run, so there is nothing to say about one.
     const status = aiReviewTestRunStatus(request.testRun)
     const statusLine = this.element('#ai-review-model-test-run')
+    statusLine.hidden = request.mode === 'help'
     statusLine.textContent = status.text
     statusLine.dataset.state = status.included ? 'included' : 'omitted'
-    const focus = this.renderOptions(options, selected)
+    const focus = this.renderOptions(options, selected, copy.fallback)
     this.element('#ai-review-model-dialog').hidden = false
     queueMicrotask(() => {
       if (this.picker?.request === request) focus.focus()
@@ -187,8 +208,8 @@ export class AiReviewModelDialog {
     picker.resolve(choice)
   }
 
-  /** Build the radio rows and return what takes focus first: the selected model, or Review. */
-  private renderOptions(options: readonly AiModel[], selected: string | null): HTMLElement {
+  /** Build the radio rows and return what takes focus first: the selected model, or the submit button. */
+  private renderOptions(options: readonly AiModel[], selected: string | null, fallback: string): HTMLElement {
     const documentRef = this.root.ownerDocument
     const make = <K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] => {
       const element = documentRef.createElement(tag)
@@ -198,11 +219,7 @@ export class AiReviewModelDialog {
     }
     const list = this.element('#ai-review-model-list')
     if (options.length === 0) {
-      list.replaceChildren(make(
-        'p',
-        'ai-review-model-empty',
-        'No model list is cached yet, so the test generation model reviews the code. Settings can refresh the list.',
-      ))
+      list.replaceChildren(make('p', 'ai-review-model-empty', fallback))
       return this.element('#confirm-ai-review-model')
     }
     const radios: HTMLInputElement[] = []

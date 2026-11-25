@@ -110,7 +110,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         <div class="bottom-panel-tabs">
           <div class="bottom-panel-tab-list" role="tablist" aria-label="Bottom panel">
             <button id="tests-tab" class="bottom-panel-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="tests-panel" tabindex="0">Tests<span class="keytip" aria-hidden="true">${label('show-tests-panel')}</span></button>
-            <button id="review-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="review-panel" tabindex="-1">Review</button>
+            <button id="review-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="review-panel" tabindex="-1">AI</button>
             <button id="git-tab" class="bottom-panel-tab" type="button" role="tab" aria-selected="false" aria-controls="git-panel" tabindex="-1">Git<span id="git-tab-indicator" class="bottom-panel-tab-indicator" role="img" aria-label="Uncommitted or unpushed changes" title="Uncommitted or unpushed changes" hidden></span><span class="keytip" aria-hidden="true">${label('show-git-panel')}</span></button>
           </div>
           <div class="bottom-panel-actions" role="group" aria-label="Test actions">
@@ -406,7 +406,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
       <div id="ai-review-model-dialog" class="dialog-backdrop" hidden>
         <form id="ai-review-model-form" class="rename-file-dialog ai-review-model-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-review-model-title" aria-describedby="ai-review-model-message ai-review-model-test-run">
           <h2 id="ai-review-model-title" class="rename-file-title">Review code</h2>
-          <p id="ai-review-model-message" class="discard-git-message">Sends <code id="ai-review-model-file"></code> and the problem description to <span id="ai-review-model-provider">the model</span> for a review.</p>
+          <p id="ai-review-model-message" class="discard-git-message">Sends <code id="ai-review-model-file"></code> and the problem description to <span id="ai-review-model-provider">the model</span> for <span id="ai-review-model-purpose">a review</span>.</p>
           <p id="ai-review-model-test-run" class="ai-review-model-test-run" data-state="omitted"></p>
           <fieldset class="ai-review-model-fieldset">
             <legend class="ai-review-model-legend">Model</legend>

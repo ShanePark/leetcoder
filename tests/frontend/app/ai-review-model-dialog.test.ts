@@ -212,6 +212,7 @@ function setup(storage = new MemoryStorage()) {
 }
 
 const request = (extra: Partial<AiReviewModelRequest> = {}): AiReviewModelRequest => ({
+  mode: 'review',
   fileName: 'Q1TwoSum.java',
   provider: { id: 'anthropic', displayName: 'Claude' },
   models: catalog,
@@ -229,9 +230,13 @@ describe('review model dialog', () => {
     await flush()
 
     expect(element('#ai-review-model-dialog').hidden).toBe(false)
+    expect(element('#ai-review-model-title').textContent).toBe('Review code')
     expect(element('#ai-review-model-file').textContent).toBe('Q1TwoSum.java')
     expect(element('#ai-review-model-provider').textContent).toBe('Claude')
+    expect(element('#ai-review-model-purpose').textContent).toBe('a review')
+    expect(element('#confirm-ai-review-model').textContent).toBe('Review')
     expect(element('#ai-review-model-test-run')).toMatchObject({
+      hidden: false,
       textContent: 'Code changed since the last test run — results won’t be included',
       dataset: { state: 'omitted' },
     })
@@ -247,6 +252,21 @@ describe('review model dialog', () => {
       '$5 / $25 per 1M tokens (in / out)',
     ])
     expect(document.activeElement).toBe(radios()[0])
+  })
+
+  it('asks for hints without a test run line in help mode, and back for a review', async () => {
+    const { dialog, element } = setup()
+    dialog.show(request({ mode: 'help', models: null }))
+    expect(element('#ai-review-model-title').textContent).toBe('Get help')
+    expect(element('#ai-review-model-purpose').textContent).toBe('hints')
+    expect(element('#confirm-ai-review-model').textContent).toBe('Get help')
+    expect(element('#ai-review-model-test-run').hidden).toBe(true)
+    expect(element('#ai-review-model-list').children[0].textContent).toContain('the test generation model gives the hints')
+    dialog.close()
+
+    dialog.show(request())
+    expect(element('#ai-review-model-title').textContent).toBe('Review code')
+    expect(element('#ai-review-model-test-run').hidden).toBe(false)
   })
 
   it('resolves with the chosen model after closing and remembers it', async () => {

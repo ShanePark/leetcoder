@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import type { AiRequestUsage, AiReview } from '../../../src/backend'
+import type { AiProblemHelp, AiRequestUsage, AiReview } from '../../../src/backend'
 import type { StoredAiReview } from '../../../src/app/ai-controller'
 import {
   AI_REVIEW_EMPTY_COPY,
   formatReviewCost,
   formatReviewTokens,
+  partialAiProblemHelp,
   partialAiReview,
+  renderAiHelpDraft,
   renderAiReviewDraft,
   renderAiReviewPanel,
 } from '../../../src/app/ai-review-view'
@@ -82,6 +84,7 @@ const stored = (
   requestUsage: AiRequestUsage = usage,
 ): StoredAiReview => ({
   review,
+  help: null,
   fileName: 'Q1TwoSum.java',
   servedModel: 'model-a',
   servedModelName: 'Model A',
@@ -89,6 +92,7 @@ const stored = (
   usage: requestUsage,
   pricing: null,
   request: {
+    mode: 'review',
     selectedModelId: 'model-a',
     problemTitle: 'Two Sum',
     problemContent: '<p>Two Sum</p>',
@@ -99,6 +103,61 @@ const stored = (
   },
   target: { repoPath: '/repo', path: 'src/Q1TwoSum.java', repositoryGeneration: 1 },
   followUps: [],
+})
+
+const fullHelp: AiProblemHelp = {
+  overview: 'Return the indices of two numbers that add up to the target.',
+  keyPoints: ['Exactly one answer exists.', ' '],
+  hints: ['What do you need to have seen to finish at one number?', 'Remember each value with its index.'],
+}
+
+const storedHelp = (help: AiProblemHelp): StoredAiReview => {
+  const base = stored(fullReview, 'no-run')
+  return { ...base, review: null, help, request: { ...base.request, mode: 'help' } }
+}
+
+describe('help panel', () => {
+  it('renders the overview, key points, and ordered hints without a verdict or test note', () => {
+    const body = render(storedHelp(fullHelp))
+    expect(body.all('review-verdict')).toEqual([])
+    expect(body.all('review-context')).toEqual([])
+    expect(body.texts('review-meta')).toEqual(['Q1TwoSum.java · model-a'])
+    expect(body.texts('review-section-title')).toEqual(['Overview', 'Key points', 'Hints'])
+    expect(body.texts('review-text')).toEqual([fullHelp.overview])
+    const [keyPoints, hints] = body.all('review-list')
+    expect(keyPoints.tagName).toBe('ul')
+    expect(keyPoints.children.map((item) => item.textContent)).toEqual(['Exactly one answer exists.'])
+    expect(hints.tagName).toBe('ol')
+    expect(hints.children.map((item) => item.textContent)).toEqual(fullHelp.hints)
+  })
+
+  it('leaves out empty sections and keeps the conversation last', () => {
+    const conversation = new FakeDocument().createElement('section')
+    const body = render(storedHelp({ overview: ' ', keyPoints: [], hints: ['Start small.'] }), conversation)
+    expect(body.texts('review-section-title')).toEqual(['Hints'])
+    expect(body.all('review-main')[0].children.at(-1)).toBe(conversation)
+  })
+
+  it('keeps the fields of partial help that have the right shape', () => {
+    expect(partialAiProblemHelp(null)).toEqual({})
+    expect(partialAiProblemHelp({ overview: 1, keyPoints: ['a', 2], hints: 'x' }))
+      .toEqual({ overview: undefined, keyPoints: ['a'], hints: undefined })
+  })
+
+  it('renders a help draft with the status under the head', () => {
+    const documentRef = new FakeDocument()
+    const body = documentRef.createElement('div')
+    const status = documentRef.createElement('p')
+    status.className = 'review-stream-status'
+    renderAiHelpDraft(body as unknown as HTMLElement, {
+      fileName: 'Q1TwoSum.java',
+      modelId: 'model-a',
+      help: { overview: 'Return the' },
+    }, status as unknown as HTMLElement)
+    expect(body.all('review-head')[0].children.at(-1)).toBe(status)
+    expect(body.texts('review-text')).toEqual(['Return the'])
+    expect(body.all('review-main')[0].attributes.get('aria-busy')).toBe('true')
+  })
 })
 
 describe('review panel', () => {

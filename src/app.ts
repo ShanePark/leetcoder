@@ -769,6 +769,7 @@ export class LeetcoderApp {
       invalidatePendingNavigation: () => this.documentController.invalidatePendingNavigation(),
       aiRequestPath: () => this.aiController.requestPath,
       aiRequestKind: () => this.aiController.requestKind,
+      aiRequestReviewMode: () => this.aiController.reviewMode,
       aiTestStub: () => this.editor.aiTestStub(),
       aiCaseTestAvailable: () => this.editor.aiCaseTestAvailable(),
       testMethodAtCursor: () => findJavaTestMethodAt(this.editor.view.state),
@@ -1285,6 +1286,7 @@ export class LeetcoderApp {
   private updateFollowUpComposer(): void {
     this.aiFollowUpView.update({
       hasReview: this.aiReview !== null,
+      help: this.aiReview?.request.mode === 'help',
       busy: this.aiController.requestPath !== null,
     })
   }

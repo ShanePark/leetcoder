@@ -5,6 +5,7 @@ import type {
   AiModel,
   AiModelList,
   AiModelPricing,
+  AiProblemHelp,
   AiProgress,
   AiRequestUsage,
   AiReview,
@@ -136,13 +137,19 @@ export function normalizeAiReviewResult(value: unknown): AiReviewResult {
     || !isAiOutcome(value.outcome)
     || !isNonEmptyString(value.servedModel)
     || typeof value.fellBack !== 'boolean'
-    || (value.outcome === 'ok') !== (value.review !== null)
   ) {
+    throw new Error('The AI review response was invalid.')
+  }
+  // Responses from before help requests carry no `help` key.
+  const help = value.help ?? null
+  const answers = Number(value.review !== null) + Number(help !== null)
+  if (answers !== (value.outcome === 'ok' ? 1 : 0)) {
     throw new Error('The AI review response was invalid.')
   }
   return {
     outcome: value.outcome,
     review: value.review === null ? null : normalizeAiReview(value.review),
+    help: help === null ? null : normalizeAiProblemHelp(help),
     servedModel: value.servedModel,
     fellBack: value.fellBack,
     usage: normalizeAiRequestUsage(value.usage),
@@ -265,6 +272,18 @@ function normalizeAiReview(value: unknown): AiReview {
     },
     improvements: value.improvements,
   }
+}
+
+function normalizeAiProblemHelp(value: unknown): AiProblemHelp {
+  if (
+    !isRecord(value)
+    || typeof value.overview !== 'string'
+    || !isStringArray(value.keyPoints)
+    || !isStringArray(value.hints)
+  ) {
+    throw new Error('The AI review response contained invalid help.')
+  }
+  return { overview: value.overview, keyPoints: value.keyPoints, hints: value.hints }
 }
 
 function normalizeAiReviewMissedCase(value: unknown): AiReviewMissedCase {

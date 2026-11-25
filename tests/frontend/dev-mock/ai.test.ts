@@ -8,10 +8,11 @@ import type {
   AiReviewRequest,
 } from '../../../src/backend'
 import { createDevMockBackend } from '../../../src/dev-mock'
-import { AI_REVIEW } from '../../../src/dev-mock/fixtures'
+import { AI_PROBLEM_HELP, AI_REVIEW } from '../../../src/dev-mock/fixtures'
 
 const day = 86_400_000
 const reviewRequest: AiReviewRequest = {
+  mode: 'review',
   selectedModelId: null,
   problemTitle: 'Two Sum',
   problemContent: '<p>Input: nums = [3,2,4], target = 6</p>',
@@ -222,7 +223,7 @@ describe('browser preview AI review', () => {
       testRun: { ...run, success: false, summary: { ...run.summary, passed: 0, failed: 1 } },
     }))
 
-    expect(noRun).toMatchObject({ outcome: 'ok', servedModel: 'claude-sonnet-5-5', fellBack: false })
+    expect(noRun).toMatchObject({ outcome: 'ok', help: null, servedModel: 'claude-sonnet-5-5', fellBack: false })
     expect(noRun.review?.failureCause).toBeNull()
     expect(passed.review).toEqual(noRun.review)
     expect(failed.review?.verdict).toBe('incorrect')
@@ -274,6 +275,18 @@ describe('browser preview AI review', () => {
     })
   })
 
+  it('streams help instead of a review in help mode', async () => {
+    const backend = await configuredBackend()
+    const texts: string[] = []
+    const result = await finishDelayed(backend.reviewAiCode({ ...reviewRequest, mode: 'help' }, undefined, (event) => {
+      if (event.kind === 'text') texts.push(event.text)
+    }))
+
+    expect(result).toMatchObject({ outcome: 'ok', review: null, help: AI_PROBLEM_HELP })
+    expect(AI_PROBLEM_HELP.hints.length).toBeGreaterThan(1)
+    expect(JSON.parse(texts.join(''))).toEqual(AI_PROBLEM_HELP)
+  })
+
   it('reports no cost for a review by a model without a price', async () => {
     const backend = await configuredBackend()
     const result = await finishDelayed(backend.reviewAiCode({ ...reviewRequest, selectedModelId: 'claude-sonnet-4-5' }))
@@ -286,6 +299,7 @@ describe('browser preview AI review follow-up', () => {
     selectedModelId: 'claude-haiku-5',
     review: reviewRequest,
     reviewAnswer: AI_REVIEW,
+    helpAnswer: null,
     history: [],
     question: 'Can the product overflow?',
     currentCode: 'class Q1TwoSum {}',
@@ -300,6 +314,17 @@ describe('browser preview AI review follow-up', () => {
     await expect(backend.askAiReviewFollowUp(followUpRequest({ question: ' ' }), (event) => events.push(event)))
       .rejects.toThrow('The question is empty.')
     expect(events).toEqual([])
+  })
+
+  it('answers about help, and refuses an answer that does not match the mode', async () => {
+    const backend = await configuredBackend()
+    const help = { review: { ...reviewRequest, mode: 'help' as const }, reviewAnswer: null, helpAnswer: AI_PROBLEM_HELP }
+    await expect(finishDelayed(backend.askAiReviewFollowUp(followUpRequest(help))))
+      .resolves.toMatchObject({ outcome: 'ok' })
+    for (const mismatch of [{ ...help, reviewAnswer: AI_REVIEW }, { ...help, helpAnswer: null }, { helpAnswer: AI_PROBLEM_HELP }]) {
+      await expect(backend.askAiReviewFollowUp(followUpRequest(mismatch)))
+        .rejects.toThrow('The follow-up answer does not match the request mode.')
+    }
   })
 
   it('streams a markdown answer in small pieces over about a second and a half', async () => {

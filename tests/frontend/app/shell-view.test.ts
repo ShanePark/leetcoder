@@ -49,7 +49,7 @@ describe('shell markup', () => {
     expect(elementMarkup(linux, 'tests-tab')).not.toContain('<kbd')
     expect(elementMarkup(linux, 'git-tab')).not.toContain('<kbd')
   })
-  it('puts the review button before the generate button and the Review tab between Tests and Git', () => {
+  it('puts the review button before the generate button and the AI tab between Tests and Git', () => {
     const markup = shellMarkup(false)
     const review = elementMarkup(markup, 'ai-review-code')
     expect(review).toContain('aria-label="Review code with AI"')
@@ -62,6 +62,7 @@ describe('shell markup', () => {
     const tabs = ['tests-tab', 'review-tab', 'git-tab'].map((id) => markup.indexOf(`id="${id}"`))
     expect(tabs).toEqual([...tabs].sort((a, b) => a - b))
     expect(elementMarkup(markup, 'review-tab')).not.toContain('keytip')
+    expect(elementMarkup(markup, 'review-tab')).toMatch(/>\s*AI\s*</)
     expect(markup).toMatch(/<section id="review-panel"[^>]*aria-labelledby="review-tab"[^>]*hidden>/)
   })
 

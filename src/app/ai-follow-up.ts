@@ -113,6 +113,7 @@ export async function runAiReviewFollowUp(
       selectedModelId: stored.servedModel,
       review: stored.request,
       reviewAnswer: stored.review,
+      helpAnswer: stored.help,
       history,
       question,
       currentCode,

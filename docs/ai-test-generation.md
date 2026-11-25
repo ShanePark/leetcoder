@@ -216,8 +216,9 @@ These are fixed now because they are expensive to change later.
 - Ledger: JSONL with `v`, `ts` (epoch ms), `provider`, `model`, `inputTokens`
   (uncached), `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outcome`,
   `inferenceGeo`, `speed`, `serviceTier`, nullable `stopCategory`, and nullable
-  `prices` in USD per MTok with `pricesFetchedAt`, and `kind` (`tests` or `review`,
-  defaulting to `tests` so older lines still parse). New fields are additive with serde
+  `prices` in USD per MTok with `pricesFetchedAt`, and `kind` (`tests`, `review`,
+  `review-follow-up`, `help`, or `help-follow-up`, defaulting to `tests` so older
+  lines still parse; only written, never read back into totals). New fields are additive with serde
   defaults.
 - Ledger `outcome` is `ok`, `refused`, `truncated`, or `invalid`. `invalid` records
   usage for an unreadable response or an unexpected stop reason, and the command then
@@ -482,6 +483,38 @@ covers generation, review, and review follow-ups.
   set through `textContent` only, and with no review the tab shows an empty state.
   A refusal, truncation, or error shows a toast and keeps the previous review.
 - Review calls are recorded in the usage ledger with `kind: "review"`.
+
+#### Help mode
+
+- `AiReviewRequest` has `mode`, `review` (the default when absent) or `help`. Help
+  is for a solution not written yet: the model explains the problem and gives
+  hints instead of reviewing code. It reuses `ai_review_code`, its streaming, and
+  its checks; native ignores `testRun` in help mode, so a run neither goes along
+  nor counts against the run limit.
+- Help has its own fixed, cached system prompt (`HELP_SYSTEM_PROMPT`), so the
+  review prefix is unchanged. The user message holds `<problem>`, `<entry_point>`
+  when present, the open file as `<starter_code>`, and the same "Write every prose
+  field in …" line; it has no `<test_run>`.
+- `AiProblemHelp` has `overview` (the problem restated: what is asked, inputs and
+  output, what the examples show), `keyPoints` (constraints, edge cases, and
+  observations that matter for an approach), and `hints`, gentlest first, ending
+  short of the full algorithm. The prompt forbids code and pseudocode in every
+  field. The schema requires all three fields with no others.
+- `AiReviewResult.help` holds it for an `ok` help reply and `review` is null; a
+  review reply is the reverse, and other outcomes have neither.
+- Help calls are recorded with `kind: "help"`, and their follow-ups with
+  `kind: "help-follow-up"`. The ledger only writes `kind`, so no migration is needed.
+- Follow-ups use `ai_review_follow_up`. `reviewAnswer` and `helpAnswer` are both
+  nullable, and exactly the one matching `review.mode` must be set; anything else
+  is rejected before sending ("The follow-up request was invalid."). A help
+  follow-up has its own cached system prompt (`HELP_FOLLOW_UP_SYSTEM_PROMPT`):
+  the user may ask more, ask for another hint, or ask for the approach or the
+  solution, all answered in prose without code. It keeps the same
+  `propose_code_change` tool and code rules, called only when the user explicitly
+  asks for code to be written or changed. The context is seeded as for a review,
+  with the help user message under the second breakpoint and the help JSON as the
+  first assistant turn; history, the answer-language line, and `<current_code>`
+  (noted as differing from the `<starter_code>` helped with) follow unchanged.
 
 #### Streaming
 

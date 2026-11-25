@@ -1,4 +1,4 @@
-import type { AiModel, AiReview, AiReviewResult, DailyProblem } from '../backend'
+import type { AiModel, AiProblemHelp, AiReview, AiReviewResult, DailyProblem } from '../backend'
 
 export const DAILY_PROBLEM: DailyProblem = {
   date: new Date().toISOString().slice(0, 10),
@@ -204,6 +204,22 @@ export const AI_FAILING_REVIEW: AiReview = {
   failureCause:
     'With product starting at 0 instead of 1, n = 99 is checked against 18 + 0 = 18, and 99 % 18 = 9, so the method returns false instead of true.',
   issues: ['The product starts at 0, so multiplying the digits into it always gives 0.'],
+}
+
+/** The preview help for a solution that is still unimplemented. */
+export const AI_PROBLEM_HELP: AiProblemHelp = {
+  overview:
+    'Given a positive integer n, add up its digits and multiply them together, then return whether n is divisible by the sum of those two results. In the first example, 99 has digit sum 18 and digit product 81, and 99 % 99 = 0.',
+  keyPoints: [
+    'n is at most 10^6, so it has at most 7 digits and any per-digit work is cheap.',
+    'A zero digit makes the product 0, so only the digit sum is left in the divisor.',
+    'The divisor is never 0, because n is positive and has at least one nonzero digit.',
+  ],
+  hints: [
+    'You only need two running values while you look at each digit once.',
+    'What should each value start at so that the first digit does not change it?',
+    'n % 10 gives the last digit and n / 10 drops it; repeat on a copy until it reaches 0.',
+  ],
 }
 
 export function seedAiUsage(now: number): AiUsageEntry[] {
