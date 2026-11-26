@@ -43,7 +43,8 @@ export type RunShortcutId = 'run-test-at-cursor' | 'run-test'
 
 /** App-level shortcuts that act on tool windows and Git wherever focus is. */
 export type WorkspaceShortcutId =
-  | 'toggle-sidebar'
+  | 'show-problems-tab'
+  | 'show-description-tab'
   | 'show-tests-panel'
   | 'show-git-panel'
   | 'git-commit'
@@ -115,7 +116,8 @@ export const SHORTCUT_SECTIONS: readonly ShortcutSection[] = [
   {
     title: 'Tool windows',
     entries: [
-      { id: 'toggle-sidebar', bindings: ['Mod-1', 'Alt-1'], description: 'Show or hide Problems' },
+      { id: 'show-problems-tab', bindings: ['Mod-1', 'Alt-1'], description: 'Show or hide Problems' },
+      { id: 'show-description-tab', bindings: ['Mod-2', 'Alt-2'], description: 'Show or hide Description' },
       { id: 'show-tests-panel', bindings: ['Mod-4', 'Alt-4'], description: 'Show Tests' },
       { id: 'show-git-panel', bindings: ['Mod-9', 'Alt-9'], description: 'Show Git' },
     ],
@@ -313,7 +315,8 @@ function matchesPlatformBinding(
 }
 
 const WORKSPACE_SHORTCUTS: readonly WorkspaceShortcutId[] = [
-  'toggle-sidebar',
+  'show-problems-tab',
+  'show-description-tab',
   'show-tests-panel',
   'show-git-panel',
   'git-commit',

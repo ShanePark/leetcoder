@@ -50,7 +50,6 @@ export interface DocumentControllerContext {
   readonly editor: DocumentControllerEditor
   readonly getRepositoryGeneration: () => number
   readonly resetTestState: () => void
-  readonly cancelCurrentRun: () => void
   readonly renderAll: () => void
   readonly renderFileHeading: () => void
   readonly renderFileTabs: () => void
@@ -353,10 +352,6 @@ export class DocumentController {
     this.state.dirty = source !== this.state.savedSource
     this.state.saveError = null
     this.clearSavedFlash()
-    if (this.state.testRun?.status === 'running') {
-      this.context.cancelCurrentRun()
-      this.context.renderResult()
-    }
     if (!this.gitDiscardInProgress) {
       const snapshot: AutosaveSnapshot = {
         repoPath: this.state.repoPath,
@@ -410,6 +405,18 @@ export class DocumentController {
       if (this.closePreparation === preparation) {
         this.closePreparation = null
       }
+    }
+  }
+
+  /**
+   * Keep debounced edits pending while a test run compiles the file on disk.
+   * Explicit flushes still write; release debounces any edit made meanwhile.
+   */
+  setAutosaveHeld(held: boolean): void {
+    if (held) {
+      this.autosave.hold()
+    } else {
+      this.autosave.release()
     }
   }
 

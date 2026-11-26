@@ -17,7 +17,6 @@ export interface DailyProblemViewModel {
   problemSelection: DailyProblemSelection
   problemUrlDraft: string
   viewingToday: boolean
-  dailyDescriptionOpen: boolean
 }
 
 /** User actions leave state changes and asynchronous work with the app. */
@@ -26,16 +25,14 @@ export interface DailyProblemViewCallbacks {
   onLookupSubmit: (value: string) => void
   onRetry: () => void
   onBackToToday: () => void
-  onToggleDescription: () => void
   onOpenFile: (file: ProblemFileEntry) => void
   onCreateFile: () => void
-  onApplyDescriptionHeight: () => void
 }
 
 export interface DailyProblemViewElements {
   header: HTMLElement
+  /** The Description tab's content; the tab strip owns its visibility. */
   description: HTMLElement
-  resizeHandle: HTMLElement
 }
 
 export type DailyProblemViewRenderer = (model: DailyProblemViewModel) => void
@@ -58,7 +55,6 @@ interface DailyProblemRenderSnapshot {
   readonly problemSelection: DailyProblemSelection
   readonly problemUrlDraft: string
   readonly viewingToday: boolean
-  readonly dailyDescriptionOpen: boolean
 }
 
 /**
@@ -114,9 +110,12 @@ export function createDailyProblemView(
 
     const problem = model.problem
     if (!problem) {
-      elements.description.hidden = true
-      elements.resizeHandle.hidden = true
-      currentCallbacks.onApplyDescriptionHeight()
+      renderDescriptionEmpty(
+        elements.description,
+        model.dailyLoading
+          ? 'Loading description…'
+          : model.dailyError ? 'Couldn’t load this problem' : 'No problem loaded',
+      )
       if (model.dailyLoading) {
         identity.append(renderDailySkeleton())
       } else if (model.dailyError) {
@@ -166,33 +165,17 @@ export function createDailyProblemView(
       todayButton.addEventListener('click', () => currentCallbacks.onBackToToday())
     }
 
-    const actions = document.createElement('div')
-    actions.className = 'daily-actions'
-
     const link = document.createElement('a')
-    link.className = 'icon-button'
+    link.className = 'icon-button daily-link'
     link.href = problem.url
     link.target = '_blank'
     link.rel = 'noreferrer noopener'
     link.setAttribute('aria-label', 'Open on LeetCode')
     link.title = 'Open on LeetCode'
     link.append(iconFor('externalLink', 'button-icon'))
-    actions.append(link)
 
-    const hasContent = Boolean(problem.content && problem.content.trim().length > 0)
-    if (hasContent) {
-      const toggle = document.createElement('button')
-      toggle.type = 'button'
-      toggle.className = 'icon-button daily-description-toggle'
-      toggle.setAttribute('aria-label', 'Toggle problem description')
-      toggle.setAttribute('aria-expanded', String(model.dailyDescriptionOpen))
-      toggle.setAttribute('aria-controls', 'daily-description')
-      toggle.title = 'Description'
-      toggle.append(iconFor('bookOpen', 'button-icon'))
-      toggle.classList.toggle('is-active', model.dailyDescriptionOpen)
-      toggle.addEventListener('click', () => currentCallbacks.onToggleDescription())
-      actions.append(toggle)
-    }
+    const actions = document.createElement('div')
+    actions.className = 'daily-actions'
 
     const primary = document.createElement('button')
     primary.type = 'button'
@@ -219,18 +202,15 @@ export function createDailyProblemView(
       primary.addEventListener('click', () => currentCallbacks.onCreateFile())
     }
     actions.append(primary)
-    identity.append(number, title, difficulty, today)
+    identity.append(number, title, difficulty, today, link)
     elements.header.append(actions)
 
-    if (hasContent && model.dailyDescriptionOpen) {
-      elements.description.hidden = false
+    // Rendered while the tab is hidden too, so switching tabs only toggles
+    // visibility; the sanitized DOM is reused until the content changes.
+    if (problem.content && problem.content.trim().length > 0) {
       renderDailyDescription(elements.description, problem.content ?? '')
-      elements.resizeHandle.hidden = false
-      currentCallbacks.onApplyDescriptionHeight()
     } else {
-      elements.description.hidden = true
-      elements.resizeHandle.hidden = true
-      currentCallbacks.onApplyDescriptionHeight()
+      renderDescriptionEmpty(elements.description, 'No description available')
     }
   }
 
@@ -246,6 +226,14 @@ export function createDailyProblemView(
       container.innerHTML = ''
       container.append(sanitizedDescriptionElement)
     }
+  }
+
+  function renderDescriptionEmpty(container: HTMLElement, message: string): void {
+    container.innerHTML = ''
+    const empty = document.createElement('p')
+    empty.className = 'muted-copy daily-description-empty'
+    empty.textContent = message
+    container.append(empty)
   }
 }
 
@@ -270,7 +258,6 @@ function dailyProblemRenderSnapshot(model: DailyProblemViewModel): DailyProblemR
     problemSelection: model.problemSelection,
     problemUrlDraft: model.problemUrlDraft,
     viewingToday: model.viewingToday,
-    dailyDescriptionOpen: model.dailyDescriptionOpen,
   }
 }
 
@@ -298,7 +285,6 @@ function sameDailyProblemSnapshot(
     && previous.problemSelection === next.problemSelection
     && previous.problemUrlDraft === next.problemUrlDraft
     && previous.viewingToday === next.viewingToday
-    && previous.dailyDescriptionOpen === next.dailyDescriptionOpen
 }
 
 function renderProblemLookup(

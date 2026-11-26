@@ -62,7 +62,7 @@ import { ProjectContentSearchController } from './app/project-search-controller'
 import { PsLibraryController } from './app/ps-library-controller'
 import { JavaTypeMembersController } from './app/java-type-members-controller'
 import { FileExplorerController } from './app/file-explorer-controller'
-import { BOTTOM_PANEL_TABS, ShellControlsView } from './app/shell-controls-view'
+import { BOTTOM_PANEL_TABS, ShellControlsView, SIDEBAR_TABS } from './app/shell-controls-view'
 import {
   createFileTabsView,
   renderFileHeading as renderFileHeadingView,
@@ -95,14 +95,14 @@ import { findTodayProblemFile } from './app/file-helpers'
 import {
   DEFAULT_GIT_FILE_LIST_WIDTH,
   MAX_BOTTOM_PANEL_HEIGHT,
-  MAX_DAILY_DESCRIPTION_HEIGHT,
   MAX_SIDEBAR_WIDTH,
   MIN_BOTTOM_PANEL_HEIGHT,
-  MIN_DAILY_DESCRIPTION_HEIGHT,
   MIN_GIT_DIFF_WIDTH,
   MIN_GIT_FILE_LIST_WIDTH,
   MIN_SIDEBAR_WIDTH,
+  SIDEBAR_TAB_KEY,
   isMacPlatform,
+  readSidebarTab,
 } from './app/layout'
 import { renderShellView } from './app/shell-view'
 import { renderTestResults } from './app/results-view'
@@ -116,9 +116,9 @@ import type {
   BottomPanelTab,
   DirectoryPicker,
   OpenFileTab,
+  SidebarTab,
 } from './app/types'
 const APP_VERSION = '0.1.0'
-const DAILY_DESCRIPTION_KEY = 'leetcoder.daily-description'
 /** How long the advertised modifier must be held alone before keytips show. */
 const KEYTIP_DELAY_MS = 350
 
@@ -186,7 +186,7 @@ export class LeetcoderApp {
   private readonly appListeners: Array<() => void> = []
   private destroyed = false
   private keytipTimer: ReturnType<typeof setTimeout> | null = null
-  private dailyDescriptionOpen = false
+  private sidebarTab: SidebarTab = 'problems'
   private readonly gitController: GitController
   private readonly gitCommitDialog: GitCommitDialog
   private readonly paneLayout: PaneLayoutController
@@ -384,7 +384,7 @@ export class LeetcoderApp {
     this.backend = options.backend ?? createBackendClient()
     this.storage = options.storage ?? safeStorage()
     this.requestClose = options.requestClose
-    this.dailyDescriptionOpen = this.storage?.getItem(DAILY_DESCRIPTION_KEY) === 'open'
+    this.sidebarTab = readSidebarTab(this.storage)
     this.gitController = new GitController(this.backend, {
       getContext: () => ({
         repoPath: this.state.repoPath,
@@ -439,7 +439,6 @@ export class LeetcoderApp {
       {
         header: this.element<HTMLElement>('#daily-header'),
         description: this.element<HTMLElement>('#daily-description'),
-        resizeHandle: this.element<HTMLElement>('#daily-description-resize-handle'),
       },
       {
         onLookupInput: (value) => this.problemSelectionController.setProblemUrlDraft(value),
@@ -452,18 +451,16 @@ export class LeetcoderApp {
         onBackToToday: () => {
           this.problemSelectionController.selectToday()
         },
-        onToggleDescription: () => {
-          this.dailyDescriptionOpen = !this.dailyDescriptionOpen
-          this.storage?.setItem(DAILY_DESCRIPTION_KEY, this.dailyDescriptionOpen ? 'open' : 'closed')
-          this.renderDailyProblem()
-        },
         onOpenFile: (file) => {
-          void this.openFile(file)
+          void this.openFile(file).then(() => this.showDescriptionForOpenedFile(file.path))
         },
         onCreateFile: () => {
-          void this.createFileForToday()
+          const problem = this.state.dailyProblem
+          void this.createFileForToday().then(() => {
+            const created = problem ? findTodayProblemFile(this.state.files, problem) : null
+            if (created) this.showDescriptionForOpenedFile(created.path)
+          })
         },
-        onApplyDescriptionHeight: () => this.paneLayout.applyDailyDescriptionHeight(),
       },
     )
     this.updateController = createUpdateController(
@@ -504,6 +501,7 @@ export class LeetcoderApp {
       flushPendingSave: () => this.flushPendingSave(),
       setEditorIssues: (issues) => this.editor.setIssues(issues),
       setLiveDiagnosticsBlocked: (blocked) => this.liveDiagnostics.setBlocked(blocked),
+      setAutosaveHeld: (held) => this.documentController.setAutosaveHeld(held),
       cancelLiveDiagnostics: () => this.liveDiagnostics.cancel(),
       clearLiveDiagnosticsError: () => {
         this.state.liveDiagnosticsError = null
@@ -579,7 +577,6 @@ export class LeetcoderApp {
       editor: this.editor,
       getRepositoryGeneration: () => this.repository.generation,
       resetTestState: () => this.testRunController.resetTestState(),
-      cancelCurrentRun: () => this.testRunController.cancelCurrentRun(),
       renderAll: () => this.renderAll(),
       renderFileHeading: () => this.renderFileHeading(),
       renderFileTabs: () => this.renderFileTabs(),
@@ -880,8 +877,6 @@ export class LeetcoderApp {
       macPlatform: currentIsMacPlatform(),
       minSidebarWidth: MIN_SIDEBAR_WIDTH,
       maxSidebarWidth: MAX_SIDEBAR_WIDTH,
-      minDailyDescriptionHeight: MIN_DAILY_DESCRIPTION_HEIGHT,
-      maxDailyDescriptionHeight: MAX_DAILY_DESCRIPTION_HEIGHT,
       minBottomPanelHeight: MIN_BOTTOM_PANEL_HEIGHT,
       maxBottomPanelHeight: MAX_BOTTOM_PANEL_HEIGHT,
       minGitFileListWidth: MIN_GIT_FILE_LIST_WIDTH,
@@ -983,6 +978,25 @@ export class LeetcoderApp {
       // The controller checks the key and opens the model picker; only the picker sends.
       void this.aiController.review()
     })
+    SIDEBAR_TABS.forEach((tab, index) => {
+      const button = this.element<HTMLButtonElement>(`#sidebar-${tab}-tab`)
+      this.listen(button, 'click', () => {
+        this.selectSidebarTab(tab)
+      })
+      this.listen(button, 'keydown', (event) => {
+        const last = SIDEBAR_TABS.length - 1
+        const target = event.key === 'ArrowLeft'
+          ? (index + last) % SIDEBAR_TABS.length
+          : event.key === 'ArrowRight'
+            ? (index + 1) % SIDEBAR_TABS.length
+            : event.key === 'Home' ? 0 : event.key === 'End' ? last : null
+        if (target === null) {
+          return
+        }
+        event.preventDefault()
+        this.selectSidebarTab(SIDEBAR_TABS[target], true)
+      })
+    })
     BOTTOM_PANEL_TABS.forEach((tab, index) => {
       const button = this.element<HTMLButtonElement>(`#${tab}-tab`)
       this.listen(button, 'click', () => {
@@ -1026,7 +1040,7 @@ export class LeetcoderApp {
       void this.gitController.commitSelectedFiles(true)
     })
     this.listen(this.element<HTMLButtonElement>('#sidebar-toggle'), 'click', () => {
-      this.toggleSidebar()
+      this.toggleSidebarTab('problems')
     })
     this.fileDialogs.bindEvents()
     this.aiCaseDialog.bindEvents()
@@ -1107,8 +1121,11 @@ export class LeetcoderApp {
       return
     }
     switch (id) {
-      case 'toggle-sidebar':
-        this.toggleSidebar()
+      case 'show-problems-tab':
+        this.toggleSidebarTab('problems')
+        return
+      case 'show-description-tab':
+        this.toggleSidebarTab('description')
         return
       case 'show-tests-panel':
         this.selectBottomPanelTab('tests')
@@ -1126,39 +1143,79 @@ export class LeetcoderApp {
    * Follow the buttons: when one is enabled (a typed message, or the default
    * message offered as the placeholder), Commit runs from the message field
    * and Commit & Push from anywhere, through the button so its guards apply.
-   * Otherwise both bring the message field forward.
+   * With nothing checked, a shortcut that would commit first checks every
+   * change when they can only mean one commit. Otherwise both bring the
+   * message field forward.
    */
   private commitFromShortcut(push: boolean): void {
     const input = this.element<HTMLInputElement>('#git-commit-message')
     const button = this.element<HTMLButtonElement>(push ? '#git-commit-push' : '#git-commit')
     const inMessageField = input.ownerDocument.activeElement === input
-    if (!button.disabled && (push || inMessageField)) {
-      button.click()
-      return
+    if (push || inMessageField) {
+      // Selecting repaints the panel synchronously, which enables the button.
+      if (button.disabled) this.gitController.selectAllForShortcutCommit()
+      if (!button.disabled) {
+        button.click()
+        return
+      }
     }
     this.selectBottomPanelTab('git')
     input.focus()
   }
 
-  private toggleSidebar(): void {
-    const collapse = !this.paneLayout.sidebarCollapsed
+  /**
+   * A tab's shortcut, and the header toggle for Problems: hide the sidebar
+   * when that tab is already on screen, otherwise show the sidebar on it.
+   */
+  private toggleSidebarTab(tab: SidebarTab): void {
     const active = this.root.ownerDocument.activeElement
-    const focusInSidebar = collapse && active instanceof Node
-      && this.element<HTMLElement>('.sidebar').contains(active)
-    this.paneLayout.setSidebarCollapsed(collapse)
-    if (focusInSidebar) {
+    const focusIn = (selector: string): boolean => active instanceof Node
+      && this.element<HTMLElement>(selector).contains(active)
+    if (this.paneLayout.sidebarCollapsed || this.sidebarTab !== tab) {
       // Hiding the focused control would drop focus to the document body.
+      const focusInHiddenPanel = focusIn(`#sidebar-${this.sidebarTab}-panel`)
+      this.showSidebarTab(tab, focusInHiddenPanel)
+      return
+    }
+    const focusInSidebar = focusIn('.sidebar')
+    this.paneLayout.setSidebarCollapsed(true)
+    this.controlsView.renderSidebarTabs(this.sidebarTab, true)
+    if (focusInSidebar) {
       if (this.state.selectedPath) this.editor.focus()
       else this.element<HTMLButtonElement>('#sidebar-toggle').focus()
     }
   }
 
-  /** The search field lives in the sidebar, so a collapsed sidebar opens first. */
+  /** Opening today's file from the header brings its description forward. */
+  private showDescriptionForOpenedFile(path: string): void {
+    if (this.destroyed || this.state.selectedPath !== path) {
+      return
+    }
+    this.showSidebarTab('description')
+  }
+
+  /** The search field lives on the sidebar's Problems tab, so that opens first. */
   private focusFileSearch(): void {
+    this.showSidebarTab('problems')
+    this.fileExplorer.focusFileSearch()
+  }
+
+  private showSidebarTab(tab: SidebarTab, focus = false): void {
     if (this.paneLayout.sidebarCollapsed) {
       this.paneLayout.setSidebarCollapsed(false)
     }
-    this.fileExplorer.focusFileSearch()
+    this.selectSidebarTab(tab, focus)
+  }
+
+  private selectSidebarTab(tab: SidebarTab, focus = false): void {
+    if (tab !== this.sidebarTab) {
+      this.sidebarTab = tab
+      this.storage?.setItem(SIDEBAR_TAB_KEY, tab)
+    }
+    this.controlsView.renderSidebarTabs(tab, this.paneLayout.sidebarCollapsed)
+    if (focus) {
+      this.element<HTMLButtonElement>(`#sidebar-${tab}-tab`).focus()
+    }
   }
 
   /**
@@ -1316,6 +1373,7 @@ export class LeetcoderApp {
     this.renderFileTabs()
     this.renderFileHeading()
     this.renderResult()
+    this.controlsView.renderSidebarTabs(this.sidebarTab, this.paneLayout.sidebarCollapsed)
     this.controlsView.renderBottomPanelTabs()
     this.renderGitPanel()
     this.fileDialogs.renderContextMenu()
@@ -1340,7 +1398,6 @@ export class LeetcoderApp {
       problemSelection: this.state.problemSelection,
       problemUrlDraft: this.problemSelectionController.problemUrlDraft,
       viewingToday: problem ? this.problemSelectionController.isViewingTodayProblem(problem) : false,
-      dailyDescriptionOpen: this.dailyDescriptionOpen,
     })
   }
 
@@ -1564,7 +1621,6 @@ export {
   applyTheme,
   clampBottomPanelHeight,
   clampContextMenuPosition,
-  clampDailyDescriptionHeight,
   clampGitFileListWidth,
   clampSidebarWidth,
   defaultShortcutPlatform,

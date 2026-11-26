@@ -289,7 +289,6 @@ vi.mock('../../../src/app/pane-layout', () => ({
         layout.sidebarCollapsed = collapsed
       }),
       apply: vi.fn(),
-      applyDailyDescriptionHeight: vi.fn(),
       applyGitFileListWidth: vi.fn(),
       applyTestListWidth: vi.fn(),
       destroy: vi.fn(),
@@ -341,7 +340,6 @@ vi.mock('../../../src/app/test-run-controller', () => ({
       testMocks.testRunControllers.push(this)
     }
     resetTestState(): void {}
-    cancelCurrentRun(): void {}
     selectTestResult(_key: string, _focus: boolean): void {}
     acceptRenderedSelection(_key: string | null): void {}
     isResultSourceCurrent(_source: unknown): boolean { return false }
@@ -389,6 +387,7 @@ vi.mock('../../../src/app/git-controller', () => ({
     clearScheduledRefresh(): void {}
     selectAllFiles(): void {}
     selectNoFiles(): void {}
+    selectAllForShortcutCommit(): boolean { return false }
     toggleFile(_path: string, _selected: boolean): void {}
     setActiveFile(_path: string): void {}
     selectRow(_path: string, _modifiers?: unknown): void {}

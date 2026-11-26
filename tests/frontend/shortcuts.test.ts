@@ -314,13 +314,16 @@ describe('empty editor hints', () => {
 
 describe('workspace shortcut table', () => {
   it('declares the tool-window and Git chords with platform labels', () => {
-    expect(shortcutBindings('toggle-sidebar')).toEqual(['Mod-1', 'Alt-1'])
+    expect(shortcutBindings('show-problems-tab')).toEqual(['Mod-1', 'Alt-1'])
+    expect(shortcutBindings('show-description-tab')).toEqual(['Mod-2', 'Alt-2'])
     expect(shortcutBindings('show-tests-panel')).toEqual(['Mod-4', 'Alt-4'])
     expect(shortcutBindings('show-git-panel')).toEqual(['Mod-9', 'Alt-9'])
     expect(shortcutBindings('git-commit')).toEqual(['Mod-k', 'Alt-k'])
     expect(shortcutBindings('git-commit-push')).toEqual(['Mod-Alt-k'])
-    expect(shortcutLabel('toggle-sidebar', true)).toBe('⌘1')
-    expect(shortcutLabel('toggle-sidebar', false)).toBe('Alt+1')
+    expect(shortcutLabel('show-problems-tab', true)).toBe('⌘1')
+    expect(shortcutLabel('show-problems-tab', false)).toBe('Alt+1')
+    expect(shortcutLabel('show-description-tab', true)).toBe('⌘2')
+    expect(shortcutLabel('show-description-tab', false)).toBe('Alt+2')
     expect(shortcutLabel('show-tests-panel', true)).toBe('⌘4')
     expect(shortcutLabel('show-tests-panel', false)).toBe('Alt+4')
     expect(shortcutLabel('show-git-panel', true)).toBe('⌘9')
@@ -338,7 +341,8 @@ describe('workspace shortcut table', () => {
       section.title,
       section.entries.map((entry) => entry.id),
     ]))
-    expect(sections.get('Tool windows')).toEqual(['toggle-sidebar', 'show-tests-panel', 'show-git-panel'])
+    expect(sections.get('Tool windows'))
+      .toEqual(['show-problems-tab', 'show-description-tab', 'show-tests-panel', 'show-git-panel'])
     expect(sections.get('Git')).toEqual(['git-commit', 'git-commit-push', 'git-confirm-commit', 'git-cancel-commit'])
   })
 
@@ -374,19 +378,22 @@ describe('workspace shortcut matching', () => {
   }
 
   it('matches Alt digits and K on Linux, including on their physical codes', () => {
-    expect(workspaceShortcutAction({ ...none, key: '1', code: 'Digit1', altKey: true }, false)).toBe('toggle-sidebar')
+    expect(workspaceShortcutAction({ ...none, key: '1', code: 'Digit1', altKey: true }, false)).toBe('show-problems-tab')
+    expect(workspaceShortcutAction({ ...none, key: '2', code: 'Digit2', altKey: true }, false)).toBe('show-description-tab')
     expect(workspaceShortcutAction({ ...none, key: '4', code: 'Digit4', altKey: true }, false)).toBe('show-tests-panel')
     expect(workspaceShortcutAction({ ...none, key: '9', code: 'Digit9', altKey: true }, false)).toBe('show-git-panel')
     expect(workspaceShortcutAction({ ...none, key: 'k', code: 'KeyK', altKey: true }, false)).toBe('git-commit')
     // Layouts that need Shift for digits, or compose Alt+key, still match by code.
-    expect(workspaceShortcutAction({ ...none, key: '&', code: 'Digit1', altKey: true }, false)).toBe('toggle-sidebar')
+    expect(workspaceShortcutAction({ ...none, key: '&', code: 'Digit1', altKey: true }, false)).toBe('show-problems-tab')
+    expect(workspaceShortcutAction({ ...none, key: 'é', code: 'Digit2', altKey: true }, false)).toBe('show-description-tab')
     expect(workspaceShortcutAction({ ...none, key: 'ĸ', code: 'KeyK', altKey: true }, false)).toBe('git-commit')
     expect(workspaceShortcutAction({ ...none, key: 'k', code: 'KeyK', altKey: true, ctrlKey: true }, false))
       .toBe('git-commit-push')
   })
 
   it('matches Cmd digits and K on macOS, and Cmd+Option+K when Option composes a glyph', () => {
-    expect(workspaceShortcutAction({ ...none, key: '1', code: 'Digit1', metaKey: true }, true)).toBe('toggle-sidebar')
+    expect(workspaceShortcutAction({ ...none, key: '1', code: 'Digit1', metaKey: true }, true)).toBe('show-problems-tab')
+    expect(workspaceShortcutAction({ ...none, key: '2', code: 'Digit2', metaKey: true }, true)).toBe('show-description-tab')
     expect(workspaceShortcutAction({ ...none, key: '4', code: 'Digit4', metaKey: true }, true)).toBe('show-tests-panel')
     expect(workspaceShortcutAction({ ...none, key: '9', code: 'Digit9', metaKey: true }, true)).toBe('show-git-panel')
     expect(workspaceShortcutAction({ ...none, key: 'k', code: 'KeyK', metaKey: true }, true)).toBe('git-commit')
@@ -405,7 +412,8 @@ describe('workspace shortcut matching', () => {
     expect(workspaceShortcutAction({ ...none, key: 'k', code: 'KeyK', ctrlKey: true, altKey: true }, true)).toBeNull()
     expect(workspaceShortcutAction({ ...none, key: 'k', code: 'KeyK', ctrlKey: true, altKey: true, shiftKey: true }, false))
       .toBeNull()
-    expect(workspaceShortcutAction({ ...none, key: '2', code: 'Digit2', altKey: true }, false)).toBeNull()
+    expect(workspaceShortcutAction({ ...none, key: '2', code: 'Digit2', altKey: true }, true)).toBeNull()
+    expect(workspaceShortcutAction({ ...none, key: '3', code: 'Digit3', altKey: true }, false)).toBeNull()
     // The physical-code fallback is only for Alt chords.
     expect(workspaceShortcutAction({ ...none, key: '&', code: 'Digit1', metaKey: true }, true)).toBeNull()
   })

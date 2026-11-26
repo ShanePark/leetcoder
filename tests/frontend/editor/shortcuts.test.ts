@@ -19,7 +19,8 @@ import {
   isProjectSearchAltShortcut,
   isShowGitPanelAltShortcut,
   isShowTestsPanelAltShortcut,
-  isToggleSidebarAltShortcut,
+  isShowDescriptionTabAltShortcut,
+  isShowProblemsTabAltShortcut,
   isLineCutAltShortcut,
   isMoveLineDownAltShortcut,
   isMoveLineUpAltShortcut,
@@ -179,11 +180,14 @@ describe('workspace shortcut matchers', () => {
   const base = { shiftKey: false, altKey: true, metaKey: false, ctrlKey: false }
 
   it('matches the Linux Alt tool-window and commit forms on their physical keys', () => {
-    expect(isToggleSidebarAltShortcut({ ...base, code: 'Digit1' })).toBe(true)
+    expect(isShowProblemsTabAltShortcut({ ...base, code: 'Digit1' })).toBe(true)
+    expect(isShowDescriptionTabAltShortcut({ ...base, code: 'Digit2' })).toBe(true)
     expect(isShowTestsPanelAltShortcut({ ...base, code: 'Digit4' })).toBe(true)
     expect(isShowGitPanelAltShortcut({ ...base, code: 'Digit9' })).toBe(true)
     expect(isGitCommitAltShortcut({ ...base, code: 'KeyK' })).toBe(true)
-    expect(isToggleSidebarAltShortcut({ ...base, code: 'Numpad1' })).toBe(false)
+    expect(isShowProblemsTabAltShortcut({ ...base, code: 'Numpad1' })).toBe(false)
+    expect(isShowDescriptionTabAltShortcut({ ...base, code: 'Digit1' })).toBe(false)
+    expect(isShowDescriptionTabAltShortcut({ ...base, code: 'Digit2', ctrlKey: true })).toBe(false)
     expect(isShowTestsPanelAltShortcut({ ...base, code: 'Digit4', shiftKey: true })).toBe(false)
     expect(isShowGitPanelAltShortcut({ ...base, code: 'Digit9', metaKey: true })).toBe(false)
     expect(isGitCommitAltShortcut({ ...base, code: 'KeyK', ctrlKey: true })).toBe(false)
@@ -198,7 +202,8 @@ describe('workspace shortcut matchers', () => {
   })
 
   it.each([
-    ['Linux', { key: '1', code: 'Digit1', altKey: true, metaKey: false, ctrlKey: false }, 'toggle-sidebar'],
+    ['Linux', { key: '1', code: 'Digit1', altKey: true, metaKey: false, ctrlKey: false }, 'show-problems-tab'],
+    ['Linux', { key: '2', code: 'Digit2', altKey: true, metaKey: false, ctrlKey: false }, 'show-description-tab'],
     ['Linux', { key: 'k', code: 'KeyK', altKey: true, metaKey: false, ctrlKey: false }, 'git-commit'],
     ['MacIntel', { key: '˚', code: 'KeyK', altKey: true, metaKey: true, ctrlKey: false }, 'git-commit-push'],
   ] as const)('forwards the %s chord to the app and stops it reaching the window', (platform, keys, id) => {

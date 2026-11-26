@@ -7,6 +7,7 @@ import type {
 /**
  * Coalesces editor changes into one debounced write and follows an in-flight
  * write with the newest snapshot when the document changes while saving.
+ * While held, debounced writes wait for release(); explicit flushes still write.
  */
 export class AutosaveCoordinator {
   private readonly save: (snapshot: AutosaveSnapshot) => Promise<void>
@@ -18,6 +19,9 @@ export class AutosaveCoordinator {
   private running: Promise<void> | null = null
   private currentStatus: AutosaveStatus = 'idle'
   private disposed = false
+  private held = false
+  /** A debounced write was skipped while held and is owed on release. */
+  private deferred = false
 
   constructor(
     save: (snapshot: AutosaveSnapshot) => Promise<void>,
@@ -43,6 +47,7 @@ export class AutosaveCoordinator {
    */
   cancelPending(): void {
     this.clearTimer()
+    this.deferred = false
     this.pending = null
     if (!this.running) {
       this.setStatus('idle')
@@ -56,14 +61,40 @@ export class AutosaveCoordinator {
     this.pending = snapshot
     this.clearTimer()
     this.setStatus('saving')
-    this.timer = setTimeout(() => {
-      this.timer = null
-      void this.flush().catch((error) => this.onError?.(error))
-    }, this.delayMs)
+    if (this.held) {
+      this.deferred = true
+      return
+    }
+    this.startTimer()
+  }
+
+  /** Defer debounced writes, keeping edits pending until release(). */
+  hold(): void {
+    this.held = true
+    if (this.timer !== null) {
+      this.clearTimer()
+      this.deferred = true
+    }
+  }
+
+  /** Resume debounced writes and debounce any edit deferred while held. */
+  release(): void {
+    if (!this.held) {
+      return
+    }
+    this.held = false
+    const deferred = this.deferred
+    this.deferred = false
+    if (deferred && this.pending && !this.disposed) {
+      this.startTimer()
+    }
   }
 
   async flush(): Promise<void> {
     this.clearTimer()
+    // An explicit flush takes over any deferred write. A failed snapshot stays
+    // pending for an explicit retry instead of being retried on release.
+    this.deferred = false
     if (!this.pending && !this.running) {
       return
     }
@@ -73,6 +104,13 @@ export class AutosaveCoordinator {
   dispose(): void {
     this.disposed = true
     this.clearTimer()
+  }
+
+  private startTimer(): void {
+    this.timer = setTimeout(() => {
+      this.timer = null
+      void this.flush().catch((error) => this.onError?.(error))
+    }, this.delayMs)
   }
 
   private startRun(): Promise<void> {

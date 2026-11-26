@@ -90,14 +90,14 @@
 /* One full-width bar above the panels. It sits on the backdrop rather than
    in a panel, so it reads as the window's title bar, and its layout never
    follows the sidebar width. 28px controls center in the 44px row.
-   The equal outer tracks keep the problem centered in the window and leave
-   empty bar on both sides of it to drag; the problem shrinks first. */
+   The problem sits at the end, leaving the empty bar between the groups to
+   drag; the problem shrinks first. */
 .app-header {
-  display: grid;
+  display: flex;
   flex: none;
-  grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr);
   align-items: center;
-  column-gap: 24px;
+  justify-content: space-between;
+  gap: 24px;
   height: 44px;
   min-width: 0;
   padding: 0 6px;
@@ -109,7 +109,7 @@
 
 .app-header-start {
   display: flex;
-  flex: 0 1 auto;
+  flex: none;
   align-items: center;
   gap: 4px;
   min-width: 0;

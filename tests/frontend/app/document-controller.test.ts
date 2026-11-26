@@ -69,7 +69,6 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
   }
   hooks: {
     resetTestState: ReturnType<typeof vi.fn>
-    cancelCurrentRun: ReturnType<typeof vi.fn>
     renderAll: ReturnType<typeof vi.fn>
     renderFileHeading: ReturnType<typeof vi.fn>
     renderFileTabs: ReturnType<typeof vi.fn>
@@ -109,7 +108,6 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
   }
   const hooks = {
     resetTestState: vi.fn(),
-    cancelCurrentRun: vi.fn(),
     renderAll: vi.fn(),
     renderFileHeading: vi.fn(),
     renderFileTabs: vi.fn(),
@@ -131,7 +129,6 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
     editor,
     getRepositoryGeneration: () => generation,
     resetTestState: hooks.resetTestState,
-    cancelCurrentRun: hooks.cancelCurrentRun,
     renderAll: hooks.renderAll,
     renderFileHeading: hooks.renderFileHeading,
     renderFileTabs: hooks.renderFileTabs,
@@ -507,7 +504,7 @@ describe('DocumentController', () => {
     controller.dispose()
   })
 
-  it('retains a native test lock on edit and suppresses autosave during Git discard', async () => {
+  it('keeps a running test run on edit and suppresses autosave during Git discard', async () => {
     const { controller, state, backend, hooks } = createHarness({
       openTabs: [{ id: 1, ...fileA }],
       activeTabId: 1,
@@ -534,7 +531,7 @@ describe('DocumentController', () => {
     controller.onEditorChange('class A { int changed = 1; }')
     await controller.flushPendingSave()
 
-    expect(hooks.cancelCurrentRun).toHaveBeenCalledOnce()
+    expect(state.testRun?.status).toBe('running')
     expect(state.busy).toBe(true)
     expect(backend.saveProblemFile).not.toHaveBeenCalled()
 
@@ -546,6 +543,70 @@ describe('DocumentController', () => {
       fileA.path,
       'class A { int changed = 2; }',
     )
+    controller.dispose()
+  })
+
+  it('keeps edits unsaved while autosave is held and saves them after release', async () => {
+    vi.useFakeTimers()
+    const { controller, state, backend } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+
+    controller.setAutosaveHeld(true)
+    controller.onEditorChange('class A { int held; }')
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(backend.saveProblemFile).not.toHaveBeenCalled()
+    expect(state.dirty).toBe(true)
+    expect(controller.hasPendingChanges).toBe(true)
+
+    controller.setAutosaveHeld(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(backend.saveProblemFile).toHaveBeenCalledTimes(1)
+    expect(backend.saveProblemFile).toHaveBeenCalledWith('/repo', fileA.path, 'class A { int held; }')
+    expect(state.dirty).toBe(false)
+    controller.dispose()
+  })
+
+  it('writes an explicit flush immediately while autosave is held', async () => {
+    vi.useFakeTimers()
+    const { controller, state, backend } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+
+    controller.setAutosaveHeld(true)
+    controller.onEditorChange('class A { int flushed; }')
+    await expect(controller.flushPendingSave()).resolves.toBe(true)
+    expect(backend.saveProblemFile).toHaveBeenCalledWith('/repo', fileA.path, 'class A { int flushed; }')
+    expect(state.dirty).toBe(false)
+
+    controller.setAutosaveHeld(false)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(backend.saveProblemFile).toHaveBeenCalledTimes(1)
+    controller.dispose()
+  })
+
+  it('does not save on release when no edit was made while held', async () => {
+    vi.useFakeTimers()
+    const { controller, backend } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+
+    controller.setAutosaveHeld(true)
+    controller.setAutosaveHeld(false)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(backend.saveProblemFile).not.toHaveBeenCalled()
     controller.dispose()
   })
 

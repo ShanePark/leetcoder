@@ -63,4 +63,94 @@ describe('AutosaveCoordinator', () => {
       vi.useRealTimers()
     }
   })
+
+  it('defers debounced writes while held and debounces them after release', async () => {
+    vi.useFakeTimers()
+    try {
+      const saved: string[] = []
+      const coordinator = new AutosaveCoordinator(async ({ source }) => {
+        saved.push(source)
+      }, { delayMs: 500 })
+
+      coordinator.hold()
+      coordinator.schedule({ repoPath: '/repo', filePath: 'Q1.java', source: 'held' })
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(saved).toEqual([])
+      expect(coordinator.hasPendingChanges).toBe(true)
+
+      coordinator.release()
+      await vi.advanceTimersByTimeAsync(499)
+      expect(saved).toEqual([])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(saved).toEqual(['held'])
+      expect(coordinator.hasPendingChanges).toBe(false)
+      coordinator.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('defers a debounce that was already waiting when the hold starts', async () => {
+    vi.useFakeTimers()
+    try {
+      const saved: string[] = []
+      const coordinator = new AutosaveCoordinator(async ({ source }) => {
+        saved.push(source)
+      }, { delayMs: 500 })
+
+      coordinator.schedule({ repoPath: '/repo', filePath: 'Q1.java', source: 'before' })
+      coordinator.hold()
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(saved).toEqual([])
+
+      coordinator.release()
+      await vi.advanceTimersByTimeAsync(500)
+      expect(saved).toEqual(['before'])
+      coordinator.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('writes an explicit flush while held and owes nothing on release', async () => {
+    vi.useFakeTimers()
+    try {
+      const saved: string[] = []
+      const coordinator = new AutosaveCoordinator(async ({ source }) => {
+        saved.push(source)
+      }, { delayMs: 500 })
+
+      coordinator.hold()
+      coordinator.schedule({ repoPath: '/repo', filePath: 'Q1.java', source: 'flushed' })
+      await coordinator.flush()
+      expect(saved).toEqual(['flushed'])
+
+      coordinator.release()
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(saved).toEqual(['flushed'])
+      coordinator.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not retry a failed explicit flush when the hold is released', async () => {
+    vi.useFakeTimers()
+    try {
+      const save = vi.fn().mockRejectedValue(new Error('read-only'))
+      const coordinator = new AutosaveCoordinator(save, { delayMs: 500 })
+
+      coordinator.schedule({ repoPath: '/repo', filePath: 'Q1.java', source: 'failed' })
+      coordinator.hold()
+      await expect(coordinator.flush()).rejects.toThrow('read-only')
+      coordinator.release()
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      expect(save).toHaveBeenCalledTimes(1)
+      expect(coordinator.hasPendingChanges).toBe(true)
+      coordinator.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

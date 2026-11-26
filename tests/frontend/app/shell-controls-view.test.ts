@@ -31,7 +31,11 @@ class FakeTabElement {
 
 function tabsRoot(): { root: HTMLElement; element: (selector: string) => FakeTabElement } {
   const elements = new Map(
-    ['#tests-tab', '#review-tab', '#git-tab', '#tests-panel', '#review-panel', '#git-panel', '#run-test', '#run-selected-test', '#git-tab-indicator']
+    [
+      '#tests-tab', '#review-tab', '#git-tab', '#tests-panel', '#review-panel', '#git-panel', '#run-test', '#run-selected-test', '#git-tab-indicator',
+      '#sidebar-problems-tab', '#sidebar-description-tab', '#sidebar-problems-panel', '#sidebar-description-panel',
+      '#sidebar-toggle',
+    ]
       .map((selector) => [selector, new FakeTabElement()]),
   )
   const root = {
@@ -39,6 +43,55 @@ function tabsRoot(): { root: HTMLElement; element: (selector: string) => FakeTab
   } as unknown as HTMLElement
   return { root, element: (selector) => elements.get(selector)! }
 }
+
+describe('sidebar tabs', () => {
+  it('selects one tab, keeps only its panel visible, and leaves the other tab out of the tab order', () => {
+    const { root, element } = tabsRoot()
+    const controls = new ShellControlsView({
+      root,
+      state: { bottomPanelTab: 'tests', git: createGitState() } as AppState,
+      pickerOpen: () => false,
+      macPlatform: () => false,
+      invalidatePendingNavigation: () => {},
+      aiRequestPath: () => null,
+    })
+
+    controls.renderSidebarTabs('description', false)
+    expect(element('#sidebar-description-tab').getAttribute('aria-selected')).toBe('true')
+    expect(element('#sidebar-description-tab').tabIndex).toBe(0)
+    expect(element('#sidebar-problems-tab').getAttribute('aria-selected')).toBe('false')
+    expect(element('#sidebar-problems-tab').tabIndex).toBe(-1)
+    expect(element('#sidebar-description-panel').hidden).toBe(false)
+    expect(element('#sidebar-problems-panel').hidden).toBe(true)
+
+    controls.renderSidebarTabs('problems', false)
+    expect(element('#sidebar-problems-tab').getAttribute('aria-selected')).toBe('true')
+    expect(element('#sidebar-problems-tab').tabIndex).toBe(0)
+    expect(element('#sidebar-description-tab').tabIndex).toBe(-1)
+    expect(element('#sidebar-problems-panel').hidden).toBe(false)
+    expect(element('#sidebar-description-panel').hidden).toBe(true)
+  })
+
+  it('presses the header toggle only while the Problems tab is on screen', () => {
+    const { root, element } = tabsRoot()
+    const controls = new ShellControlsView({
+      root,
+      state: { bottomPanelTab: 'tests', git: createGitState() } as AppState,
+      pickerOpen: () => false,
+      macPlatform: () => false,
+      invalidatePendingNavigation: () => {},
+      aiRequestPath: () => null,
+    })
+    const pressed = (): string | null => element('#sidebar-toggle').getAttribute('aria-pressed')
+
+    controls.renderSidebarTabs('problems', false)
+    expect(pressed()).toBe('true')
+    controls.renderSidebarTabs('description', false)
+    expect(pressed()).toBe('false')
+    controls.renderSidebarTabs('problems', true)
+    expect(pressed()).toBe('false')
+  })
+})
 
 describe('bottom panel tabs', () => {
   it('shows the Git change indicator on either tab only while work is pending', () => {

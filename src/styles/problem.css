@@ -1,5 +1,5 @@
 /* ---------------------------------------------------------------- */
-/* Editor column & daily card                                        */
+/* Editor column & daily problem                                    */
 /* ---------------------------------------------------------------- */
 
 .editor-column {
@@ -10,30 +10,21 @@
   min-height: 0;
 }
 
-/* Holds only the problem description, so it leaves the column while the
-   description is closed. */
-.daily-card {
-  flex: none;
-  border: 1px solid var(--border);
-  border-radius: var(--panel-radius);
-  background: var(--surface);
-  box-shadow: var(--shadow-panel);
-}
-
-.daily-card:has(> .daily-description[hidden]) {
-  display: none;
-}
-
-/* The problem identity and its actions fill the app header's middle and
-   end tracks. */
+/* The problem identity and its primary action sit together at the end of
+   the app header. */
 .daily-header {
-  display: contents;
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 
-/* Number, title, and difficulty read as one centered unit; only the title
-   gives up width. */
+/* Number, title, and difficulty read as one unit; only the title gives up
+   width. */
 .daily-problem {
   display: flex;
+  flex: 0 1 auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -182,16 +173,17 @@
   color: var(--accent);
 }
 
-.daily-actions {
-  display: flex;
-  justify-self: end;
-  align-items: center;
-  gap: 4px;
-  white-space: nowrap;
+/* Pulled in so the link reads as part of the status beside it. */
+.daily-link {
+  flex: none;
+  margin-left: -4px;
 }
 
-.daily-primary {
-  margin-left: 8px;
+.daily-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  white-space: nowrap;
 }
 
 .daily-waiting {
@@ -236,46 +228,16 @@
   }
 }
 
+/* The sidebar's Description tab: fills the pane and scrolls on its own. */
 .daily-description {
+  flex: 1 1 auto;
   overflow-y: auto;
-  height: var(--daily-description-height, 220px);
   min-height: 0;
-  padding: 8px 14px 12px;
+  padding: 4px 12px 12px;
 }
 
-/* Invisible until hovered or dragged, then a 2px accent line like the
-   sidebar splitter. */
-.daily-description-resize-handle {
-  position: relative;
-  z-index: 1;
-  height: 8px;
-  cursor: row-resize;
-}
-
-.daily-description-resize-handle span {
-  position: absolute;
-  top: 3px;
-  right: var(--panel-radius);
-  left: var(--panel-radius);
-  height: 2px;
-  border-radius: 1px;
-  background: transparent;
-  transition: background-color 120ms ease;
-}
-
-.daily-description-resize-handle:hover span,
-.daily-description-resize-handle:focus-visible span,
-.is-resizing-description .daily-description-resize-handle span {
-  background: var(--accent);
-}
-
-.daily-description-resize-handle:focus-visible {
-  outline: none;
-}
-
-.is-resizing-description {
-  cursor: row-resize;
-  user-select: none;
+.daily-description-empty {
+  padding-top: 4px;
 }
 
 .daily-description-body {

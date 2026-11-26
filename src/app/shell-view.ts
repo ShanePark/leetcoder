@@ -5,8 +5,6 @@ export interface ShellViewOptions {
   macPlatform: boolean
   minSidebarWidth: number
   maxSidebarWidth: number
-  minDailyDescriptionHeight: number
-  maxDailyDescriptionHeight: number
   minBottomPanelHeight: number
   maxBottomPanelHeight: number
   minGitFileListWidth: number
@@ -20,7 +18,7 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
       <header class="app-header">
         <div class="app-header-start">
           <button id="app-menu-button" class="icon-button app-menu-button" type="button" aria-label="Open application menu" aria-haspopup="menu" aria-expanded="false" title="Application menu"></button>
-          <button id="sidebar-toggle" class="icon-button sidebar-toggle-button keytip-anchor" type="button" aria-controls="sidebar" aria-pressed="true" aria-label="Problems" title="Problems (${label('toggle-sidebar')})"><span class="keytip" aria-hidden="true">${label('toggle-sidebar')}</span></button>
+          <button id="sidebar-toggle" class="icon-button sidebar-toggle-button" type="button" aria-controls="sidebar" aria-pressed="true" aria-label="Problems" title="Problems (${label('show-problems-tab')})"></button>
           <button id="choose-repository" class="repo-chip" type="button">
             <span id="repo-path" class="repo-chip-label">Choose repository</span>
           </button>
@@ -29,22 +27,29 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         <div id="daily-header" class="daily-header" role="group" aria-label="Today's problem"></div>
       </header>
       <main class="workspace">
-        <aside id="sidebar" class="sidebar" aria-label="Problem files">
-          <div class="sidebar-heading">
-            <span class="micro-label">Problems</span>
-            <span id="file-count" class="sidebar-count"></span>
-          </div>
-          <div class="file-search">
-            <label class="sr-only" for="file-search">Search filenames and project contents</label>
-            <div class="file-search-field">
-              <span id="file-search-icon" aria-hidden="true"></span>
-              <input id="file-search" type="search" placeholder="Search" autocomplete="off" spellcheck="false" title="Search filenames and project contents (${shortcutLabel('search-project', options.macPlatform)})">
+        <aside id="sidebar" class="sidebar" aria-label="Problems and description">
+          <div class="sidebar-tabs">
+            <div class="sidebar-tab-list" role="tablist" aria-label="Sidebar">
+              <button id="sidebar-problems-tab" class="sidebar-tab keytip-anchor is-active" type="button" role="tab" aria-selected="true" aria-controls="sidebar-problems-panel" tabindex="0"><span class="sidebar-tab-label">Problems</span><span id="file-count" class="sidebar-tab-count"></span><span class="keytip" aria-hidden="true">${label('show-problems-tab')}</span></button>
+              <button id="sidebar-description-tab" class="sidebar-tab keytip-anchor" type="button" role="tab" aria-selected="false" aria-controls="sidebar-description-panel" tabindex="-1"><span class="sidebar-tab-label">Description</span><span class="keytip" aria-hidden="true">${label('show-description-tab')}</span></button>
             </div>
           </div>
-          <div id="file-results-viewport" class="file-results-viewport">
-            <div id="file-list" class="file-list"></div>
-            <div id="project-content-search-results" class="project-content-search-results"></div>
-          </div>
+          <section id="sidebar-problems-panel" class="sidebar-panel" role="tabpanel" aria-labelledby="sidebar-problems-tab">
+            <div class="file-search">
+              <label class="sr-only" for="file-search">Search filenames and project contents</label>
+              <div class="file-search-field">
+                <span id="file-search-icon" aria-hidden="true"></span>
+                <input id="file-search" type="search" placeholder="Search" autocomplete="off" spellcheck="false" title="Search filenames and project contents (${shortcutLabel('search-project', options.macPlatform)})">
+              </div>
+            </div>
+            <div id="file-results-viewport" class="file-results-viewport">
+              <div id="file-list" class="file-list"></div>
+              <div id="project-content-search-results" class="project-content-search-results"></div>
+            </div>
+          </section>
+          <section id="sidebar-description-panel" class="sidebar-panel" role="tabpanel" aria-labelledby="sidebar-description-tab" hidden>
+            <div id="daily-description" class="daily-description"></div>
+          </section>
         </aside>
 
         <div
@@ -59,21 +64,6 @@ export function renderShellView(root: HTMLElement, options: ShellViewOptions): v
         ><span aria-hidden="true"></span></div>
 
         <section class="editor-column" aria-label="Code editor">
-          <section class="daily-card" aria-label="Problem description">
-            <div id="daily-description" class="daily-description" hidden></div>
-            <div
-              id="daily-description-resize-handle"
-              class="daily-description-resize-handle"
-              role="separator"
-              aria-orientation="horizontal"
-              aria-label="Resize problem description"
-              aria-valuemin="${options.minDailyDescriptionHeight}"
-              aria-valuemax="${options.maxDailyDescriptionHeight}"
-              tabindex="0"
-              hidden
-            ><span aria-hidden="true"></span></div>
-          </section>
-
           <section class="code-card">
             <div class="file-tabs-shell">
               <nav id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files"></nav>

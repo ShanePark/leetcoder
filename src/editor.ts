@@ -490,9 +490,14 @@ export function isInlineFieldShortcut(event: JavaDocAltShortcutEvent): boolean {
     && (event.metaKey !== event.ctrlKey)
 }
 
-/** Match the Linux Alt+1 form of the Problems sidebar toggle by physical key. */
-export function isToggleSidebarAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+/** Match the Linux Alt+1 form of the Problems tab shortcut by physical key. */
+export function isShowProblemsTabAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return isPlainAltShortcut(event, 'Digit1')
+}
+
+/** Match the Linux Alt+2 form of the Description tab shortcut by physical key. */
+export function isShowDescriptionTabAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'Digit2')
 }
 
 /** Match the Linux Alt+4 form of the Tests panel shortcut by physical key. */
@@ -685,7 +690,8 @@ export class JavaEditor {
         [isSettingsAltShortcut, showSettings],
         [isFileSearchAltShortcut, focusFileSearch],
         [isFindAltShortcut, openFind],
-        [isToggleSidebarAltShortcut, workspaceShortcut('toggle-sidebar')],
+        [isShowProblemsTabAltShortcut, workspaceShortcut('show-problems-tab')],
+        [isShowDescriptionTabAltShortcut, workspaceShortcut('show-description-tab')],
         [isShowTestsPanelAltShortcut, workspaceShortcut('show-tests-panel')],
         [isShowGitPanelAltShortcut, workspaceShortcut('show-git-panel')],
         [isGitCommitAltShortcut, workspaceShortcut('git-commit')],
@@ -696,9 +702,9 @@ export class JavaEditor {
       [isIntroduceVariableShortcut, introduceJavaVariable],
       [isExtractMethodShortcut, extractMethod],
       [isInlineFieldShortcut, inlineField],
-      // The other workspace chords (Cmd+1/4/9/K on macOS) are not in the
+      // The other workspace chords (Cmd+1/2/4/9/K on macOS) are not in the
       // keymap: they reach the app's window handler, which would otherwise
-      // toggle the sidebar a second time. This handler stops propagation.
+      // run them a second time. This handler stops propagation.
       [isGitCommitPushShortcut, workspaceShortcut('git-commit-push')],
     ]
 

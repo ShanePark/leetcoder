@@ -2,12 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   BOTTOM_PANEL_HEIGHT_KEY,
-  DAILY_DESCRIPTION_HEIGHT_KEY,
   GIT_FILE_LIST_WIDTH_KEY,
   SIDEBAR_COLLAPSED_KEY,
   SIDEBAR_WIDTH_KEY,
   MIN_BOTTOM_PANEL_HEIGHT,
-  MIN_DAILY_DESCRIPTION_HEIGHT,
   MIN_GIT_FILE_LIST_WIDTH,
   MIN_SIDEBAR_WIDTH,
 } from '../../../src/app/layout'
@@ -134,9 +132,6 @@ function createRoot(): {
   gitSplitter: FakeElement
   workspace: FakeElement
   sidebarSplitter: FakeElement
-  editorColumn: FakeElement
-  description: FakeElement
-  descriptionHandle: FakeElement
 } {
   const root = new FakeRoot()
   const bottomPanel = root.register('#bottom-panel')
@@ -145,13 +140,8 @@ function createRoot(): {
   const gitSplitter = root.register('#git-splitter')
   const workspace = root.register('.workspace')
   const sidebarSplitter = root.register('#sidebar-splitter')
-  const editorColumn = root.register('.editor-column')
-  const description = root.register('#daily-description')
-  const descriptionHandle = root.register('#daily-description-resize-handle')
   gitWorkspace.clientWidth = 900
   workspace.clientWidth = 1000
-  editorColumn.clientHeight = 800
-  descriptionHandle.hidden = false
   return {
     root,
     bottomPanel,
@@ -160,9 +150,6 @@ function createRoot(): {
     gitSplitter,
     workspace,
     sidebarSplitter,
-    editorColumn,
-    description,
-    descriptionHandle,
   }
 }
 
@@ -191,7 +178,6 @@ describe('PaneLayoutController', () => {
     storage.setItem(BOTTOM_PANEL_HEIGHT_KEY, '320')
     storage.setItem(GIT_FILE_LIST_WIDTH_KEY, '340')
     storage.setItem(SIDEBAR_WIDTH_KEY, '280')
-    storage.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, '240')
 
     const controller = new PaneLayoutController(elements.root as unknown as HTMLElement, { storage: storage as unknown as Storage })
     controller.apply()
@@ -202,14 +188,11 @@ describe('PaneLayoutController', () => {
     expect(elements.gitSplitter.attributes.get('aria-valuenow')).toBe('340')
     expect(elements.workspace.style.values.get('--sidebar-width')).toBe('280px')
     expect(elements.sidebarSplitter.attributes.get('aria-valuenow')).toBe('280')
-    expect(elements.description.style.values.get('--daily-description-height')).toBe('240px')
-    expect(elements.descriptionHandle.attributes.get('aria-valuenow')).toBe('240')
   })
 
-  it('collapses the sidebar, reflects it on the header toggle, keeps its width, and persists the state', () => {
+  it('collapses the sidebar, keeps its width, and persists the state', () => {
     const elements = createRoot()
     const sidebar = elements.root.register('.sidebar')
-    const toggle = elements.root.register('#sidebar-toggle')
     const storage = new MemoryStorage()
     storage.setItem(SIDEBAR_WIDTH_KEY, '300')
     const controller = new PaneLayoutController(elements.root as unknown as HTMLElement, { storage: storage as unknown as Storage })
@@ -217,14 +200,12 @@ describe('PaneLayoutController', () => {
 
     expect(controller.sidebarCollapsed).toBe(false)
     expect(sidebar.hidden).toBe(false)
-    expect(toggle.attributes.get('aria-pressed')).toBe('true')
 
     controller.setSidebarCollapsed(true)
     expect(controller.sidebarCollapsed).toBe(true)
     expect(elements.workspace.classList.contains('is-sidebar-collapsed')).toBe(true)
     expect(sidebar.hidden).toBe(true)
     expect(elements.sidebarSplitter.hidden).toBe(true)
-    expect(toggle.attributes.get('aria-pressed')).toBe('false')
     expect(storage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('collapsed')
 
     const restored = new PaneLayoutController(elements.root as unknown as HTMLElement, { storage: storage as unknown as Storage })
@@ -233,7 +214,6 @@ describe('PaneLayoutController', () => {
     expect(elements.workspace.classList.contains('is-sidebar-collapsed')).toBe(false)
     expect(sidebar.hidden).toBe(false)
     expect(elements.sidebarSplitter.hidden).toBe(false)
-    expect(toggle.attributes.get('aria-pressed')).toBe('true')
     expect(elements.workspace.style.values.get('--sidebar-width')).toBe('300px')
     expect(storage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('expanded')
     controller.destroy()
@@ -246,11 +226,9 @@ describe('PaneLayoutController', () => {
     storage.setItem(BOTTOM_PANEL_HEIGHT_KEY, '600')
     storage.setItem(GIT_FILE_LIST_WIDTH_KEY, '600')
     storage.setItem(SIDEBAR_WIDTH_KEY, '500')
-    storage.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, '500')
     fakeWindow.innerHeight = 300
     elements.gitWorkspace.clientWidth = 500
     elements.workspace.clientWidth = 700
-    elements.editorColumn.clientHeight = 450
 
     const controller = new PaneLayoutController(elements.root as unknown as HTMLElement, { storage: storage as unknown as Storage })
     controller.refresh()
@@ -259,10 +237,8 @@ describe('PaneLayoutController', () => {
     expect(elements.bottomHandle.attributes.get('aria-valuenow')).toBe('240')
     expect(storage.getItem(GIT_FILE_LIST_WIDTH_KEY)).toBe('217')
     expect(storage.getItem(SIDEBAR_WIDTH_KEY)).toBe('332')
-    expect(storage.getItem(DAILY_DESCRIPTION_HEIGHT_KEY)).toBe('236')
     expect(elements.gitSplitter.attributes.get('aria-valuemax')).toBe('217')
     expect(elements.sidebarSplitter.attributes.get('aria-valuemax')).toBe('332')
-    expect(elements.descriptionHandle.attributes.get('aria-valuemax')).toBe('236')
   })
 
   it('handles pointer and keyboard resizing, then removes every listener on destroy', () => {
@@ -288,14 +264,6 @@ describe('PaneLayoutController', () => {
     expect(elements.root.classList.contains('is-resizing-sidebar')).toBe(false)
     expect(storage.getItem(SIDEBAR_WIDTH_KEY)).toBe('448')
 
-    elements.descriptionHandle.hidden = true
-    elements.descriptionHandle.dispatch('pointerdown', pointerEvent({ clientY: 100 }))
-    expect(elements.root.classList.contains('is-resizing-description')).toBe(false)
-    elements.descriptionHandle.hidden = false
-    elements.descriptionHandle.dispatch('keydown', keyboardEvent('Home'))
-    expect(storage.getItem(DAILY_DESCRIPTION_HEIGHT_KEY)).toBe(String(MIN_DAILY_DESCRIPTION_HEIGHT))
-    expect(elements.descriptionHandle.attributes.get('aria-valuenow')).toBe(String(MIN_DAILY_DESCRIPTION_HEIGHT))
-
     expect(fakeWindow.listenerCount('resize')).toBe(1)
     controller.destroy()
     expect(fakeWindow.listenerCount('resize')).toBe(0)
@@ -312,10 +280,8 @@ describe('PaneLayoutController', () => {
     storage.setItem(BOTTOM_PANEL_HEIGHT_KEY, '1')
     storage.setItem(GIT_FILE_LIST_WIDTH_KEY, '1')
     storage.setItem(SIDEBAR_WIDTH_KEY, '1')
-    storage.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, '1')
     elements.gitWorkspace.clientWidth = 200
     elements.workspace.clientWidth = 400
-    elements.editorColumn.clientHeight = 200
 
     const controller = new PaneLayoutController(elements.root as unknown as HTMLElement, { storage: storage as unknown as Storage })
     controller.refresh()
@@ -323,6 +289,5 @@ describe('PaneLayoutController', () => {
     expect(elements.bottomHandle.attributes.get('aria-valuenow')).toBe(String(MIN_BOTTOM_PANEL_HEIGHT))
     expect(elements.gitSplitter.attributes.get('aria-valuenow')).toBe(String(MIN_GIT_FILE_LIST_WIDTH))
     expect(elements.sidebarSplitter.attributes.get('aria-valuenow')).toBe(String(MIN_SIDEBAR_WIDTH))
-    expect(elements.descriptionHandle.attributes.get('aria-valuenow')).toBe(String(MIN_DAILY_DESCRIPTION_HEIGHT))
   })
 })

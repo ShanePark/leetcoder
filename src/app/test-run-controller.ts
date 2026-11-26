@@ -46,6 +46,8 @@ export interface TestRunControllerContext {
   flushPendingSave: () => Promise<boolean>
   setEditorIssues: (issues: readonly EditorIssue[]) => void
   setLiveDiagnosticsBlocked: (blocked: boolean) => void
+  /** Defers debounced autosave so edits made during a run do not reach its build. */
+  setAutosaveHeld: (held: boolean) => void
   cancelLiveDiagnostics?: () => void
   clearLiveDiagnosticsError?: () => void
   selectTestsTab: () => void
@@ -59,8 +61,9 @@ export interface TestRunControllerContext {
 }
 
 /**
- * Owns one test process at a time, stops invalidated runs, and applies only
- * results for their source snapshot.
+ * Owns one test process at a time and stops runs invalidated by a different
+ * document or repository. Edits to the running document do not stop the run;
+ * they only keep its line-based editor markers from being applied.
  */
 export class TestRunController {
   private readonly context: TestRunControllerContext
@@ -104,7 +107,7 @@ export class TestRunController {
       return
     }
 
-    const runSnapshot: TestRunSourceSnapshot = {
+    let runSnapshot: TestRunSourceSnapshot = {
       repoPath: state.repoPath,
       filePath: state.selectedPath,
       source: state.selectedSource,
@@ -133,6 +136,8 @@ export class TestRunController {
     state.selectedTestKey = null
     this.testSelectionExplicit = false
     this.context.setLiveDiagnosticsBlocked(true)
+    // The pre-run flush below still writes; later edits wait for the run.
+    this.context.setAutosaveHeld(true)
     this.context.setEditorIssues([])
     // A starting run always brings the Tests tab forward so progress is visible.
     this.context.selectTestsTab()
@@ -141,7 +146,7 @@ export class TestRunController {
     try {
       if (!(await this.context.flushPendingSave())) {
         if (this.isAcceptingTestRun(runId)) {
-          if (!this.isResultSourceCurrent(runSnapshot)) {
+          if (!this.isRunDocumentCurrent(runSnapshot)) {
             this.discardStaleTestRun(runId)
             return
           }
@@ -162,6 +167,13 @@ export class TestRunController {
       if (!this.isAcceptingTestRun(runId)) {
         return
       }
+      if (!this.isRunDocumentCurrent(runSnapshot)) {
+        this.discardStaleTestRun(runId)
+        return
+      }
+      // The autosave flush also writes edits made while it was in flight, so
+      // the file the runner compiles is the editor source as of now.
+      runSnapshot = { ...runSnapshot, source: state.selectedSource }
       if (this.stopRequestedRunId === runId) {
         this.completeResult(runSnapshot, run, stoppedRunResult(run))
         return
@@ -177,7 +189,7 @@ export class TestRunController {
       if (!this.isAcceptingTestRun(runId)) {
         return
       }
-      if (!this.isResultSourceCurrent(runSnapshot)) {
+      if (!this.isRunDocumentCurrent(runSnapshot)) {
         this.discardStaleTestRun(runId)
         return
       }
@@ -186,7 +198,7 @@ export class TestRunController {
       if (!this.isAcceptingTestRun(runId)) {
         return
       }
-      if (!this.isResultSourceCurrent(runSnapshot)) {
+      if (!this.isRunDocumentCurrent(runSnapshot)) {
         this.discardStaleTestRun(runId)
         return
       }
@@ -197,13 +209,15 @@ export class TestRunController {
       }
     } finally {
       // A stale run cannot update visible results, but its native process still
-      // owns the busy state and diagnostics block until this promise settles.
-      // The run identity prevents it from releasing a newer operation.
+      // owns the busy state, diagnostics block, and autosave hold until this
+      // promise settles. The run identity prevents it from releasing a newer
+      // operation.
       if (this.isInFlightRun(runId)) {
         this.runningRunId = null
         this.nativeRunRequestedId = null
         this.stopRequestedRunId = null
         this.context.setLiveDiagnosticsBlocked(false)
+        this.context.setAutosaveHeld(false)
         this.context.state.busy = false
         this.context.renderAll()
       }
@@ -232,13 +246,6 @@ export class TestRunController {
     this.context.clearLiveDiagnosticsError?.()
     if (!hadRunningRun) {
       this.context.setLiveDiagnosticsBlocked(false)
-    }
-  }
-
-  /** Invalidate the active run after the editor source has changed. */
-  cancelCurrentRun(): void {
-    if (this.runningRunId !== null) {
-      this.discardStaleTestRun(this.runningRunId)
     }
   }
 
@@ -316,6 +323,7 @@ export class TestRunController {
     this.context.setLiveDiagnosticsBlocked(false)
     if (hadRunningRun) {
       this.context.state.busy = false
+      this.context.setAutosaveHeld(false)
     }
   }
 
@@ -328,7 +336,11 @@ export class TestRunController {
     state.testResult = result
     this.testResultSource = source
     this.autoSelectFailedTest(result)
-    this.context.setEditorIssues(collectEditorIssues(result, source.filePath))
+    // Result lines describe the source the run compiled; after a later edit
+    // they may point at the wrong lines, so the Tests panel alone shows them.
+    this.context.setEditorIssues(
+      this.isResultSourceCurrent(source) ? collectEditorIssues(result, source.filePath) : [],
+    )
     run.status = 'completed'
     run.phase = result.phase
     run.tests = result.tests
@@ -403,7 +415,7 @@ export class TestRunController {
     if (!this.isAcceptingTestRun(runId)) {
       return
     }
-    if (!this.isResultSourceCurrent(source)) {
+    if (!this.isRunDocumentCurrent(source)) {
       this.discardStaleTestRun(runId)
       return
     }
@@ -481,6 +493,12 @@ export class TestRunController {
     )
   }
 
+  /** Whether a run still belongs to the open document, ignoring its edits. */
+  private isRunDocumentCurrent(snapshot: TestRunSourceSnapshot): boolean {
+    const { state } = this.context
+    return snapshot.repoPath === state.repoPath && snapshot.filePath === state.selectedPath
+  }
+
   private currentSource(): CurrentTestSource {
     const { state } = this.context
     return {
@@ -507,7 +525,7 @@ export class TestRunController {
       if (!this.isAlive() || !this.isAcceptingTestRun(runId)) {
         return
       }
-      if (!this.isResultSourceCurrent(source)) {
+      if (!this.isRunDocumentCurrent(source)) {
         this.discardStaleTestRun(runId)
         return
       }

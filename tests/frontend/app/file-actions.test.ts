@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   accordionGroupKeys,
-  clampDailyDescriptionHeight,
   clampSidebarWidth,
   duplicateFileName,
   filterProblemFiles,
@@ -159,17 +158,11 @@ describe('file explorer actions', () => {
 
   it('keeps the sidebar within its own bounds and leaves editor room', () => {
     expect(clampSidebarWidth(100, 1200)).toBe(180)
-    expect(clampSidebarWidth(700, 1200)).toBe(520)
+    expect(clampSidebarWidth(700, 1200)).toBe(700)
+    expect(clampSidebarWidth(1000, 1200)).toBe(832)
+    expect(clampSidebarWidth(1500, 2000)).toBe(1200)
     expect(clampSidebarWidth(500, 800)).toBe(432)
     expect(clampSidebarWidth(Number.NaN, 1200)).toBe(248)
-  })
-
-  it('keeps the open description within bounds while preserving editor space', () => {
-    expect(clampDailyDescriptionHeight(40, 800)).toBe(120)
-    expect(clampDailyDescriptionHeight(1000, 700)).toBe(486)
-    expect(clampDailyDescriptionHeight(400, 900)).toBe(400)
-    expect(clampDailyDescriptionHeight(Number.NaN, 900)).toBe(220)
-    expect(clampDailyDescriptionHeight(500, 300)).toBe(120)
   })
 })
 

@@ -1,6 +1,5 @@
 import {
   ArrowRight,
-  BookOpen,
   CalendarDays,
   Check,
   ChevronDown,
@@ -58,7 +57,6 @@ const PanelLeftToggle: IconNode = [
 export const appIcons = {
   alert: CircleAlert,
   arrowRight: ArrowRight,
-  bookOpen: BookOpen,
   calendarDays: CalendarDays,
   check: Check,
   chevronDown: ChevronDown,
