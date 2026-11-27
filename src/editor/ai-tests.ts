@@ -1,5 +1,5 @@
 import { javaLanguage } from '@codemirror/lang-java'
-import { EditorSelection } from '@codemirror/state'
+import { EditorSelection, type StateEffect } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
 import type { SyntaxNode, Tree } from '@lezer/common'
 import {
@@ -233,17 +233,25 @@ export function planAiTestInsertion(source: string, statements: readonly string[
     : { ok: true, from: stub.body.from, to: stub.body.to, insert }
 }
 
+/** Effects to dispatch with an applied plan, given where its text lands. */
+export type AiTestEffects = (inserted: JavaBodyRange) => readonly StateEffect<unknown>[]
+
 /**
  * Apply statements in one transaction, planned against the current document. The
  * `input` event lets `javaAutoImports` add imports to that same transaction, and
  * its `aiTests` subtype matches neither the events that reindent or open the
  * completion popup nor those that history joins with neighbouring edits.
  */
-export function applyAiTestStatements(view: EditorView, statements: readonly string[]): AiTestResult {
+export function applyAiTestStatements(
+  view: EditorView,
+  statements: readonly string[],
+  effects: AiTestEffects = () => [],
+): AiTestResult {
   const plan = planAiTestInsertion(view.state.doc.toString(), statements)
   if (plan.ok) {
     view.dispatch({
       changes: { from: plan.from, to: plan.to, insert: plan.insert },
+      effects: effects({ from: plan.from, to: plan.from + plan.insert.length }),
       userEvent: AI_TESTS_USER_EVENT,
     })
   }
@@ -255,6 +263,8 @@ export interface AiCaseTestSlot {
   methodName: string
   /** Right after the last @Test method, or after the class's last member. */
   at: number
+  /** Where the last @Test method starts, or `at` when the class has none. */
+  anchorFrom: number
   /** Blank line, annotation, header, and opening brace, as inserted at `at`. */
   head: string
 }
@@ -314,9 +324,11 @@ export function findAiCaseTestSlot(source: string): AiCaseTestSlot | null {
       .map((node) => source.slice(node.from, node.to))
     : ['public']
   const header = [...modifiers, 'void', `${name}()`].join(' ')
+  const at = anchor?.to ?? body.from + 1
   return {
     methodName: name,
-    at: anchor?.to ?? body.from + 1,
+    at,
+    anchorFrom: lastTest?.from ?? at,
     head: `${anchor ? '\n\n' : '\n'}${indent}@Test\n${indent}${header} {`,
   }
 }
@@ -348,17 +360,25 @@ export function planAiCaseTestInsertion(source: string, statements: readonly str
 /**
  * Add the new test method in one transaction, as `applyAiTestStatements` does,
  * and put the cursor on its first statement so it is in view and the run-test-
- * at-cursor shortcut targets it.
+ * at-cursor shortcut targets it. While the editor has focus the user is typing
+ * elsewhere in the file, so their cursor stays where it is.
  */
-export function applyAiCaseTestStatements(view: EditorView, statements: readonly string[]): AiCaseTestResult {
+export function applyAiCaseTestStatements(
+  view: EditorView,
+  statements: readonly string[],
+  effects: AiTestEffects = () => [],
+): AiCaseTestResult {
   const plan = planAiCaseTestInsertion(view.state.doc.toString(), statements)
   if (plan.ok) {
     const firstLine = plan.insert.indexOf('\n', plan.insert.indexOf('{')) + 1
     const firstStatement = firstLine + /^[\t ]*/.exec(plan.insert.slice(firstLine))![0].length
     view.dispatch({
       changes: { from: plan.from, to: plan.to, insert: plan.insert },
-      selection: EditorSelection.cursor(plan.from + firstStatement),
-      scrollIntoView: true,
+      ...(view.hasFocus ? {} : {
+        selection: EditorSelection.cursor(plan.from + firstStatement),
+        scrollIntoView: true,
+      }),
+      effects: effects({ from: plan.from, to: plan.from + plan.insert.length }),
       userEvent: AI_TESTS_USER_EVENT,
     })
   }

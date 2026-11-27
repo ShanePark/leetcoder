@@ -39,7 +39,6 @@ import {
   type UpdateStatusView,
 } from './update-progress'
 import { clearGitProgressOverlay } from './app/git-progress'
-import { syncProgressOverlay } from './app/progress-overlay'
 import { LiveDiagnosticsController } from './app/live-diagnostics-controller'
 
 import {
@@ -201,13 +200,8 @@ export class LeetcoderApp {
   private readonly projectContentSearchController: ProjectContentSearchController
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
     if (this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) return
-    // Both show a blocking progress popup, so nothing behind it may run. A
-    // review or follow-up shows none and leaves the app usable while it streams.
-    const aiKind = this.aiController.requestKind
-    if (
-      this.gitController.commitPushInProgress
-      || (this.aiController.requestPath !== null && aiKind !== 'follow-up' && aiKind !== 'review')
-    ) {
+    // A commit and push shows a blocking progress popup, so nothing behind it may run.
+    if (this.gitController.commitPushInProgress) {
       event.preventDefault()
       return
     }
@@ -598,6 +592,8 @@ export class LeetcoderApp {
       renderBusyControls: () => this.controlsView.updateBusyControls(),
       revealSelectedFileInExplorer: () => this.fileExplorer.revealSelectedFileInExplorer(),
       isDestroyed: () => this.destroyed,
+      // The AI controller is built after this one; no document loads before it is.
+      documentLoaded: () => this.aiController?.documentLoaded(),
     })
     this.fileOperationsController = new FileOperationsController({
       state: this.state,
@@ -693,6 +689,12 @@ export class LeetcoderApp {
         psSignatures: () => psSignatures(this.psLibraryMetadata),
         applyStatements: (statements) => this.editor.applyAiTests(statements),
         applyCaseStatements: (statements) => this.editor.applyAiCaseTest(statements),
+        fillSource: (kind, source, statements) => this.editor.fillAiTestsInSource(kind, source, statements),
+        rewriteFile: (target, edit) => target.repoPath === null || target.path === null
+          ? Promise.resolve('stale')
+          : this.documentController.rewriteClosedFile(target.repoPath, target.path, target.repositoryGeneration, edit),
+        showPendingTests: (kind, status) => this.editor.showAiPending(kind, status),
+        clearPendingTests: () => this.editor.clearAiPending(),
         focusEditor: () => {
           const button = this.element<HTMLElement>('#ai-generate-tests')
           if (aiFillMayTakeFocus(this.root, button)) this.editor.focus()
@@ -718,7 +720,6 @@ export class LeetcoderApp {
         showMessage: (message, tone) => this.setMessage(message, tone),
         showMissingKey: () => this.overlay.openSettingsDialog('llm'),
         generationFinished: () => this.llmSettings.refreshUsageIfVisible(),
-        showProgress: (state) => syncProgressOverlay(this.root, state),
         caseAdded: () => this.aiCaseDialog.clearDraft(),
         reviewed: (review) => {
           this.aiReview = review

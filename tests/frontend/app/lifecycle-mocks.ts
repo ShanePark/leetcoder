@@ -16,6 +16,8 @@ const testMocks = vi.hoisted(() => ({
     triggerWorkspaceShortcut: (id: WorkspaceShortcutId) => void
     moveCursor: (testMethod: string | null) => void
     applyAiTests: (statements: readonly string[]) => unknown
+    /** The waiting AI request's lock as last shown, or null when none is. */
+    aiPending: { kind: string; status: { label: string; detail: string | null; step: number } } | null
     focus: () => void
     metadataUpdates: Array<PsLibraryMetadata | null>
     revealedLocations: Array<{ line: number; column?: number | null }>
@@ -47,6 +49,8 @@ const testMocks = vi.hoisted(() => ({
   settingsSections: [] as Array<string | undefined>,
   /** Every progress popup update, with null for removal. */
   progressOverlays: [] as Array<ProgressOverlayState | null>,
+  /** Every AI lock shown in the editor, as `kind: label`, with null for removal. */
+  aiPendingUpdates: [] as Array<string | null>,
   toasts: [] as Array<{
     message: string
     tone: string
@@ -71,6 +75,7 @@ vi.mock('../../../src/editor', async () => {
   class FakeJavaEditor {
     readonly view = { state: {} }
     source = ''
+    aiPending: { kind: string; status: { label: string; detail: string | null; step: number } } | null = null
     readonly revealedLocations: Array<{ line: number; column?: number | null }> = []
     readonly metadataUpdates: Array<PsLibraryMetadata | null> = []
     private readonly callbacks: {
@@ -90,12 +95,26 @@ vi.mock('../../../src/editor', async () => {
       testMocks.editorInstances.push(this)
     }
 
+    // Loading a document drops any lock, as in the editor.
     setValue(source: string): void {
       this.source = source
+      this.aiPending = null
     }
 
     reloadExternalValue(source: string): void {
       this.source = source
+      this.aiPending = null
+    }
+
+    showAiPending(kind: string, status: { label: string; detail: string | null; step: number }): void {
+      this.aiPending = { kind, status }
+      testMocks.aiPendingUpdates.push(`${kind}: ${status.label}`)
+    }
+
+    clearAiPending(): void {
+      if (this.aiPending === null) return
+      this.aiPending = null
+      testMocks.aiPendingUpdates.push(null)
     }
 
     replaceValue(source: string): void {
@@ -122,6 +141,7 @@ vi.mock('../../../src/editor', async () => {
     applyAiTests(statements: readonly string[]): ReturnType<typeof planAiTestInsertion> {
       const plan = planAiTestInsertion(this.source, statements)
       if (plan.ok) {
+        this.aiPending = null
         this.emitChange(`${this.source.slice(0, plan.from)}${plan.insert}${this.source.slice(plan.to)}`)
       }
       return plan
@@ -130,9 +150,21 @@ vi.mock('../../../src/editor', async () => {
     applyAiCaseTest(statements: readonly string[]): ReturnType<typeof planAiCaseTestInsertion> {
       const plan = planAiCaseTestInsertion(this.source, statements)
       if (plan.ok) {
+        this.aiPending = null
         this.emitChange(`${this.source.slice(0, plan.from)}${plan.insert}${this.source.slice(plan.to)}`)
       }
       return plan
+    }
+
+    fillAiTestsInSource(kind: string, source: string, statements: readonly string[]): {
+      result: ReturnType<typeof planAiTestInsertion> | ReturnType<typeof planAiCaseTestInsertion>
+      source: string | null
+    } {
+      const result = kind === 'case' ? planAiCaseTestInsertion(source, statements) : planAiTestInsertion(source, statements)
+      return {
+        result,
+        source: result.ok ? `${source.slice(0, result.from)}${result.insert}${source.slice(result.to)}` : null,
+      }
     }
 
     focus(): void {}
@@ -413,6 +445,7 @@ beforeEach(() => {
   testMocks.overlayOptions.length = 0
   testMocks.settingsSections.length = 0
   testMocks.progressOverlays.length = 0
+  testMocks.aiPendingUpdates.length = 0
   testMocks.toasts.length = 0
 })
 

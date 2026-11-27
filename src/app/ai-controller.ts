@@ -23,6 +23,7 @@ import {
 import { declaresJavaSolutionConstructor, extractJavaMethodSignature } from '../domain'
 import type {
   AiCaseTestResult,
+  AiPendingStatus,
   AiTestContext,
   AiTestRejectionReason,
   AiTestResult,
@@ -33,21 +34,22 @@ import type { AppIcon } from '../icons'
 import { runAiReviewFollowUp, type AiReviewFollowUp } from './ai-follow-up'
 import { emptyLiveUsage, recordStreamUsage, type AiLiveUsage } from './ai-usage-meter'
 import { normalizeProblemNumber } from './layout'
+import type { ClosedFileRewrite } from './document-controller'
 import { sourceBasename } from './path-helpers'
-import type { ProgressOverlayState } from './progress-overlay'
 import type { TestRunSourceSnapshot } from './types'
 
 /**
  * What a request does: write the examples into `test()`, write one failing case
  * into a new method, review the open solution (or, in help mode, explain the
- * unsolved problem with hints), or answer a question about the shown review. A
- * review or a follow-up streams into the AI tab, shows no progress popup, and
- * leaves the editor usable.
+ * unsolved problem with hints), or answer a question about the shown review.
+ * The two test requests lock only the test region they will change and show
+ * their progress there; a review or a follow-up streams into the AI tab. The
+ * rest of the app stays usable either way.
  */
 export type AiRequestKind = 'examples' | 'case' | 'review' | 'follow-up'
 
-/** The requests that show the blocking progress popup. */
-type AiPopupRequestKind = Exclude<AiRequestKind, 'review' | 'follow-up'>
+/** The requests that write tests into their file. */
+type AiTestRequestKind = Exclude<AiRequestKind, 'review' | 'follow-up'>
 
 /** Longer pasted text is refused before any request, as native code does. */
 export const MAX_AI_FAILING_CASE_LENGTH = 32_768
@@ -136,9 +138,32 @@ export interface AiControllerApi
   readContext: () => AiTestContext
   selectedModelId: () => string | null
   psSignatures: () => string[]
+  /** Fill the open document's `test()`. */
   applyStatements: (statements: readonly string[]) => AiTestResult
+  /** Add a test method to the open document. */
   applyCaseStatements: (statements: readonly string[]) => AiCaseTestResult
-  /** Called once statements are in the document. */
+  /**
+   * `source` with the statements filled in as `applyStatements` or
+   * `applyCaseStatements` would, or null text when they are rejected.
+   */
+  fillSource: (
+    kind: AiButtonMode,
+    source: string,
+    statements: readonly string[],
+  ) => { result: AiTestResult | AiCaseTestResult; source: string | null }
+  /**
+   * Rewrite `target`'s file on disk while it is not the open document. `edit`
+   * gets its current text and returns the new text, or null to leave it alone.
+   */
+  rewriteFile: (target: AiTarget, edit: (source: string) => string | null) => Promise<ClosedFileRewrite>
+  /**
+   * Lock the open document's test region for a waiting request of `kind` and
+   * show `status` in it, or move the shown status to its next step.
+   */
+  showPendingTests: (kind: AiButtonMode, status: AiPendingStatus) => void
+  /** Unlock that region and remove the status, if the open document shows them. */
+  clearPendingTests: () => void
+  /** Called once statements are in the open document. */
   focusEditor: () => void
   /** The open document's current text. */
   readSource: () => string
@@ -158,8 +183,6 @@ export interface AiControllerUi {
   showMissingKey: () => void
   /** A paid call settled, whichever way, so its usage record may be new. */
   generationFinished: () => void
-  /** Show, update, or remove (with null) the blocking progress popup. */
-  showProgress: (state: ProgressOverlayState | null) => void
   /** A failing case became a test method. */
   caseAdded?: () => void
   /** A review arrived; it replaces the previous one. */
@@ -193,6 +216,11 @@ export interface AiController {
   generate: () => Promise<void>
   /** Add one pasted failing case to the open file as a new test method. */
   generateCase: (failingCase: string) => Promise<void>
+  /**
+   * The editor loaded a document, which drops any lock. Lock it again when it
+   * is the file a running test request belongs to.
+   */
+  documentLoaded: () => void
   /**
    * Ask for a review model, then review the open solution with its test
    * results when they are current, or ask for help when the solution is still
@@ -235,6 +263,13 @@ export interface AiButtonPresentation {
   label: string
   title: string
 }
+
+/** How a result ended up: applied, rejected by the planner, dropped, or not saved. */
+type AiApplyOutcome =
+  | { done: string; inEditor: boolean }
+  | { rejected: string }
+  | { discarded: string }
+  | { failed: string }
 
 const STILL_CHARGED = 'The call was still charged and is recorded in usage.'
 const MAY_BE_CHARGED = 'The call may still have been charged and is recorded in usage.'
@@ -526,25 +561,34 @@ export function aiReviewTestRunSelection(
 
 type AiProgressStep = 'reading' | 'asking' | 'writing'
 
-const PROGRESS_COPY: Readonly<Record<AiPopupRequestKind, { kicker: string; title: string; reading: string; writing: string }>> = {
-  examples: { kicker: 'AI tests', title: 'Generating tests', reading: 'Reading the problem', writing: 'Writing tests' },
-  case: { kicker: 'AI tests', title: 'Adding failing case', reading: 'Reading the problem', writing: 'Writing tests' },
+const PENDING_TITLES: Readonly<Record<AiTestRequestKind, string>> = {
+  examples: 'Generating tests',
+  case: 'Adding failing case',
 }
 
-/** The progress popup for one request. The provider is unknown until the key status is read. */
-export function aiProgressOverlayState(
-  kind: AiPopupRequestKind,
+const PROGRESS_STEPS: readonly AiProgressStep[] = ['reading', 'asking', 'writing']
+
+/**
+ * The inline status of one test request. The provider is unknown until the key
+ * status is read, and the model until the request is sent.
+ */
+export function aiPendingStatus(
+  kind: AiTestRequestKind,
   step: AiProgressStep,
   provider: AiProviderInfo | null,
   model: string | null,
-): ProgressOverlayState {
-  const copy = PROGRESS_COPY[kind]
-  const asking = provider ? `Asking ${provider.displayName}` : 'Asking the model'
+): AiPendingStatus {
+  const label = step === 'reading'
+    ? 'Reading the problem'
+    : step === 'asking'
+      ? provider ? `Asking ${provider.displayName}` : 'Asking the model'
+      : 'Writing tests'
   return {
-    kicker: copy.kicker,
-    title: copy.title,
-    stages: [copy.reading, model ? { label: asking, detail: model } : asking, copy.writing],
-    current: step === 'reading' ? 0 : step === 'asking' ? 1 : 2,
+    title: PENDING_TITLES[kind],
+    label,
+    detail: step === 'asking' ? model : null,
+    step: PROGRESS_STEPS.indexOf(step),
+    total: PROGRESS_STEPS.length,
   }
 }
 
@@ -557,8 +601,8 @@ export function psSignatures(metadata: PsLibraryMetadata | null): string[] {
 
 /**
  * Whether a finished fill may take focus. The click leaves focus on the button
- * or, on some engines, the body, so anywhere else means the user moved on. A
- * dialog can be open with nothing in it focused.
+ * or, on some engines, the body, so anywhere else, the editor included, means
+ * the user moved on. A dialog can be open with nothing in it focused.
  */
 export function aiFillMayTakeFocus(root: HTMLElement, button: Element): boolean {
   const { activeElement, body } = root.ownerDocument
@@ -580,7 +624,7 @@ function problemEntryPoint(problem: DailyProblem): {
   return { javaSnippet, entryPoint: designProblem ? null : signature, designProblem }
 }
 
-/** A review's request: no popup, and a stream that starts once the request is sent. */
+/** A review's request: no lock, and a stream that starts once the request is sent. */
 interface ReviewTracker extends ProgressTracker {
   startStream: (
     mode: AiReviewMode,
@@ -602,13 +646,17 @@ interface ReviewChoice {
 }
 
 /**
- * One request's progress popup, or a review's stream. Once closed, late
- * progress events are ignored.
+ * One test request's lock and inline status, or a review's stream. Once
+ * closed, late progress events are ignored.
  */
 interface ProgressTracker {
   step: (step: AiProgressStep, model?: string) => void
   /** Called whenever the provider becomes known, so the asking step can name it. */
   refresh: () => void
+  /** Show the lock again after the editor loaded the request's file. */
+  restore: () => void
+  /** The result is being written to the file on disk; show no lock meanwhile. */
+  hold: () => void
   close: () => void
   onProgress: (progress: AiProgress) => void
 }
@@ -616,11 +664,12 @@ interface ProgressTracker {
 /**
  * Run one AI request for the open file. The flag is set before anything
  * asynchronous, and every kind shares it, so a repeated click cannot pay for a
- * second call. A file switch is caught here and an edit by `applyStatements` or
- * `applyCaseStatements`, which plan against the document as it is when the
- * result arrives. The buttons are hidden unless a call could apply, but the
+ * second call. A test request belongs to the file it started on: the user may
+ * switch files meanwhile, and the result is planned against that file as it is
+ * when the result arrives, in the editor when it is open and on disk
+ * otherwise. The buttons are hidden unless a call could apply, but the
  * document and the loaded problem can still change while the key status is
- * read, so `run` checks them again. The progress popup closes before any
+ * read, so `run` checks them again. The lock and status end before any
  * message, focus change, or settings dialog, and always when the request ends.
  */
 export function createAiController(api: AiControllerApi, ui: AiControllerUi): AiController {
@@ -634,20 +683,24 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
   let disposed = false
 
   /**
-   * Messages appear behind the popup, so it closes first. A review's stream
-   * ends first too, so the panel is back to the last review behind the message.
+   * A message ends the request, so its lock goes first. A review's stream ends
+   * first too, so the panel is back to the last review behind the message.
    */
   const showMessage: AiControllerUi['showMessage'] = (text, tone) => {
     progress?.close()
     ui.showMessage(text, tone)
   }
 
-  const trackProgress = (kind: AiPopupRequestKind): ProgressTracker => {
+  /** The lock shows only while the request's file is the open document. */
+  const trackPending = (kind: AiTestRequestKind, target: AiTarget): ProgressTracker => {
     let closed = false
+    let held = false
     let step: AiProgressStep = 'reading'
     let model: string | null = null
     const show = (): void => {
-      if (!closed && !disposed) ui.showProgress(aiProgressOverlayState(kind, step, provider, model))
+      if (!closed && !disposed && !held && isOpen(target)) {
+        api.showPendingTests(kind, aiPendingStatus(kind, step, provider, model))
+      }
     }
     const tracker: ProgressTracker = {
       step(next, nextModel) {
@@ -656,10 +709,11 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         show()
       },
       refresh: show,
-      /**
-       * Every close ends the request. The buttons are re-enabled first so the
-       * popup can return focus to the one that started it.
-       */
+      restore: show,
+      hold() {
+        held = true
+      },
+      /** Every close ends the request. */
       close() {
         if (closed) return
         closed = true
@@ -667,8 +721,9 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
         requestPath = null
         requestKind = null
         if (disposed) return
+        // Another file may be open; it shows no lock, so this changes nothing there.
+        api.clearPendingTests()
         ui.requestChanged()
-        ui.showProgress(null)
       },
       onProgress(event) {
         if (event.stage === 'requesting') tracker.step('asking', event.model)
@@ -690,6 +745,8 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     const tracker: ReviewTracker = {
       step() {},
       refresh() {},
+      restore() {},
+      hold() {},
       close() {
         if (closed) return
         closed = true
@@ -760,17 +817,12 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     return false
   }
 
-  /** The current document's context, or null with a message when a call could not apply. */
+  /** `context` when a call could apply to it, or null with a message. */
   const fillableContext = (
-    target: AiTarget,
+    context: AiTestContext,
     name: string,
     kind: AiButtonMode,
   ): AiTestContext | null => {
-    if (!isOpen(target)) {
-      showMessage(`${name} is no longer the active file, so no request was sent.`, 'info')
-      return null
-    }
-    const context = api.readContext()
     if (kind === 'case') {
       if (context.canAddCase) return context
       showMessage(`${name} has no class to add a test method to. No request was sent.`, 'error')
@@ -804,28 +856,67 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     return null
   }
 
-  /** Apply the statements, naming what changed, or say why they were rejected. */
-  const apply = (kind: AiButtonMode, name: string, statements: readonly string[]): { done: string } | { rejected: string } => {
-    if (kind === 'case') {
-      const added = api.applyCaseStatements(statements)
-      return added.ok
-        ? { done: `Added ${added.methodName}() to ${name}.` }
-        : { rejected: CASE_REJECTION_REASONS[added.reason] ?? REJECTION_REASONS[added.reason] }
+  const rejectionText = (kind: AiButtonMode, reason: AiTestRejectionReason): string =>
+    (kind === 'case' ? CASE_REJECTION_REASONS[reason] : undefined) ?? REJECTION_REASONS[reason]
+
+  const doneText = (name: string, plan: AiTestResult | AiCaseTestResult): string =>
+    'methodName' in plan ? `Added ${plan.methodName}() to ${name}.` : `Filled test() in ${name}.`
+
+  /** Apply the statements to the open document, naming what changed, or say why they were rejected. */
+  const applyOpen = (kind: AiButtonMode, name: string, statements: readonly string[]): AiApplyOutcome => {
+    const plan = kind === 'case' ? api.applyCaseStatements(statements) : api.applyStatements(statements)
+    return plan.ok ? { done: doneText(name, plan), inEditor: true } : { rejected: rejectionText(kind, plan.reason) }
+  }
+
+  /**
+   * Apply the statements to the request's file on disk, planned against its
+   * text there. It is the open document again if the user went back to it.
+   */
+  const applyClosed = async (
+    target: AiTarget,
+    kind: AiButtonMode,
+    name: string,
+    statements: readonly string[],
+    progress: ProgressTracker,
+  ): Promise<AiApplyOutcome | null> => {
+    progress.hold()
+    const planned: { plan: AiTestResult | AiCaseTestResult | null } = { plan: null }
+    let outcome: ClosedFileRewrite
+    try {
+      outcome = await api.rewriteFile(target, (source) => {
+        const filled = api.fillSource(kind, source, statements)
+        planned.plan = filled.result
+        return filled.source
+      })
+    } catch (error) {
+      return { failed: `Could not save the tests to ${name}: ${errorMessage(error)}.` }
     }
-    const filled = api.applyStatements(statements)
-    return filled.ok ? { done: `Filled test() in ${name}.` } : { rejected: REJECTION_REASONS[filled.reason] }
+    if (disposed) return null
+    const plan = planned.plan
+    if (outcome === 'open') return applyOpen(kind, name, statements)
+    if (outcome === 'stale') return { discarded: `The repository changed, so the result for ${name} was discarded.` }
+    if (outcome === 'missing' || !plan) {
+      return { discarded: `${name} was deleted or renamed, so the result was discarded.` }
+    }
+    return plan.ok ? { done: doneText(name, plan), inEditor: false } : { rejected: rejectionText(kind, plan.reason) }
   }
 
   const fellBackNotice = (result: { fellBack: boolean; servedModel: string }): string => result.fellBack
     ? ` The selected model is unavailable, so ${result.servedModel} was used.`
     : ''
 
-  const finish = (
+  const sameRepository = (target: AiTarget): boolean => {
+    const current = api.currentTarget()
+    return current.repoPath === target.repoPath && current.repositoryGeneration === target.repositoryGeneration
+  }
+
+  const finish = async (
     target: AiTarget,
     name: string,
     kind: AiButtonMode,
     result: AiGenerateResult,
-  ): void => {
+    progress: ProgressTracker,
+  ): Promise<void> => {
     const notice = fellBackNotice(result)
     if (result.outcome === 'refused') {
       showMessage(
@@ -841,25 +932,29 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
       )
       return
     }
-    if (!isOpen(target)) {
-      showMessage(
-        `${name} is no longer the active file, so the result was discarded. ${STILL_CHARGED}${notice}`,
-        'error',
-      )
+    if (!sameRepository(target)) {
+      showMessage(`The repository changed, so the result for ${name} was discarded. ${STILL_CHARGED}${notice}`, 'error')
       return
     }
-    const applied = apply(kind, name, result.statements)
+    const applied = isOpen(target)
+      ? applyOpen(kind, name, result.statements)
+      : await applyClosed(target, kind, name, result.statements, progress)
+    if (applied === null) return
     if ('done' in applied) {
       if (kind === 'case') ui.caseAdded?.()
       // Only the error tone stays until dismissed, and a substituted model must not be missed.
       showMessage(`${applied.done}${notice}`, result.fellBack ? 'error' : 'success')
-      api.focusEditor()
+      if (applied.inEditor && isOpen(target)) api.focusEditor()
       return
     }
-    showMessage(
-      `The result was rejected because ${applied.rejected}. ${name} was not changed. ${STILL_CHARGED}${notice}`,
-      'error',
-    )
+    if ('rejected' in applied) {
+      showMessage(
+        `The result was rejected because ${applied.rejected}. ${name} was not changed. ${STILL_CHARGED}${notice}`,
+        'error',
+      )
+      return
+    }
+    showMessage(`${'discarded' in applied ? applied.discarded : applied.failed} ${STILL_CHARGED}${notice}`, 'error')
   }
 
   const run = async (
@@ -867,13 +962,19 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     name: string,
     problemNumber: string,
     failingCase: string | null,
+    clickContext: AiTestContext,
     progress: ProgressTracker,
   ): Promise<void> => {
     const kind: AiButtonMode = failingCase === null ? 'examples' : 'case'
     let action = 'read the API key status'
     try {
       if (!await keyConfigured(progress)) return
-      const context = fillableContext(target, name, kind)
+      if (!sameRepository(target)) {
+        showMessage(`The repository changed, so no request was sent for ${name}.`, 'info')
+        return
+      }
+      // A file left during the key check was saved as it was at the click.
+      const context = fillableContext(isOpen(target) ? api.readContext() : clickContext, name, kind)
       if (!context) return
 
       const problem = loadedProblem(problemNumber)
@@ -902,7 +1003,7 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
       }, progress.onProgress).finally(() => {
         if (!disposed) ui.generationFinished()
       })
-      if (!disposed) finish(target, name, kind, result)
+      if (!disposed) await finish(target, name, kind, result, progress)
     } catch (error) {
       if (!disposed) showMessage(`Could not ${action}: ${errorMessage(error)}`, 'error')
     }
@@ -1004,7 +1105,7 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
   }
 
   const start = async (
-    kind: AiPopupRequestKind | 'review',
+    kind: AiTestRequestKind | 'review',
     failingCase: string | null,
     reviewChoice: ReviewChoice | null = null,
   ): Promise<void> => {
@@ -1027,13 +1128,12 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
       }
       return
     }
-    // The popup opens while the clicked button is still enabled and focused,
-    // so it records that button as the place to return focus.
-    const tracker = trackProgress(kind)
+    const clickContext = api.readContext()
+    const tracker = trackPending(kind, target)
     progress = tracker
     ui.requestChanged()
     try {
-      await run(target, name, problemNumber, failingCase, tracker)
+      await run(target, name, problemNumber, failingCase, clickContext, tracker)
     } finally {
       tracker.close()
     }
@@ -1041,7 +1141,7 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
 
   /**
    * Check the key, then let the user pick the review model. Both reads are
-   * local, so no popup is shown. Null means nothing is to be sent; any reason
+   * local, so no progress is shown. Null means nothing is to be sent; any reason
    * has been shown already.
    */
   const chooseReview = async (target: AiTarget, name: string, mode: AiReviewMode): Promise<ReviewChoice | null> => {
@@ -1126,6 +1226,10 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     if (!isOpen(stored.target)) {
       return { canAccept: false, note: `Open ${stored.fileName} to apply this change.` }
     }
+    // Tests on their way lock part of this file, which the change may cover.
+    if ((requestKind === 'examples' || requestKind === 'case') && requestPath === stored.target.path) {
+      return { canAccept: false, note: `${AI_REQUEST_RUNNING}.` }
+    }
     if (api.readSource() !== proposal.baseCode) return { canAccept: false, note: PROPOSAL_STALE_NOTE }
     return { canAccept: true, note: null }
   }
@@ -1157,6 +1261,9 @@ export function createAiController(api: AiControllerApi, ui: AiControllerUi): Ai
     },
     generate: () => start('examples', null),
     generateCase: (failingCase) => start('case', failingCase),
+    documentLoaded() {
+      if (!disposed) progress?.restore()
+    },
     review,
     askFollowUp,
     proposalState,

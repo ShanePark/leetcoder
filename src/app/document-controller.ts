@@ -43,6 +43,13 @@ export interface DocumentControllerEditor {
 
 export type DocumentControllerMessageTone = 'info' | 'success' | 'error'
 
+/**
+ * How a rewrite of a file that is not open ended: written, left alone because
+ * the edit returned null, refused because the file is the open document or the
+ * repository changed, or impossible because the file is gone.
+ */
+export type ClosedFileRewrite = 'written' | 'unchanged' | 'open' | 'stale' | 'missing'
+
 /** Render and state callbacks kept deliberately narrower than LeetcoderApp. */
 export interface DocumentControllerContext {
   readonly state: DocumentControllerState
@@ -72,6 +79,8 @@ export interface DocumentControllerContext {
   readonly revealSelectedFileInExplorer?: () => void
   /** Lets tests and hosts reject callbacks after their own teardown starts. */
   readonly isDestroyed?: () => boolean
+  /** The editor holds a document freshly read from disk. */
+  readonly documentLoaded?: () => void
 }
 
 /**
@@ -95,6 +104,10 @@ export class DocumentController {
   private savedFlashState = false
   private savedFlashTimer: ReturnType<typeof setTimeout> | null = null
   private gitDiscardInProgress = false
+  /** Rewrites of files that are not open, by path; opening one waits for its rewrite. */
+  private readonly closedFileRewrites = new Map<string, Promise<unknown>>()
+  /** Counts started rewrites, so an open can tell that its read may be stale. */
+  private rewriteSerial = 0
 
   constructor(context: DocumentControllerContext) {
     this.context = context
@@ -177,16 +190,25 @@ export class DocumentController {
         || !this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
         return
       }
-      const source = await this.context.backend.readProblemFile(repoPath, file.path)
-      if (!this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
-        return
-      }
-      // The user can keep editing the current document while the next file is
-      // being read. Drain those edits before replacing the editor contents so
-      // navigation never strands a change that arrived during the read.
-      if (!(await this.flushPendingSave())
-        || !this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
-        return
+      let source: string
+      for (;;) {
+        const rewrite = this.closedFileRewrites.get(file.path)
+        // Its failure is reported by whoever started it.
+        if (rewrite) await rewrite.catch(() => undefined)
+        const serial = this.rewriteSerial
+        source = await this.context.backend.readProblemFile(repoPath, file.path)
+        if (!this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
+          return
+        }
+        // The user can keep editing the current document while the next file is
+        // being read. Drain those edits before replacing the editor contents so
+        // navigation never strands a change that arrived during the read.
+        if (!(await this.flushPendingSave())
+          || !this.isCurrentOpenRequest(requestId, repoPath, repositoryGeneration, startedBusy)) {
+          return
+        }
+        // A rewrite of this file that started meanwhile makes the read stale.
+        if (serial === this.rewriteSerial && !this.closedFileRewrites.has(file.path)) break
       }
       if (!this.isOpenTargetCurrent(file, existing, startedBusy)) {
         return
@@ -449,6 +471,48 @@ export class DocumentController {
       this.suppressEditorChange = false
     }
     this.context.setSavedSource(source)
+    this.context.documentLoaded?.()
+  }
+
+  /**
+   * Rewrite a listed file that is not the open document, straight on disk. Its
+   * text is read, passed to `edit`, and the result saved; opening the file
+   * meanwhile waits for the save. A save failure rejects.
+   */
+  async rewriteClosedFile(
+    repoPath: string,
+    path: string,
+    repositoryGeneration: number,
+    edit: (source: string) => string | null,
+  ): Promise<ClosedFileRewrite> {
+    if (!this.isCurrentRepository(repoPath, repositoryGeneration)) return 'stale'
+    if (sameFilePath(path, this.state.selectedPath ?? '')) return 'open'
+    const listed = (): boolean => this.state.files.some((entry) => sameFilePath(entry.path, path))
+    if (!listed()) return 'missing'
+    const previous = this.closedFileRewrites.get(path)
+    const rewrite = (async (): Promise<ClosedFileRewrite> => {
+      if (previous) await previous.catch(() => undefined)
+      let source: string
+      try {
+        source = await this.context.backend.readProblemFile(repoPath, path)
+      } catch {
+        return 'missing'
+      }
+      if (!this.isCurrentRepository(repoPath, repositoryGeneration)) return 'stale'
+      if (!listed()) return 'missing'
+      const next = edit(source)
+      if (next === null || next === source) return 'unchanged'
+      await this.context.backend.saveProblemFile(repoPath, path, next)
+      if (this.isAlive()) this.context.markGitStale()
+      return 'written'
+    })()
+    this.rewriteSerial += 1
+    this.closedFileRewrites.set(path, rewrite)
+    try {
+      return await rewrite
+    } finally {
+      if (this.closedFileRewrites.get(path) === rewrite) this.closedFileRewrites.delete(path)
+    }
   }
 
   /**
@@ -491,6 +555,7 @@ export class DocumentController {
       } finally {
         this.suppressEditorChange = false
       }
+      this.context.documentLoaded?.()
       this.context.editor.setIssues([])
       this.context.markGitStale()
       this.context.scheduleLiveDiagnostics()

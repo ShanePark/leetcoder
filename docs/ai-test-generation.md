@@ -343,11 +343,23 @@ Residual risk: a call such as `exec(...)` inside an argument still passes. Nothi
 runs automatically, so the owner reads the code before clicking Run.
 
 Apply by snapshotting `repoPath`, `selectedPath`, and the repository generation
-before the call and discarding the result with a toast if any changed. Locate the
-body and re-check the stub against the current document at apply time. Use one
-dispatch with `userEvent: 'input.aiTests'`, so imports join the same undo step, and
-confirm nothing else reacts badly to that event. Add `TreeNode` and `ListNode` to
-the auto-imports, gated like `Ps`.
+at the click. The request belongs to that file. A changed repository discards the
+result with a toast. Locate the body and re-check the stub against the file's
+current text at apply time. When the file is open, use one dispatch with
+`userEvent: 'input.aiTests'`, so imports join the same undo step, and confirm
+nothing else reacts badly to that event. Add `TreeNode` and `ListNode` to the
+auto-imports, gated like `Ps`.
+
+When another file is open, `DocumentController.rewriteClosedFile` reads the file
+from disk, `JavaEditor.fillAiTestsInSource` plans the same insertion
+(`planAiTestInsertion` or `planAiCaseTestInsertion`) and adds the imports the
+editor would, and the result is saved. The file was saved when
+the user left it, because navigation flushes autosave, and a closed tab holds no
+buffer, so there is nothing to reconcile. Opening the file waits for a rewrite in
+flight and reads it again if a rewrite started during the read. If the user is
+back on the file when the result arrives, it is applied in the editor. A file no
+longer listed or unreadable discards the result, as does a stub filled meanwhile,
+each with the "still charged" toast.
 
 ### Bare stub definition
 
@@ -371,7 +383,8 @@ The button is hidden unless a click could send a request: the open file is
 and `test()` is a bare stub. It updates on file switches, problem loads, and edits,
 so it disappears after a fill and returns on undo. A running request keeps it visible
 as the spinner, even after switching files. The messages for these cases remain only
-for a document or problem that changes while the key status is read.
+for a document or problem that changes while the key status is read. A file left
+during that read is checked as it was at the click.
 
 ### Failing case
 
@@ -414,21 +427,53 @@ model actually sent, and `{"stage":"received"}` once the reply arrives, before
 parsing. Send failures are ignored. The client methods take an optional
 `onProgress` as their last argument.
 
-The controller shows the shared modal progress popup
-(`src/app/progress-overlay.ts`) from the click until the request ends. Its stages
-are reading, asking the provider by `displayName` (with the model ID once known,
-or "Asking the model" before the status names it), and writing:
+Test generation shows no popup and blocks nothing outside the region it will
+change. From the click until the request ends, the editor extension in
+`src/editor/ai-pending.ts` locks that region read-only and shows the status in
+it. `JavaEditor.showAiPending` and `clearAiPending` drive it.
 
-| Request | Kicker | Title | Stages |
-| --- | --- | --- | --- |
-| Fill `test()` | AI tests | Generating tests | Reading the problem, Asking …, Writing tests |
-| Failing case | AI tests | Adding failing case | the same |
+- Fill `test()`: the whole bare method, annotation to closing brace, since
+  editing its name or body is what would make the fill impossible. The status
+  sits at the end of the body line (`assertThat()` or empty), or of the `{`
+  line when the braces share a line or are on adjacent lines.
+- Failing case: the last `@Test` method, since removing or renaming it would
+  move the new method. The status sits after its closing brace, where the
+  method will appear. Without a test method, only the line the method follows.
 
-The popup closes before any toast, the key settings, or editor focus, because it
-makes the shell inert while open. Events after the request ends are ignored, and a
-discarded or failed request closes it too. App shortcuts wait while test
-generation runs. A review shows no popup: it streams into the Review tab (see
-Code review), and its `requesting` event names the model on the stream status.
+The lock is a state field mapped through changes and a change filter. It refuses
+any user change that overlaps the locked lines, joins one with a neighbour, or
+adds text to one. Whole lines added right before or after them, and edits
+elsewhere, pass. The fill's own `input.aiTests` transaction passes and ends the
+lock. Loading a document (`setValue`, `reloadExternalValue`) drops it; the
+controller shows it again after `documentLoaded` when the loaded file is the
+request's.
+
+The status is a chip with a spinner, the step label, a detail, and three step
+dots:
+
+| Request | Title (tooltip and label) | Steps |
+| --- | --- | --- |
+| Fill `test()` | Generating tests | Reading the problem, Asking …, Writing tests |
+| Failing case | Adding failing case | the same |
+
+The asking step names the provider by `displayName`, or "Asking the model"
+before the status names it, with the model ID as its detail once known. The
+locked lines are tinted and their text dimmed.
+
+Showing the status never moves code. There are no block widgets or replaced
+ranges: the chip is an inline widget, aligned to the top of the line, whose
+height with its margin is 1.3 editor ems against the 1.4 editor-em line, and
+the tint and dimming are line backgrounds and opacity. Lines a fill added fade
+from a green tint for 1.6 seconds; with reduced motion they keep a static tint
+for that time.
+
+The lock ends before any toast, the key settings, or editor focus. Events after
+the request ends are ignored, and a discarded or failed request ends it too.
+Editor focus follows a fill only when it was applied in the editor and focus is
+still on the button or the page body. A pending change proposed by a review
+follow-up cannot be accepted while tests are on their way to its file. A review
+shows no lock: it streams into the Review tab (see Code review), and its
+`requesting` event names the model on the stream status.
 
 ### Code review
 
@@ -752,7 +797,8 @@ another line automatically. If no Haiku exists, ask the user to choose.
 | An example needs an interface or API the platform implements, such as `MountainArray` | The model returns no statements, and the result is rejected with a message. The call is charged. |
 | The loaded problem is another one, or none is loaded | Button hidden. No LeetCode request. A message asking to paste the file's problem URL if it changes during the status check. |
 | Validation rejects the output | Message. Buffer untouched. Usage recorded. |
-| File or repository changed during the call | Result discarded with a toast. Usage recorded. |
+| Another file opened during the call | Result written to the request's file on disk, with the success toast naming it. |
+| Repository changed, or the file deleted or renamed, during the call | Result discarded with a toast. Usage recorded. |
 | 401, 429, 5xx, 3xx, or timeout | Toast with a readable reason. Buffer untouched. |
 | `stop_reason` is `refusal` or `max_tokens` | Message. Buffer untouched. Usage recorded. |
 | Price source unavailable or rejected | Keep last good copy. Otherwise show tokens with "price unknown". |

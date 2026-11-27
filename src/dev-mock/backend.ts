@@ -383,7 +383,8 @@ function createMockAi(): MockAi {
         throw new Error('No API key is configured.')
       }
       const { servedModel, fellBack } = mockServedModel(request.selectedModelId)
-      await mockAiRequest(servedModel, 900, onProgress)
+      // Long enough to switch files and back while the test region is locked.
+      await mockAiRequest(servedModel, 3_500, onProgress)
       usage.push({ ...AI_GENERATION_USAGE, ts: Date.now(), model: servedModel })
       return { outcome: 'ok', statements: mockAiStatements(request), servedModel, fellBack }
     },

@@ -34,6 +34,7 @@ import {
   MAX_AI_REVIEW_FIELD_LENGTH,
   MAX_AI_REVIEW_TEST_RUN_LENGTH,
   aiButtonPresentation,
+  aiPendingStatus,
   aiProblemNumber,
   aiReviewButtonPresentation,
   aiReviewMode,
@@ -49,7 +50,8 @@ import {
   type AiReviewStream,
   type AiTarget,
 } from '../../../src/app/ai-controller'
-import type { ProgressOverlayState } from '../../../src/app/progress-overlay'
+import type { AiPendingStatus } from '../../../src/editor'
+import { planAiCaseTestInsertion, planAiTestInsertion } from '../../../src/editor/ai-tests'
 import { AiEditDiffDialog } from '../../../src/app/ai-edit-diff-dialog'
 
 const javaSource = (body: string): string => `package shane.leetcode.problems.easy;
@@ -447,55 +449,153 @@ describe('AI test generation button', () => {
     expect(button().dataset.text).toBe('Add case')
   })
 
-  it('discards the result and says the call was charged when the file changes mid-request', async () => {
-    const backend = configuredBackend()
-    const generation = deferred<AiGenerateResult>()
-    vi.mocked(backend.aiGenerateTests).mockReturnValue(generation.promise)
-    vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
-    await openStub(backend)
-    button().dispatch('click')
-    await vi.waitFor(() => {
-      expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
-    })
-
+  describe('while another file is open', () => {
     const otherStub = stubSource.replaceAll('Q1TwoSum', 'Q9Palindrome')
-    vi.mocked(backend.readProblemFile).mockResolvedValue(otherStub)
-    await selectFile(otherFile)
-    expect(button().title).toContain('Q1TwoSum.java')
-    const apply = vi.spyOn(editor(), 'applyAiTests')
 
-    generation.resolve(okResult)
-    await vi.waitFor(() => {
-      expect(button().attributes.get('aria-busy')).toBe('false')
+    /** Both files on a fake disk that reads return and saves change. */
+    function twoFiles(backend: BackendClient, first = stubSource): Map<string, string> {
+      const disk = new Map([[file.path, first], [otherFile.path, otherStub]])
+      vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
+      vi.mocked(backend.readProblemFile).mockImplementation(async (_repo, path) => {
+        const source = disk.get(path)
+        if (source === undefined) throw new Error('No such file')
+        return source
+      })
+      vi.mocked(backend.saveProblemFile).mockImplementation(async (_repo, path, source) => {
+        disk.set(path, source)
+      })
+      return disk
+    }
+
+    async function startThenLeave(backend: BackendClient): Promise<(result: AiGenerateResult) => void> {
+      const generation = deferred<AiGenerateResult>()
+      vi.mocked(backend.aiGenerateTests).mockReturnValue(generation.promise)
+      await openApp(backend)
+      await selectFile(file)
+      button().dispatch('click')
+      await vi.waitFor(() => {
+        expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+      })
+      await selectFile(otherFile)
+      return generation.resolve
+    }
+
+    it('writes the result to the file it was asked for and names it', async () => {
+      const backend = configuredBackend()
+      const disk = twoFiles(backend)
+      const resolve = await startThenLeave(backend)
+      expect(editor().aiPending).toBeNull()
+      expect(button().title).toContain('Q1TwoSum.java')
+      const apply = vi.spyOn(editor(), 'applyAiTests')
+
+      resolve(okResult)
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
+
+      expect(apply).not.toHaveBeenCalled()
+      expect(editor().source).toBe(otherStub)
+      expect(disk.get(file.path)).toContain(`        ${statements[0]}\n    }`)
+      expect(disk.get(otherFile.path)).toBe(otherStub)
+      expect(lastToast()).toMatchObject({ message: 'Filled test() in Q1TwoSum.java.', tone: 'success' })
+
+      await selectFile(file)
+      expect(editor().source).toBe(disk.get(file.path))
     })
 
-    expect(apply).not.toHaveBeenCalled()
-    expect(editor().source).toBe(otherStub)
-    expect(lastToast()?.message).toContain('Q1TwoSum.java is no longer the active file, so the result was discarded')
-    expect(lastToast()?.message).toContain('still charged')
-    expect(button().hidden).toBe(true)
-  })
+    it('leaves unsaved edits to the open file alone', async () => {
+      const backend = configuredBackend()
+      const disk = twoFiles(backend)
+      const resolve = await startThenLeave(backend)
+      const edited = otherStub.replace('assertThat()', 'assertThat(1).isOne();')
+      editor().emitChange(edited)
 
-  it('sends nothing when the file changes during the key status check', async () => {
-    const backend = configuredBackend()
-    const status = deferred<AiStatus>()
-    vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
-    await openStub(backend)
-    vi.mocked(backend.aiStatus).mockClear()
-    vi.mocked(backend.aiStatus).mockReturnValue(status.promise)
-    button().dispatch('click')
-    await vi.waitFor(() => {
-      expect(backend.aiStatus).toHaveBeenCalledOnce()
+      resolve(okResult)
+      await vi.waitFor(() => {
+        expect(lastToast()?.message).toBe('Filled test() in Q1TwoSum.java.')
+      })
+
+      expect(editor().source).toBe(edited)
+      expect(appState().selectedPath).toBe(otherFile.path)
+      expect(disk.get(otherFile.path)).not.toContain(statements[0])
+      expect(disk.get(file.path)).toContain(statements[0])
     })
 
-    await selectFile(otherFile)
-    status.resolve({ configured: true, provider })
-    await vi.waitFor(() => {
-      expect(button().attributes.get('aria-busy')).toBe('false')
+    it('fills the editor when the user is back on the file when the result arrives', async () => {
+      const backend = configuredBackend()
+      const disk = twoFiles(backend)
+      const resolve = await startThenLeave(backend)
+      await selectFile(file)
+      expect(editor().aiPending).toMatchObject({ kind: 'examples', status: { label: 'Reading the problem' } })
+
+      resolve(okResult)
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
+
+      expect(editor().source).toContain(`        ${statements[0]}\n    }`)
+      expect(editor().aiPending).toBeNull()
+      expect(lastToast()).toMatchObject({ message: 'Filled test() in Q1TwoSum.java.', tone: 'success' })
+      expect(disk.get(otherFile.path)).toBe(otherStub)
     })
 
-    expect(backend.aiGenerateTests).not.toHaveBeenCalled()
-    expect(lastToast()?.message).toContain('no request was sent')
+    it('discards the result when the file is gone and says the call was charged', async () => {
+      const backend = configuredBackend()
+      const disk = twoFiles(backend)
+      const resolve = await startThenLeave(backend)
+      disk.delete(file.path)
+
+      resolve(okResult)
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
+
+      expect(backend.saveProblemFile).not.toHaveBeenCalledWith(expect.anything(), file.path, expect.anything())
+      expect(lastToast()?.message).toContain('Q1TwoSum.java was deleted or renamed, so the result was discarded')
+      expect(lastToast()?.message).toContain('still charged')
+      expect(lastToast()?.tone).toBe('error')
+    })
+
+    it('leaves the file alone when its test() was filled meanwhile', async () => {
+      const backend = configuredBackend()
+      const disk = twoFiles(backend)
+      const resolve = await startThenLeave(backend)
+      disk.set(file.path, filledSource)
+
+      resolve(okResult)
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
+
+      expect(disk.get(file.path)).toBe(filledSource)
+      expect(lastToast()?.message).toContain('test() already has code')
+      expect(lastToast()?.message).toContain('still charged')
+    })
+
+    it('keeps the request going when the file changes during the key status check', async () => {
+      const backend = configuredBackend()
+      const disk = twoFiles(backend)
+      const status = deferred<AiStatus>()
+      await openApp(backend)
+      await selectFile(file)
+      vi.mocked(backend.aiStatus).mockClear()
+      vi.mocked(backend.aiStatus).mockReturnValue(status.promise)
+      button().dispatch('click')
+      await vi.waitFor(() => {
+        expect(backend.aiStatus).toHaveBeenCalledOnce()
+      })
+
+      await selectFile(otherFile)
+      status.resolve({ configured: true, provider })
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
+
+      expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+      expect(vi.mocked(backend.aiGenerateTests).mock.calls[0][0].methodHeaders)
+        .toEqual(['public int[] twoSum(int[] nums, int target)'])
+      expect(disk.get(file.path)).toContain(statements[0])
+    })
   })
 
   it('leaves the buffer alone when the stub is filled mid-request', async () => {
@@ -994,23 +1094,29 @@ describe('AI test generation button', () => {
       expect(button().dataset.icon).toBe('circlePlus')
     })
 
-    it('discards the result when the file changes mid-request', async () => {
+    it('adds the case to its file when another file is open', async () => {
       const backend = configuredBackend()
       const generation = deferred<AiGenerateResult>()
       vi.mocked(backend.aiGenerateTests).mockReturnValue(generation.promise)
+      const otherSource = filledSource.replaceAll('Q1TwoSum', 'Q9Palindrome')
+      const disk = new Map([[file.path, filledSource], [otherFile.path, otherSource]])
       vi.mocked(backend.listProblemFiles).mockResolvedValue([file, otherFile])
-      await openStub(backend, filledSource)
+      vi.mocked(backend.readProblemFile).mockImplementation(async (_repo, path) => disk.get(path) ?? '')
+      vi.mocked(backend.saveProblemFile).mockImplementation(async (_repo, path, source) => {
+        disk.set(path, source)
+      })
+      await openApp(backend)
+      await selectFile(file)
       button().dispatch('click')
       submitCase(pasted)
       await vi.waitFor(() => {
         expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
       })
+      expect(editor().aiPending).toMatchObject({ kind: 'case' })
 
-      const otherSource = filledSource.replaceAll('Q1TwoSum', 'Q9Palindrome')
-      vi.mocked(backend.readProblemFile).mockResolvedValue(otherSource)
       await selectFile(otherFile)
+      expect(editor().aiPending).toBeNull()
       const apply = vi.spyOn(editor(), 'applyAiCaseTest')
-
       generation.resolve(okResult)
       await vi.waitFor(() => {
         expect(button().attributes.get('aria-busy')).toBe('false')
@@ -1018,7 +1124,8 @@ describe('AI test generation button', () => {
 
       expect(apply).not.toHaveBeenCalled()
       expect(editor().source).toBe(otherSource)
-      expect(lastToast()?.message).toContain('Q1TwoSum.java is no longer the active file, so the result was discarded')
+      expect(disk.get(file.path)).toContain('public void test2()')
+      expect(lastToast()).toMatchObject({ message: 'Added test2() to Q1TwoSum.java.', tone: 'success' })
     })
 
     it('rejects statements that would leave the new method and changes nothing', async () => {
@@ -1078,11 +1185,15 @@ describe('AI test generation button', () => {
     })
   })
 
-  describe('progress popup', () => {
-    it('shows the stages while generating and closes before the result toast', async () => {
+  describe('inline progress', () => {
+    it('locks the test while generating, shows no popup, and ends before the result toast', async () => {
       const backend = configuredBackend()
       vi.mocked(backend.aiGenerateTests).mockImplementation(async (_request, onProgress) => {
         onProgress?.({ stage: 'requesting', model: 'model-x' })
+        expect(editor().aiPending).toMatchObject({
+          kind: 'examples',
+          status: { label: 'Asking Claude', detail: 'model-x', step: 1 },
+        })
         onProgress?.({ stage: 'received' })
         return okResult
       })
@@ -1090,27 +1201,51 @@ describe('AI test generation button', () => {
 
       await clickAndSettle()
 
-      const states = testMocks.progressOverlays
-      expect(states[0]).toMatchObject({ kicker: 'AI tests', title: 'Generating tests', current: 0 })
-      expect(states).toContainEqual(expect.objectContaining({
-        current: 1,
-        stages: ['Reading the problem', { label: 'Asking Claude', detail: 'model-x' }, 'Writing tests'],
-      }))
-      expect(states).toContainEqual(expect.objectContaining({ current: 2 }))
-      expect(states.at(-1)).toBeNull()
+      expect(testMocks.aiPendingUpdates).toEqual([
+        'examples: Reading the problem',
+        'examples: Reading the problem',
+        'examples: Asking Claude',
+        'examples: Writing tests',
+      ])
+      expect(editor().aiPending).toBeNull()
+      expect(testMocks.progressOverlays).toHaveLength(0)
       expect(lastToast()?.message).toBe('Filled test() in Q1TwoSum.java.')
     })
 
-    it('closes after an error', async () => {
+    it('unlocks after an error', async () => {
       const backend = configuredBackend()
       vi.mocked(backend.aiGenerateTests).mockRejectedValue(new Error('HTTP 500'))
       await openStub(backend)
 
       await clickAndSettle()
 
-      expect(testMocks.progressOverlays.length).toBeGreaterThan(1)
-      expect(testMocks.progressOverlays.at(-1)).toBeNull()
+      expect(testMocks.aiPendingUpdates.length).toBeGreaterThan(1)
+      expect(testMocks.aiPendingUpdates.at(-1)).toBeNull()
+      expect(editor().aiPending).toBeNull()
+      expect(testMocks.progressOverlays).toHaveLength(0)
       expect(lastToast()).toMatchObject({ message: 'Could not generate tests: HTTP 500', tone: 'error' })
+    })
+
+    it('leaves the keyboard to the app while a request runs', async () => {
+      const backend = configuredBackend()
+      const generation = deferred<AiGenerateResult>()
+      vi.mocked(backend.aiGenerateTests).mockReturnValue(generation.promise)
+      await openStub(backend)
+      button().dispatch('click')
+      await vi.waitFor(() => {
+        expect(backend.aiGenerateTests).toHaveBeenCalledOnce()
+      })
+
+      const preventDefault = vi.fn()
+      dom.window.dispatch('keydown', {
+        key: 'a', code: 'KeyA', altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, target: null, preventDefault,
+      })
+      expect(preventDefault).not.toHaveBeenCalled()
+
+      generation.resolve(okResult)
+      await vi.waitFor(() => {
+        expect(button().attributes.get('aria-busy')).toBe('false')
+      })
     })
   })
 
@@ -1655,7 +1790,7 @@ describe('AI controller helpers', () => {
     expect(vi.mocked(ui.showMessage).mock.calls[0][0]).toContain('discarded')
     expect(api.focusEditor).not.toHaveBeenCalled()
     expect(ui.generationFinished).toHaveBeenCalledOnce()
-    expect(ui.progressStates.at(-1)).toBeNull()
+    expect(ui.pendingStates.at(-1)).toBeNull()
     expect(controller.requestPath).toBeNull()
   })
 })
@@ -1718,14 +1853,15 @@ const reviewModels: AiModelList = {
 }
 
 type UnitUi = AiControllerUi & {
-  /** Every popup update, plus the order of popup and message calls. */
-  progressStates: Array<ProgressOverlayState | null>
+  /** Every lock shown or moved to a new step, with null for removal. */
+  pendingStates: Array<AiPendingStatus | null>
+  /** The order of lock updates and messages. */
   events: string[]
 }
 
-/** A controller over fakes whose calls record the order of popup updates and messages. */
+/** A controller over fakes whose calls record the order of lock updates and messages. */
 function unitController(overrides: Partial<AiControllerApi> = {}, uiOverrides: Partial<AiControllerUi> = {}) {
-  const progressStates: Array<ProgressOverlayState | null> = []
+  const pendingStates: Array<AiPendingStatus | null> = []
   const events: string[] = []
   const api: AiControllerApi = {
     aiStatus: vi.fn(async () => ({ configured: true, provider })),
@@ -1740,6 +1876,19 @@ function unitController(overrides: Partial<AiControllerApi> = {}, uiOverrides: P
     psSignatures: () => [],
     applyStatements: vi.fn(() => ({ ok: true }) as never),
     applyCaseStatements: vi.fn(() => ({ ok: true, methodName: 'test2' }) as never),
+    fillSource: vi.fn((kind, source: string, lines: readonly string[]) => {
+      const result = kind === 'case' ? planAiCaseTestInsertion(source, lines) : planAiTestInsertion(source, lines)
+      return { result, source: result.ok ? `${source.slice(0, result.from)}${result.insert}${source.slice(result.to)}` : null }
+    }),
+    rewriteFile: vi.fn(async () => 'written' as const),
+    showPendingTests: vi.fn((_kind, status: AiPendingStatus) => {
+      pendingStates.push(status)
+      events.push(`pending ${status.step}`)
+    }),
+    clearPendingTests: vi.fn(() => {
+      pendingStates.push(null)
+      events.push('pending cleared')
+    }),
     focusEditor: vi.fn(() => {
       events.push('focus')
     }),
@@ -1750,7 +1899,7 @@ function unitController(overrides: Partial<AiControllerApi> = {}, uiOverrides: P
     ...overrides,
   }
   const ui: UnitUi = {
-    progressStates,
+    pendingStates,
     events,
     requestChanged: vi.fn(),
     showMessage: vi.fn((message: string) => {
@@ -1760,10 +1909,6 @@ function unitController(overrides: Partial<AiControllerApi> = {}, uiOverrides: P
       events.push('missing key')
     }),
     generationFinished: vi.fn(),
-    showProgress: vi.fn((state: ProgressOverlayState | null) => {
-      progressStates.push(state)
-      events.push(state ? `progress ${state.current}` : 'progress closed')
-    }),
     caseAdded: vi.fn(),
     reviewed: vi.fn(() => {
       events.push('reviewed')
@@ -1786,11 +1931,8 @@ function unitController(overrides: Partial<AiControllerApi> = {}, uiOverrides: P
   return { controller: createAiController(api, ui), api, ui }
 }
 
-const stageLabels = (state: ProgressOverlayState | null): string[] =>
-  (state?.stages ?? []).map((stage) => typeof stage === 'string' ? stage : stage.label)
-
-describe('AI progress popup', () => {
-  it('steps through reading, asking the provider by name, and writing, then closes before the message', async () => {
+describe('AI inline progress', () => {
+  it('steps through reading, asking the provider by name, and writing, then unlocks before the message', async () => {
     let report: AiProgressHandler | undefined
     const generation = deferred<AiGenerateResult>()
     const status = deferred<AiStatus>()
@@ -1803,39 +1945,214 @@ describe('AI progress popup', () => {
     })
 
     const finished = controller.generate()
-    expect(ui.progressStates).toHaveLength(1)
-    expect(ui.progressStates[0]).toMatchObject({ kicker: 'AI tests', title: 'Generating tests', current: 0 })
-    expect(stageLabels(ui.progressStates[0])).toEqual(['Reading the problem', 'Asking the model', 'Writing tests'])
+    expect(ui.pendingStates).toEqual([
+      { title: 'Generating tests', label: 'Reading the problem', detail: null, step: 0, total: 3 },
+    ])
 
     status.resolve({ configured: true, provider: { id: 'other', displayName: 'Provider X' } })
     await vi.waitFor(() => {
       expect(report).toBeDefined()
     })
-    expect(stageLabels(ui.progressStates.at(-1)!)).toEqual(['Reading the problem', 'Asking Provider X', 'Writing tests'])
+    // The provider is known now, but the step is still reading.
+    expect(ui.pendingStates.at(-1)).toMatchObject({ label: 'Reading the problem', step: 0 })
 
     report!({ stage: 'requesting', model: 'model-123' })
-    expect(ui.progressStates.at(-1)).toMatchObject({ current: 1 })
-    expect(ui.progressStates.at(-1)!.stages[1]).toEqual({ label: 'Asking Provider X', detail: 'model-123' })
+    expect(ui.pendingStates.at(-1)).toEqual({
+      title: 'Generating tests',
+      label: 'Asking Provider X',
+      detail: 'model-123',
+      step: 1,
+      total: 3,
+    })
 
     report!({ stage: 'received' })
-    expect(ui.progressStates.at(-1)).toMatchObject({ current: 2 })
+    expect(ui.pendingStates.at(-1)).toMatchObject({ label: 'Writing tests', detail: null, step: 2 })
 
     generation.resolve(okResult)
     await finished
-    expect(ui.progressStates.at(-1)).toBeNull()
-    expect(ui.events.slice(-3)).toEqual(['progress closed', 'message: Filled test() in Q1TwoSum.java.', 'focus'])
+    expect(ui.pendingStates.at(-1)).toBeNull()
+    expect(ui.events.slice(-3)).toEqual(['pending cleared', 'message: Filled test() in Q1TwoSum.java.', 'focus'])
 
     // A late event after the request ended shows nothing.
-    const count = ui.progressStates.length
+    const count = ui.pendingStates.length
     report!({ stage: 'received' })
-    expect(ui.progressStates).toHaveLength(count)
+    expect(ui.pendingStates).toHaveLength(count)
   })
 
-  it('titles a failing case request as adding a case', async () => {
-    const { controller, ui } = unitController()
+  it('names the asking step without a provider until the key status is read', () => {
+    expect(aiPendingStatus('examples', 'asking', null, null)).toMatchObject({ label: 'Asking the model', detail: null })
+    expect(aiPendingStatus('case', 'asking', provider, 'm')).toMatchObject({
+      title: 'Adding failing case',
+      label: 'Asking Claude',
+      detail: 'm',
+    })
+  })
+
+  it('locks a failing case request with its own title, and only while its file is open', async () => {
+    const { controller, api, ui } = unitController()
     await controller.generateCase('a = 1\nExpected\n2')
-    expect(ui.progressStates[0]).toMatchObject({ kicker: 'AI tests', title: 'Adding failing case' })
-    expect(ui.progressStates.at(-1)).toBeNull()
+    expect(api.showPendingTests).toHaveBeenCalledWith('case', expect.objectContaining({ title: 'Adding failing case' }))
+    expect(ui.pendingStates.at(-1)).toBeNull()
+
+    let current: AiTarget = unitTarget
+    const status = deferred<AiStatus>()
+    const other = unitController({ aiStatus: () => status.promise, currentTarget: () => current })
+    const finished = other.controller.generate()
+    expect(other.ui.pendingStates).toHaveLength(1)
+    current = { ...unitTarget, path: 'src/Q9Palindrome.java' }
+    status.resolve({ configured: true, provider })
+    await finished
+    // The status moved on while another file was open, so nothing new was shown there.
+    expect(other.ui.pendingStates.filter((state) => state !== null)).toHaveLength(1)
+  })
+
+  it('locks the file again when the editor loads it while the request runs', async () => {
+    let current: AiTarget = unitTarget
+    let report: AiProgressHandler | undefined
+    const generation = deferred<AiGenerateResult>()
+    const { controller, api, ui } = unitController({
+      currentTarget: () => current,
+      aiGenerateTests: (_request, onProgress) => {
+        report = onProgress
+        return generation.promise
+      },
+    })
+    const finished = controller.generate()
+    await vi.waitFor(() => {
+      expect(report).toBeDefined()
+    })
+    report!({ stage: 'requesting', model: 'model-x' })
+    current = { ...unitTarget, path: 'src/Q9Palindrome.java' }
+    const shown = ui.pendingStates.length
+    controller.documentLoaded()
+    expect(ui.pendingStates).toHaveLength(shown)
+
+    current = unitTarget
+    controller.documentLoaded()
+    expect(api.showPendingTests).toHaveBeenLastCalledWith('examples', expect.objectContaining({
+      label: 'Asking Claude',
+      detail: 'model-x',
+      step: 1,
+    }))
+
+    generation.resolve(okResult)
+    await finished
+    const count = ui.pendingStates.length
+    controller.documentLoaded()
+    expect(ui.pendingStates).toHaveLength(count)
+  })
+
+  it('writes the result through the file when its file is no longer open', async () => {
+    let current: AiTarget = unitTarget
+    const generation = deferred<AiGenerateResult>()
+    const sources: string[] = []
+    const { controller, api, ui } = unitController({
+      currentTarget: () => current,
+      aiGenerateTests: () => generation.promise,
+      rewriteFile: vi.fn(async (target: AiTarget, edit: (source: string) => string | null) => {
+        expect(target).toEqual(unitTarget)
+        const next = edit(stubSource)
+        if (next !== null) sources.push(next)
+        return next === null ? 'unchanged' as const : 'written' as const
+      }),
+    })
+    const finished = controller.generate()
+    await new Promise((resolve) => setTimeout(resolve))
+    current = { ...unitTarget, path: 'src/Q9Palindrome.java' }
+    generation.resolve(okResult)
+    await finished
+
+    expect(api.applyStatements).not.toHaveBeenCalled()
+    expect(sources).toHaveLength(1)
+    expect(sources[0]).toContain(`        ${statements[0]}\n    }`)
+    expect(ui.showMessage).toHaveBeenLastCalledWith('Filled test() in Q1TwoSum.java.', 'success')
+    expect(api.focusEditor).not.toHaveBeenCalled()
+    expect(controller.requestPath).toBeNull()
+  })
+
+  it.each([
+    ['open', 'Filled test() in Q1TwoSum.java.'],
+    ['stale', 'The repository changed, so the result for Q1TwoSum.java was discarded.'],
+    ['missing', 'Q1TwoSum.java was deleted or renamed, so the result was discarded.'],
+  ] as const)('reports a %s file when writing a background result', async (outcome, message) => {
+    let current: AiTarget = unitTarget
+    const generation = deferred<AiGenerateResult>()
+    const { controller, api, ui } = unitController({
+      currentTarget: () => current,
+      aiGenerateTests: () => generation.promise,
+      rewriteFile: vi.fn(async () => {
+        // The user went back to the file just before the write.
+        if (outcome === 'open') current = unitTarget
+        return outcome
+      }),
+    })
+    const finished = controller.generate()
+    await new Promise((resolve) => setTimeout(resolve))
+    current = { ...unitTarget, path: 'src/Q9Palindrome.java' }
+    generation.resolve(okResult)
+    await finished
+
+    expect(vi.mocked(ui.showMessage).mock.calls.at(-1)?.[0]).toContain(message)
+    if (outcome === 'open') {
+      expect(api.applyStatements).toHaveBeenCalledOnce()
+    } else {
+      expect(api.applyStatements).not.toHaveBeenCalled()
+      expect(vi.mocked(ui.showMessage).mock.calls.at(-1)?.[0]).toContain('still charged')
+    }
+  })
+
+  it('says the tests could not be saved when the write fails', async () => {
+    let current: AiTarget = unitTarget
+    const generation = deferred<AiGenerateResult>()
+    const { controller, ui } = unitController({
+      currentTarget: () => current,
+      aiGenerateTests: () => generation.promise,
+      rewriteFile: vi.fn(async () => {
+        throw new Error('disk full')
+      }),
+    })
+    const finished = controller.generate()
+    await new Promise((resolve) => setTimeout(resolve))
+    current = { ...unitTarget, path: 'src/Q9Palindrome.java' }
+    generation.resolve(okResult)
+    await finished
+
+    expect(vi.mocked(ui.showMessage).mock.calls.at(-1)).toEqual([
+      'Could not save the tests to Q1TwoSum.java: disk full. The call was still charged and is recorded in usage.',
+      'error',
+    ])
+  })
+
+  it('sends nothing when the repository changes during the key status check', async () => {
+    let current: AiTarget = unitTarget
+    const status = deferred<AiStatus>()
+    const { controller, api, ui } = unitController({ aiStatus: () => status.promise, currentTarget: () => current })
+    const finished = controller.generate()
+    current = { ...unitTarget, repositoryGeneration: 2 }
+    status.resolve({ configured: true, provider })
+    await finished
+
+    expect(api.aiGenerateTests).not.toHaveBeenCalled()
+    expect(ui.showMessage).toHaveBeenCalledWith('The repository changed, so no request was sent for Q1TwoSum.java.', 'info')
+  })
+
+  it('keeps a proposed change from being accepted while tests are on their way to its file', async () => {
+    const generation = deferred<AiGenerateResult>()
+    const { controller } = unitController({ aiGenerateTests: () => generation.promise })
+    const turn = {
+      proposal: { status: 'pending', code: 'x', baseCode: 'class Q1TwoSum { int f() { return 1; } }' },
+    } as unknown as Parameters<AiController['proposalState']>[1]
+    const stored = { target: unitTarget, fileName: 'Q1TwoSum.java', followUps: [turn] } as unknown as Parameters<AiController['proposalState']>[0]
+    expect(controller.proposalState(stored, turn).canAccept).toBe(true)
+
+    const finished = controller.generate()
+    expect(controller.proposalState(stored, turn)).toEqual({
+      canAccept: false,
+      note: 'Available when the current AI request finishes.',
+    })
+    generation.resolve(okResult)
+    await finished
+    expect(controller.proposalState(stored, turn).canAccept).toBe(true)
   })
 
   it.each([
@@ -1843,24 +2160,24 @@ describe('AI progress popup', () => {
     ['a refusal', { aiGenerateTests: vi.fn(async () => ({ ...okResult, outcome: 'refused' as const, statements: [] })) }, 'The model declined'],
     ['a truncated reply', { aiGenerateTests: vi.fn(async () => ({ ...okResult, outcome: 'truncated' as const, statements: [] })) }, 'output limit'],
     ['a status failure', { aiStatus: vi.fn(async () => { throw new Error('disk') }) }, 'Could not read the API key status'],
-  ])('closes before the message after %s', async (_name, overrides, message) => {
+  ])('unlocks before the message after %s', async (_name, overrides, message) => {
     const { controller, ui } = unitController(overrides as Partial<AiControllerApi>)
     await controller.generate()
 
-    const closed = ui.events.indexOf('progress closed')
+    const closed = ui.events.indexOf('pending cleared')
     expect(closed).toBeGreaterThan(-1)
     expect(ui.events[closed + 1]).toContain(message)
-    expect(ui.progressStates.at(-1)).toBeNull()
-    expect(ui.progressStates.filter((state) => state === null)).toHaveLength(1)
+    expect(ui.pendingStates.at(-1)).toBeNull()
+    expect(ui.pendingStates.filter((state) => state === null)).toHaveLength(1)
   })
 
-  it('closes before opening the key settings', async () => {
+  it('unlocks before opening the key settings', async () => {
     const { controller, ui } = unitController({ aiStatus: async () => ({ configured: false, provider }) })
     await controller.generate()
-    expect(ui.events.slice(-2)).toEqual(['progress closed', 'missing key'])
+    expect(ui.events.slice(-2)).toEqual(['pending cleared', 'missing key'])
   })
 
-  it('closes when the request is discarded after the app is torn down', async () => {
+  it('shows nothing more when the request is discarded after the app is torn down', async () => {
     const generation = deferred<AiGenerateResult>()
     const { controller, ui } = unitController({ aiGenerateTests: () => generation.promise })
     const finished = controller.generate()
@@ -1868,8 +2185,8 @@ describe('AI progress popup', () => {
     controller.dispose()
     generation.resolve(okResult)
     await finished
-    // Teardown removes any popup itself; nothing more is shown.
-    expect(ui.progressStates.every((state) => state !== null)).toBe(true)
+    // Teardown removes the editor itself; nothing more is shown.
+    expect(ui.pendingStates.every((state) => state !== null)).toBe(true)
     expect(ui.showMessage).not.toHaveBeenCalled()
   })
 
@@ -1923,7 +2240,7 @@ describe('AI review', () => {
       target: api.currentTarget(),
       followUps: [],
     })
-    expect(ui.progressStates).toHaveLength(0)
+    expect(ui.pendingStates).toHaveLength(0)
     expect(ui.events.slice(-3)).toEqual(['stream: ', 'stream ended', 'reviewed'])
     expect(ui.generationFinished).toHaveBeenCalledOnce()
     expect(api.aiGenerateTests).not.toHaveBeenCalled()
@@ -2075,7 +2392,7 @@ describe('AI review', () => {
       testRun: { testRun, omitted: null },
     })
     expect(controller.requestPath).toBeNull()
-    expect(ui.progressStates).toHaveLength(0)
+    expect(ui.pendingStates).toHaveLength(0)
     // Nothing else may start while the picker is open.
     await controller.generate()
     await controller.review()
@@ -2092,7 +2409,7 @@ describe('AI review', () => {
     const { controller, api, ui } = unitController({}, { chooseReviewModel: vi.fn(async () => null) })
     await controller.review()
     expect(api.reviewAiCode).not.toHaveBeenCalled()
-    expect(ui.progressStates).toHaveLength(0)
+    expect(ui.pendingStates).toHaveLength(0)
     expect(ui.showMessage).not.toHaveBeenCalled()
     expect(controller.requestPath).toBeNull()
   })
@@ -2138,7 +2455,7 @@ describe('AI review', () => {
     })
     controller = unit.controller
     await controller.review()
-    expect(unit.ui.showProgress).not.toHaveBeenCalled()
+    expect(unit.api.showPendingTests).not.toHaveBeenCalled()
     expect(order).toEqual(['busy', 'idle', 'stream ended'])
   })
 
