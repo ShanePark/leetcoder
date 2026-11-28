@@ -191,6 +191,7 @@ describe('LeetcoderApp lifecycle', () => {
   })
 
   it('runs only the @Test method at the cursor from Run selected, and disables it elsewhere', async () => {
+    const restorePlatform = setNavigatorPlatform('Linux x86_64')
     const { backend } = createBackend()
     const app = await startApp(dom, backend)
     const appInternals = app as unknown as {
@@ -220,6 +221,7 @@ describe('LeetcoderApp lifecycle', () => {
     testMocks.editorInstances.at(-1)!.moveCursor(null)
     expect(button.disabled).toBe(true)
     await app.destroy()
+    restorePlatform()
   })
 
   it('does not gate remembered repository startup on a pending daily request', async () => {
