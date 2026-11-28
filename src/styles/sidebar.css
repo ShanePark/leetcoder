@@ -3,6 +3,7 @@
 /* ---------------------------------------------------------------- */
 
 .sidebar {
+  container: sidebar / inline-size;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -49,22 +50,88 @@
 }
 
 /* Rows sit in an 8px gutter and pad their content by 4px, so every left
-   edge in the panel (label, search, chevrons, results) lands at 12px. */
-.sidebar-heading {
+   edge in the panel (tabs, search, chevrons, results) lands at 12px. */
+.sidebar-tabs {
   display: flex;
   flex: none;
-  align-items: center;
-  gap: 8px;
-  height: 28px;
-  padding: 0 12px;
+  padding: 0 12px 4px;
 }
 
-.sidebar-count {
+/* The bottom panel's capsule segmented control, stretched to the pane. */
+.sidebar-tab-list {
+  display: flex;
   flex: 1;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  height: 28px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+}
+
+.sidebar-tab {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.sidebar-tab:hover:not(.is-active) {
+  color: var(--text);
+}
+
+.sidebar-tab.is-active {
+  background: var(--control-raised);
+  box-shadow: inset 0 0 0 1px var(--border), 0 1px 2px rgb(0 0 0 / 18%);
+  color: var(--text);
+}
+
+.sidebar-tab-label {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.sidebar-tab-count {
+  flex: none;
   color: var(--text-faint);
   font-size: 11px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
-  text-align: right;
+}
+
+.sidebar-tab-count:empty {
+  display: none;
+}
+
+/* Near the minimum sidebar width both labels keep priority over the count. */
+@container sidebar (max-width: 209px) {
+  .sidebar-tab {
+    padding: 0 6px;
+  }
+
+  .sidebar-tab-count {
+    display: none;
+  }
+}
+
+/* Each tab panel fills the sidebar below the strip and scrolls on its own. */
+.sidebar-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .file-search {

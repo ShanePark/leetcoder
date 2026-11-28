@@ -136,6 +136,57 @@ describe('reformat command', () => {
     expect(formatted.doc.toString()).toBe(expected)
     expect(runEditorCommand(formatted, reformatJavaDocument).doc.toString()).toBe(expected)
   })
+
+  it('keeps the cursor at block indentation on its blank line', () => {
+    const lines = [
+      'class Solution {',
+      '    public int maxLength(int[] nums) {',
+      '        for (int i = 0; i < nums.length; i++) {',
+      '            ',
+      '        }',
+      '        ',
+      '    }',
+      '}',
+      '',
+    ]
+    const source = lines.join('\n')
+    const cursor = source.indexOf('            \n') + 12
+    const state = indentedJavaState(source).update({ selection: { anchor: cursor } }).state
+
+    const formatted = runEditorCommand(state, reformatJavaDocument)
+
+    lines[5] = ''
+    expect(formatted.doc.toString()).toBe(lines.join('\n'))
+    const head = formatted.selection.main.head
+    const line = formatted.doc.lineAt(head)
+    expect(line.number).toBe(4)
+    expect(head - line.from).toBe(12)
+  })
+
+  it('keeps the cursor on its code when edits land above and below it', () => {
+    const source = [
+      'package shane.leetcode.problems.easy;',
+      '',
+      'import java.util.List;',
+      '',
+      'class Solution {',
+      'int size() {',
+      'return 1;',
+      '}   ',
+      '}',
+      '',
+    ].join('\n')
+    const cursor = source.indexOf('return') + 3
+    const state = indentedJavaState(source).update({ selection: { anchor: cursor } }).state
+
+    const formatted = runEditorCommand(state, reformatJavaDocument)
+
+    expect(formatted.doc.toString()).toBe('package shane.leetcode.problems.easy;\n\nclass Solution {\n    int size() {\n        return 1;\n    }\n}\n')
+    const head = formatted.selection.main.head
+    const line = formatted.doc.lineAt(head)
+    expect(line.text).toBe('        return 1;')
+    expect(head - line.from).toBe(11)
+  })
 })
 
 describe('clipboard copy command', () => {

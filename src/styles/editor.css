@@ -267,6 +267,114 @@
   text-underline-offset: 2px;
 }
 
+/* A waiting AI test request: its locked lines are tinted and their text
+   dimmed, and a status chip sits in the test body's place. Every rule here
+   leaves line heights alone. The chip is an inline box aligned to the top of
+   the line and, margin included, 1.625 of its own ems (1.3 editor ems) tall,
+   which is less than the 1.4 editor-em line, so it never grows a line. */
+.editor .cm-line.cm-ai-pending-line {
+  background: var(--accent-soft);
+}
+
+.editor .cm-ai-pending-text {
+  opacity: 0.45;
+}
+
+.editor .cm-ai-pending-chip {
+  display: inline-flex;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 0.5em;
+  height: 1.5em;
+  max-width: 40em;
+  margin: 0.125em 0 0 1em;
+  padding: 0 0.75em;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1px var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: 0.8em;
+  line-height: 1;
+  vertical-align: top;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+}
+
+.editor .cm-ai-pending-spinner {
+  flex: none;
+  box-sizing: border-box;
+  width: 1em;
+  height: 1em;
+  border: 1.5px solid var(--surface-3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+.editor .cm-ai-pending-label {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+}
+
+.editor .cm-ai-pending-detail {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+}
+
+.editor .cm-ai-pending-steps {
+  display: inline-flex;
+  flex: none;
+  gap: 0.3em;
+}
+
+.editor .cm-ai-pending-steps > span {
+  width: 0.45em;
+  height: 0.45em;
+  border-radius: 50%;
+  background: var(--surface-3);
+}
+
+.editor .cm-ai-pending-steps > span[data-state='complete'] {
+  background: var(--accent);
+  opacity: 0.55;
+}
+
+.editor .cm-ai-pending-steps > span[data-state='current'] {
+  background: var(--accent);
+}
+
+/* Lines a fill just added fade from a tint; the editor drops the class after. */
+.editor .cm-line.cm-ai-inserted-line {
+  animation: ai-inserted-line 1.6s ease-out forwards;
+}
+
+@keyframes ai-inserted-line {
+  from {
+    background: var(--green-soft);
+  }
+
+  to {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editor .cm-ai-pending-spinner {
+    animation-duration: 2.5s;
+  }
+
+  .editor .cm-line.cm-ai-inserted-line {
+    animation: none;
+    background: var(--green-soft);
+  }
+}
+
 .cm-tooltip.cm-diagnostic-tooltip {
   box-sizing: border-box;
   width: max-content;

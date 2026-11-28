@@ -1,3 +1,8 @@
+import { spawnSync } from 'node:child_process'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -17,6 +22,89 @@ import {
   updateStageLine,
   validateStagedManifest,
 } from '../../scripts/leetcoder-rebuild.mjs'
+
+function runIsolatedRebuild(mode: 'rebuildAndInstall' | 'stageRebuild' | 'applyStagedRebuild', installExitCode = 0) {
+  const directory = mkdtempSync(join(tmpdir(), 'leetcoder-rebuild-test-'))
+  try {
+    const scripts = join(directory, 'scripts')
+    const bin = join(directory, 'bin')
+    mkdirSync(scripts)
+    mkdirSync(bin)
+    const script = join(scripts, 'leetcoder-rebuild.mjs')
+    copyFileSync(new URL('../../scripts/leetcoder-rebuild.mjs', import.meta.url), script)
+    const commands = join(directory, 'commands.log')
+    writeFileSync(commands, '')
+    writeFileSync(join(bin, 'npm'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$REBUILD_TEST_COMMANDS"
+if [ "$1" = ci ]; then
+  echo 'Installing locked dependencies'
+  exit "$REBUILD_TEST_INSTALL_EXIT"
+fi
+echo 'Stopped before building test artifacts' >&2
+exit 23
+`, { mode: 0o755 })
+    writeFileSync(join(bin, 'git'), `#!/bin/sh
+if [ "$1" = rev-parse ]; then printf '%s\\n' abc123; fi
+`, { mode: 0o755 })
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { ${mode} } from ${JSON.stringify(pathToFileURL(script).href)}
+      ${mode}('linux').catch(error => { console.error(error.message); process.exitCode = 1 })
+    `], {
+      cwd: directory,
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        HOME: directory,
+        TMPDIR: directory,
+        PATH: bin,
+        NODE_ENV: 'production',
+        LEETCODER_EXPECTED_COMMIT: 'abc123',
+        REBUILD_TEST_COMMANDS: commands,
+        REBUILD_TEST_INSTALL_EXIT: String(installExitCode),
+      },
+    })
+    if (result.error) throw result.error
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      commands: readFileSync(commands, 'utf8').trim().split('\n').filter(Boolean),
+      log: readFileSync(join(directory, 'leetcoder-rebuild.log'), 'utf8'),
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
+describe('leetcoder rebuild dependency installation', () => {
+  it.each(['rebuildAndInstall', 'stageRebuild'] as const)('installs locked dependencies before %s builds', (mode) => {
+    const result = runIsolatedRebuild(mode)
+    expect(result.commands).toEqual([
+      'ci --include=dev --no-audit --no-fund',
+      'run tauri -- build --bundles appimage',
+    ])
+    expect(result.stdout).toContain('LEETCODER_UPDATE_STAGE:building\nInstalling locked dependencies')
+    expect(result.log).toContain('$ npm ci --include=dev --no-audit --no-fund')
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('npm exited with status 23')
+  })
+
+  it('stops the update before building when dependency installation fails', () => {
+    const result = runIsolatedRebuild('stageRebuild', 17)
+    expect(result.commands).toEqual(['ci --include=dev --no-audit --no-fund'])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('npm exited with status 17')
+    expect(result.log).toContain('Installing locked dependencies')
+  })
+
+  it('does not install dependencies when applying a staged update', () => {
+    const result = runIsolatedRebuild('applyStagedRebuild')
+    expect(result.commands).toEqual([])
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('No staged update build was found')
+  })
+})
 
 describe('leetcoder rebuild platform plan', () => {
   it('uses the macOS app bundle and Dock application path', () => {

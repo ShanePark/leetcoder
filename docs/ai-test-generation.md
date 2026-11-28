@@ -153,7 +153,7 @@ commands.
 | `ai_clear_key` (`aiClearKey`) | none | nothing |
 | `ai_list_models` (`aiListModels`) | `refresh` | `AiModelList` |
 | `ai_generate_tests` (`aiGenerateTests`) | `request`, `onProgress` channel | `AiGenerateResult` |
-| `ai_review_code` (`reviewAiCode`) | `request`, `onProgress` channel | `AiReviewResult` |
+| `ai_review_code` (`reviewAiCode`) | `request`, `onProgress` channel, `onEvent` channel | `AiReviewResult` |
 | `ai_usage` (`aiUsage`) | `bucketStartsMs`: ascending, at most 64 | `AiUsageSummary` |
 
 ```ts
@@ -216,8 +216,9 @@ These are fixed now because they are expensive to change later.
 - Ledger: JSONL with `v`, `ts` (epoch ms), `provider`, `model`, `inputTokens`
   (uncached), `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `outcome`,
   `inferenceGeo`, `speed`, `serviceTier`, nullable `stopCategory`, and nullable
-  `prices` in USD per MTok with `pricesFetchedAt`, and `kind` (`tests` or `review`,
-  defaulting to `tests` so older lines still parse). New fields are additive with serde
+  `prices` in USD per MTok with `pricesFetchedAt`, and `kind` (`tests`, `review`,
+  `review-follow-up`, `help`, or `help-follow-up`, defaulting to `tests` so older
+  lines still parse; only written, never read back into totals). New fields are additive with serde
   defaults.
 - Ledger `outcome` is `ok`, `refused`, `truncated`, or `invalid`. `invalid` records
   usage for an unreadable response or an unexpected stop reason, and the command then
@@ -251,7 +252,8 @@ These are fixed now because they are expensive to change later.
   text stays in `messages`, after it, and the prefix is silently uncached if it
   falls below the model's minimum cacheable length.
 - Headers: `x-api-key` and `anthropic-version: 2026-10-21`. `max_tokens` is 16000,
-  non-streaming, with a 300-second timeout.
+  non-streaming, with a 300-second timeout. Reviews and follow-ups stream instead;
+  see Code review.
 - The output schema is an object with one required `statements` array of strings
   and `additionalProperties: false`.
 - The prompt lives in `src-tauri/src/ai/prompt.rs` so it can change on its own.
@@ -341,11 +343,23 @@ Residual risk: a call such as `exec(...)` inside an argument still passes. Nothi
 runs automatically, so the owner reads the code before clicking Run.
 
 Apply by snapshotting `repoPath`, `selectedPath`, and the repository generation
-before the call and discarding the result with a toast if any changed. Locate the
-body and re-check the stub against the current document at apply time. Use one
-dispatch with `userEvent: 'input.aiTests'`, so imports join the same undo step, and
-confirm nothing else reacts badly to that event. Add `TreeNode` and `ListNode` to
-the auto-imports, gated like `Ps`.
+at the click. The request belongs to that file. A changed repository discards the
+result with a toast. Locate the body and re-check the stub against the file's
+current text at apply time. When the file is open, use one dispatch with
+`userEvent: 'input.aiTests'`, so imports join the same undo step, and confirm
+nothing else reacts badly to that event. Add `TreeNode` and `ListNode` to the
+auto-imports, gated like `Ps`.
+
+When another file is open, `DocumentController.rewriteClosedFile` reads the file
+from disk, `JavaEditor.fillAiTestsInSource` plans the same insertion
+(`planAiTestInsertion` or `planAiCaseTestInsertion`) and adds the imports the
+editor would, and the result is saved. The file was saved when
+the user left it, because navigation flushes autosave, and a closed tab holds no
+buffer, so there is nothing to reconcile. Opening the file waits for a rewrite in
+flight and reads it again if a rewrite started during the read. If the user is
+back on the file when the result arrives, it is applied in the editor. A file no
+longer listed or unreadable discards the result, as does a stub filled meanwhile,
+each with the "still charged" toast.
 
 ### Bare stub definition
 
@@ -369,7 +383,8 @@ The button is hidden unless a click could send a request: the open file is
 and `test()` is a bare stub. It updates on file switches, problem loads, and edits,
 so it disappears after a fill and returns on undo. A running request keeps it visible
 as the spinner, even after switching files. The messages for these cases remain only
-for a document or problem that changes while the key status is read.
+for a document or problem that changes while the key status is read. A file left
+during that read is checked as it was at the click.
 
 ### Failing case
 
@@ -412,21 +427,53 @@ model actually sent, and `{"stage":"received"}` once the reply arrives, before
 parsing. Send failures are ignored. The client methods take an optional
 `onProgress` as their last argument.
 
-The controller shows the shared modal progress popup
-(`src/app/progress-overlay.ts`) from the click until the request ends. Its stages
-are reading, asking the provider by `displayName` (with the model ID once known,
-or "Asking the model" before the status names it), and writing:
+Test generation shows no popup and blocks nothing outside the region it will
+change. From the click until the request ends, the editor extension in
+`src/editor/ai-pending.ts` locks that region read-only and shows the status in
+it. `JavaEditor.showAiPending` and `clearAiPending` drive it.
 
-| Request | Kicker | Title | Stages |
-| --- | --- | --- | --- |
-| Fill `test()` | AI tests | Generating tests | Reading the problem, Asking …, Writing tests |
-| Failing case | AI tests | Adding failing case | the same |
-| Review | AI review | Reviewing your solution | Reading code and test results, Asking …, Preparing the review |
+- Fill `test()`: the whole bare method, annotation to closing brace, since
+  editing its name or body is what would make the fill impossible. The status
+  sits at the end of the body line (`assertThat()` or empty), or of the `{`
+  line when the braces share a line or are on adjacent lines.
+- Failing case: the last `@Test` method, since removing or renaming it would
+  move the new method. The status sits after its closing brace, where the
+  method will appear. Without a test method, only the line the method follows.
 
-The popup closes before any toast, the key settings, or editor focus, because it
-makes the shell inert while open. Events after the request ends are ignored, and a
-discarded or failed request closes it too. App shortcuts wait while an AI request
-runs.
+The lock is a state field mapped through changes and a change filter. It refuses
+any user change that overlaps the locked lines, joins one with a neighbour, or
+adds text to one. Whole lines added right before or after them, and edits
+elsewhere, pass. The fill's own `input.aiTests` transaction passes and ends the
+lock. Loading a document (`setValue`, `reloadExternalValue`) drops it; the
+controller shows it again after `documentLoaded` when the loaded file is the
+request's.
+
+The status is a chip with a spinner, the step label, a detail, and three step
+dots:
+
+| Request | Title (tooltip and label) | Steps |
+| --- | --- | --- |
+| Fill `test()` | Generating tests | Reading the problem, Asking …, Writing tests |
+| Failing case | Adding failing case | the same |
+
+The asking step names the provider by `displayName`, or "Asking the model"
+before the status names it, with the model ID as its detail once known. The
+locked lines are tinted and their text dimmed.
+
+Showing the status never moves code. There are no block widgets or replaced
+ranges: the chip is an inline widget, aligned to the top of the line, whose
+height with its margin is 1.3 editor ems against the 1.4 editor-em line, and
+the tint and dimming are line backgrounds and opacity. Lines a fill added fade
+from a green tint for 1.6 seconds; with reduced motion they keep a static tint
+for that time.
+
+The lock ends before any toast, the key settings, or editor focus. Events after
+the request ends are ignored, and a discarded or failed request ends it too.
+Editor focus follows a fill only when it was applied in the editor and focus is
+still on the button or the page body. A pending change proposed by a review
+follow-up cannot be accepted while tests are on their way to its file. A review
+shows no lock: it streams into the Review tab (see Code review), and its
+`requesting` event names the model on the stream status.
 
 ### Code review
 
@@ -434,7 +481,7 @@ A second toolbar button, before the generate button, reviews the open solution. 
 shows under the stub button's rule for the problem (the open `Q<number>.java` is the
 loaded problem, which has a description) whatever the state of `test()`, has no
 shortcut, and waits for any running AI request or app operation. One in-flight flag
-covers generation and review.
+covers generation, review, and review follow-ups.
 
 - A click reads the key status first; without a key it opens the LLM settings as
   generation does. Otherwise it reads the cached model list (`ai_list_models` with
@@ -480,12 +527,187 @@ covers generation and review.
   succeeds, even after a file switch. Empty sections are left out, model text is
   set through `textContent` only, and with no review the tab shows an empty state.
   A refusal, truncation, or error shows a toast and keeps the previous review.
-- A usage card sits in a right-hand column beside the review and stacks under the
-  verdict when the panel is narrower than 560px. It shows the cost ("$0.0123",
-  "Cost unknown" when null), the served model's catalog name, input and output
-  tokens, cache read and write tokens only when nonzero, and whether test results
-  were included. The usage is stored with the last review.
 - Review calls are recorded in the usage ledger with `kind: "review"`.
+
+#### Help mode
+
+- `AiReviewRequest` has `mode`, `review` (the default when absent) or `help`. Help
+  is for a solution not written yet: the model explains the problem and gives
+  hints instead of reviewing code. It reuses `ai_review_code`, its streaming, and
+  its checks; native ignores `testRun` in help mode, so a run neither goes along
+  nor counts against the run limit.
+- Help has its own fixed, cached system prompt (`HELP_SYSTEM_PROMPT`), so the
+  review prefix is unchanged. The user message holds `<problem>`, `<entry_point>`
+  when present, the open file as `<starter_code>`, and the same "Write every prose
+  field in …" line; it has no `<test_run>`.
+- `AiProblemHelp` has `overview` (the problem restated: what is asked, inputs and
+  output, what the examples show), `keyPoints` (constraints, edge cases, and
+  observations that matter for an approach), and `hints`, gentlest first, ending
+  short of the full algorithm. The prompt forbids code and pseudocode in every
+  field. The schema requires all three fields with no others.
+- `AiReviewResult.help` holds it for an `ok` help reply and `review` is null; a
+  review reply is the reverse, and other outcomes have neither.
+- Help calls are recorded with `kind: "help"`, and their follow-ups with
+  `kind: "help-follow-up"`. The ledger only writes `kind`, so no migration is needed.
+- Follow-ups use `ai_review_follow_up`. `reviewAnswer` and `helpAnswer` are both
+  nullable, and exactly the one matching `review.mode` must be set; anything else
+  is rejected before sending ("The follow-up request was invalid."). A help
+  follow-up has its own cached system prompt (`HELP_FOLLOW_UP_SYSTEM_PROMPT`):
+  the user may ask more, ask for another hint, or ask for the approach or the
+  solution, all answered in prose without code. It keeps the same
+  `propose_code_change` tool and code rules, called only when the user explicitly
+  asks for code to be written or changed. The context is seeded as for a review,
+  with the help user message under the second breakpoint and the help JSON as the
+  first assistant turn; history, the answer-language line, and `<current_code>`
+  (noted as differing from the `<starter_code>` helped with) follow unchanged.
+
+#### Streaming
+
+- The review request sets `stream: true` and is read by the same SSE reader as
+  follow-ups (`src-tauri/src/ai/stream.rs`). The text it gathers is parsed and
+  validated as the whole document was before; the outcome, fallback, ledger
+  record, and errors are unchanged. A stream that ends before `message_stop` is an
+  invalid reply whose usage is still recorded.
+- `ai_review_code` and `ai_review_follow_up` share one `onEvent` channel contract
+  (`AiStreamEvent`). Send failures are ignored, and the frontend drops malformed
+  events:
+
+| Event | Sent |
+| --- | --- |
+| `{ kind: "text", text }` | Each text delta: the review's JSON in fragments, or a follow-up's Markdown. |
+| `{ kind: "thinking", chars }` | When a `thinking` or `redacted_thinking` block starts (its text length, usually 0), and per thinking delta with its length. The thinking text never leaves native. |
+| `{ kind: "proposal-started" }` | When a follow-up starts a `propose_code_change` call. |
+| `{ kind: "usage", usage, final }` | On `message_start` with `final: false` (input and cache counts, and the few output tokens counted so far), and on `message_delta` with `final: true` (the final counts). `usage` has `inputTokens`, `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens`. |
+
+- The review request has no `thinking` parameter, so thinking events arrive only
+  if a model thinks by default; the status then stays on "Thinking…" while they
+  stream.
+- Once Review is chosen the Review tab opens at once, with no popup and no
+  shortcut block, so the editor stays usable. There is no cancel control, as the
+  popup had none. The tab shows the head with the file and requested model, then a
+  status line with a spinner: "Thinking… 3s · Small Name" until the first text
+  delta, then "Writing the review… 5s · Small Name", ticking each second. The name
+  follows the `requesting` event's model.
+- Each animation frame parses the text so far with `src/partial-json.ts`, a
+  tolerant parser that keeps an open string, closes open containers, and drops a
+  dangling key, comma, cut escape, or a number or literal that could still grow.
+  The sections render with the finished review's renderer as far as they have
+  arrived; a verdict shows only once it is a whole word.
+- The review button stays busy and follow-ups wait until the stream ends. The
+  result then renders as before; a refusal, truncation, or error shows its toast
+  and the tab shows the previous review again. If the disabled review button lost
+  focus and nothing else took it, focus returns to it.
+
+#### Usage meter
+
+- One meter (`src/app/ai-usage-meter.ts`) counts the whole conversation, the
+  review plus its follow-ups, in a right-hand column that stacks under the verdict
+  when the panel is narrower than 560px. It shows the cost, the served model's
+  catalog name, Input, Output, Cache read, and Cache write, a "3 requests"
+  disclosure with each request's cost and tokens, and whether test results were
+  included. A review on its way counts alone, since it starts a new conversation,
+  and the meter starts again from zero.
+- A settled request shows the usage its result reported. A running one counts
+  live: input and cache tokens from `message_start`, and output estimated from the
+  streamed characters, text plus thinking, at four characters a token
+  (`CHARS_PER_OUTPUT_TOKEN`, rounded up). The ratio fits English prose and JSON;
+  Korean and code run denser, so the estimate can run low, and it never drops below
+  the reported count. The final `usage` event replaces the estimate. A running cost
+  is priced from the catalog with the ledger's rule (a used token class without a
+  price leaves it unknown) and shows as "≈ $0.0021". The total shows
+  "$X + N unpriced" when some requests had no price, and "Cost unknown" when none did.
+- The meter element persists across panel renders, so an open disclosure stays
+  open, and new readings roll over 400 ms with an ease-out, once per animation
+  frame. Under `prefers-reduced-motion` they jump.
+
+#### Follow-up questions
+
+- Under the review sections the Review tab shows a follow-up conversation, and a
+  composer sits below the scroller: a growing textarea and Send. Enter sends,
+  Shift+Enter inserts a newline, and Enter while an input method composes is left
+  alone. The textarea is disabled only while no review exists; Send is disabled
+  while any AI request runs (generation and review wait for a follow-up too) or the
+  question is blank. The composer is static markup, so the draft survives panel
+  renders and file switches, and focus stays in the textarea after sending. No
+  shortcut is added.
+- `ai_review_follow_up` takes `AiReviewFollowUpRequest`: `selectedModelId` (the
+  review's served model, with no picker), `review` (the original `AiReviewRequest`
+  unchanged, so `<solution>` is always the code as reviewed), `reviewAnswer`,
+  `history` (earlier `done` or `truncated` turns, oldest first, each with an
+  optional `proposal: { summary, outcome }`), `question`, and `currentCode` (the
+  editor's text now, or the reviewed source when that file is not open), plus an
+  `onEvent` channel of `{ kind: "text", text }` deltas, one
+  `{ kind: "proposal-started" }` when the model starts a code change, and the
+  thinking and usage events described under Streaming.
+  `AiReviewFollowUpResult` has `outcome`, the full `answer` (partial when
+  truncated, possibly empty when refused), `proposal` (`{ summary, code, baseCode }`
+  or `null`), `servedModel`, `fellBack`, and `usage`. Native rejects oversized
+  questions or history with a readable message; the ledger kind is
+  `"review-follow-up"`.
+- The latest question carries `<current_code>` only when `currentCode` differs from
+  the reviewed source after trimming trailing whitespace; earlier questions are
+  replayed as they were asked. The system prompt and tool stay in the cached prefix.
+- `StoredAiReview` keeps the request and a `followUps` list of question, answer,
+  status (`streaming`, `done`, `truncated`, `refused`), and usage, in memory only.
+  A new review starts an empty list.
+- No progress popup and no app-shortcut block: the editor stays usable. A turn
+  shows a small pending cue until the first delta, then the answer streams,
+  re-rendered at most once per animation frame for that turn only. `.review-body`
+  follows the stream only while it is scrolled within 48px of its end. The result's
+  `answer` replaces the streamed text, and later deltas are ignored.
+- A truncated answer keeps its text with a cut-off note; a refusal shows a declined
+  note. An error, or a missing key (which opens the LLM settings), removes the turn
+  and puts the question back in the composer, ahead of any newer draft. A fallback
+  model shows the review's error toast.
+- Code changes. A follow-up may offer one change, and only when the latest
+  question explicitly asks for one in words ("fix the bug", "개선해줘"); there is no
+  button or prefix, and the model never proposes on its own. The request defines
+  one tool, `propose_code_change { summary, code }` with `eager_input_streaming`,
+  under `tool_choice: auto` with parallel tool use off. Native parses the streamed
+  input strictly once the block stops and checks it: a summary of 1 to 1000
+  characters, non-blank code within the review source limit, and code that differs
+  from `currentCode`. The new code takes the base file's final line breaks. A
+  change cut off at the output limit, unreadable, or unchanged is dropped and a
+  localized note (English or Korean) is appended to the answer; a refusal gets no
+  note. `baseCode` is `currentCode`.
+- Code the model writes, in a proposal, an answer's snippet, or a review's
+  improvement, follows standing rules in the prompts and the tool description: no
+  comments, no fields (state stays in locals and parameters, except a design
+  problem's class that must keep state between calls), and the simplest approach
+  that fits the constraints. Generated tests already allow only single-line
+  statements and no comments.
+- History never replays the tool call. An answer that proposed a change ends, in
+  the prompt only, with a parenthesized note naming the summary and whether the
+  user accepted, rejected, or has not decided; summaries count toward the history
+  limit.
+- While the change streams, the turn shows "Preparing a code change…" with a
+  spinner. The settled turn shows a card with the summary, `+N −M` line counts, a
+  status (Not applied, Applied, Rejected), and, while the change is pending, View
+  diff. The diff modal (`src/app/ai-edit-diff-dialog.ts`, about 90vw by 85vh)
+  shows the whole file as one unified diff in the Git tab's red and green lines,
+  both line numbers, and Accept and Reject for the whole change. Enter accepts
+  unless focus is on another button; Escape and the close button close without
+  deciding, so the change stays pending and View diff opens it again. App
+  shortcuts are blocked while the modal is open.
+- The modal opens by itself when a follow-up settles with a change, unless another
+  modal dialog is open (settings, the commit dialog, another diff, or a picker);
+  then View diff opens it later. Rendering the conversation again never opens it.
+  Once the change is accepted or rejected, its card keeps the status and summary
+  only, and the modal shows pending changes only.
+- Accept applies only while the reviewed file is open and the editor text still
+  equals `baseCode`; otherwise Accept is disabled with the reason ("Open X to
+  apply this change." or "The file changed since this change was proposed. Ask
+  again for a new one."), and Accept rechecks both. Applying replaces the editor
+  text with minimal line changes (`src/line-diff.ts`, shared with reformat) as one
+  undo step, so the cursor and scroll stay put. The decision lives in memory with
+  the turn.
+- Answers render a Markdown subset (`src/app/markdown-view.ts`): headings,
+  paragraphs, fenced code with a language, bullet and numbered lists with nesting,
+  inline code, bold, and italic. It builds DOM with `createElement` and text nodes
+  only, never `innerHTML`. An unclosed fence renders as an open code block and an
+  unclosed inline marker stays literal, so partial text renders sanely.
+- Each follow-up adds a request to the usage meter, counted live while it
+  streams.
 
 ### Response language
 
@@ -575,7 +797,8 @@ another line automatically. If no Haiku exists, ask the user to choose.
 | An example needs an interface or API the platform implements, such as `MountainArray` | The model returns no statements, and the result is rejected with a message. The call is charged. |
 | The loaded problem is another one, or none is loaded | Button hidden. No LeetCode request. A message asking to paste the file's problem URL if it changes during the status check. |
 | Validation rejects the output | Message. Buffer untouched. Usage recorded. |
-| File or repository changed during the call | Result discarded with a toast. Usage recorded. |
+| Another file opened during the call | Result written to the request's file on disk, with the success toast naming it. |
+| Repository changed, or the file deleted or renamed, during the call | Result discarded with a toast. Usage recorded. |
 | 401, 429, 5xx, 3xx, or timeout | Toast with a readable reason. Buffer untouched. |
 | `stop_reason` is `refusal` or `max_tokens` | Message. Buffer untouched. Usage recorded. |
 | Price source unavailable or rejected | Keep last good copy. Otherwise show tokens with "price unknown". |

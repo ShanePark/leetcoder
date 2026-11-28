@@ -24,6 +24,8 @@ interface FileExplorerControllerOptions {
 export class FileExplorerController {
   private readonly root: HTMLElement
   private readonly state: AppState
+  private explorerSelection: { path: string } | null = null
+  private scrollRequestId = 0
   private readonly expandedGroups = new Set<ProblemFileEntry['packageSegment']>(
     accordionGroupKeys('easy', true),
   )
@@ -138,7 +140,14 @@ export class FileExplorerController {
       },
       {
         onFileSelect: (file) => {
-          void this.options.document.openFile(file)
+          const selection = { path: file.path }
+          this.explorerSelection = selection
+          this.scrollRequestId += 1
+          void this.options.document.openFile(file).finally(() => {
+            if (this.explorerSelection === selection) {
+              this.explorerSelection = null
+            }
+          })
         },
         onGroupToggle: (group, expanded) => {
           this.setExpandedGroup(group, expanded)
@@ -161,7 +170,9 @@ export class FileExplorerController {
   }
 
   scrollActiveFileIntoView(): void {
-    if (!this.state.selectedPath) {
+    const requestId = ++this.scrollRequestId
+    const selectedPath = this.state.selectedPath
+    if (!selectedPath || sameFilePath(this.explorerSelection?.path ?? '', selectedPath)) {
       return
     }
     const active = Array.from(this.root.querySelectorAll<HTMLElement>('.file-item'))
@@ -171,6 +182,9 @@ export class FileExplorerController {
       return
     }
     const scroll = (): void => {
+      if (requestId !== this.scrollRequestId || this.state.selectedPath !== selectedPath) {
+        return
+      }
       // Only the expanded group's list scrolls. Centering keeps a file opened
       // from Today or another action in context while the browser naturally
       // clamps the first and last rows to the list bounds.

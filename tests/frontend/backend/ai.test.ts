@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createBackendClient,
+  type AiStreamEvent,
   type AiGenerateRequest,
   type AiProgress,
+  type AiReviewFollowUpRequest,
   type AiReviewRequest,
   type AiUsageTotals,
   type Invoke,
 } from '../../../src/backend'
+import { normalizeAiStreamEvent } from '../../../src/backend/normalizers/ai'
 
 const request: AiGenerateRequest = {
   selectedModelId: null,
@@ -28,6 +31,7 @@ const requestUsage = {
 }
 
 const reviewRequest: AiReviewRequest = {
+  mode: 'review',
   selectedModelId: 'model-a',
   problemTitle: 'Two Sum',
   problemContent: '<p>Input: nums = [2,7]</p>',
@@ -103,7 +107,7 @@ describe('AI command mapping', () => {
       { command: 'ai_clear_key', args: undefined },
       { command: 'ai_list_models', args: { refresh: true } },
       { command: 'ai_generate_tests', args: { request, onProgress: expect.anything() } },
-      { command: 'ai_review_code', args: { request: reviewRequest, onProgress: expect.anything() } },
+      { command: 'ai_review_code', args: { request: reviewRequest, onProgress: expect.anything(), onEvent: expect.anything() } },
       { command: 'ai_usage', args: { bucketStartsMs: [1_700_000_000_000, 1_700_000_100_000] } },
     ])
   })
@@ -131,6 +135,27 @@ describe('AI command mapping', () => {
     const events: AiProgress[] = []
     await call(client, (progress) => events.push(progress))
     expect(events).toEqual([{ stage: 'requesting', model: 'model-a' }, { stage: 'received' }])
+  })
+
+  it('streams valid review events and drops the rest', async () => {
+    const client = createBackendClient(async (_command, args) => {
+      const channel = args?.onEvent as { onmessage?: (event: unknown) => void }
+      const usage = { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }
+      channel.onmessage?.({ kind: 'usage', usage, final: false, extra: true })
+      channel.onmessage?.({ kind: 'thinking', chars: 0 })
+      channel.onmessage?.({ kind: 'thinking', chars: -1 })
+      channel.onmessage?.({ kind: 'text', text: '{"verdict":' })
+      channel.onmessage?.({ kind: 'usage', usage: { ...usage, outputTokens: 1.5 }, final: true })
+      channel.onmessage?.({ kind: 'usage', usage, final: 'yes' })
+      return { outcome: 'ok', review, servedModel: 'model-a', fellBack: false, usage: requestUsage } as never
+    })
+    const events: AiStreamEvent[] = []
+    await client.reviewAiCode(reviewRequest, undefined, (event) => events.push(event))
+    expect(events).toEqual([
+      { kind: 'usage', usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, final: false },
+      { kind: 'thinking', chars: 0 },
+      { kind: 'text', text: '{"verdict":' },
+    ])
   })
 
   it('accepts progress without a handler', async () => {
@@ -284,7 +309,9 @@ describe('AI generation responses', () => {
 })
 
 describe('AI review responses', () => {
-  const result = { outcome: 'ok', review, servedModel: 'model-a', fellBack: true, usage: requestUsage }
+  const result = { outcome: 'ok', review, help: null, servedModel: 'model-a', fellBack: true, usage: requestUsage }
+  const help = { overview: 'Find two indices.', keyPoints: ['Exactly one answer exists.'], hints: ['Remember what you saw.'] }
+  const helpResult = { ...result, review: null, help }
 
   it('normalizes each outcome and drops fields outside the contract', async () => {
     const extra = {
@@ -300,6 +327,8 @@ describe('AI review responses', () => {
       const empty = { ...result, outcome, review: null }
       await expect(clientReturning(empty).reviewAiCode(reviewRequest)).resolves.toEqual(empty)
     }
+    const extraHelp = { ...helpResult, help: { ...help, extra: 1 } }
+    await expect(clientReturning(extraHelp).reviewAiCode(reviewRequest)).resolves.toEqual(helpResult)
     const unpriced = { ...result, usage: { ...requestUsage, costUsd: null } }
     await expect(clientReturning(unpriced).reviewAiCode(reviewRequest)).resolves.toEqual(unpriced)
   })
@@ -318,10 +347,17 @@ describe('AI review responses', () => {
     )
   })
 
+  it('reads a missing help key as null, as older responses have', async () => {
+    const { help: _help, ...older } = result
+    await expect(clientReturning(older).reviewAiCode(reviewRequest)).resolves.toEqual(result)
+  })
+
   it.each([
     ['a non-object', null],
     ['an unknown outcome', { ...result, outcome: 'error' }],
     ['a missing review on success', { ...result, review: null }],
+    ['both a review and help', { ...result, help }],
+    ['help on a refusal', { ...helpResult, outcome: 'refused' }],
     ['a review on a refusal', { ...result, outcome: 'refused' }],
     ['a review on a truncated result', { ...result, outcome: 'truncated' }],
     ['an empty served model', { ...result, servedModel: '' }],
@@ -344,6 +380,15 @@ describe('AI review responses', () => {
   ])('rejects a review with %s', async (_name, change) => {
     await expect(clientReturning({ ...result, review: { ...review, ...change } }).reviewAiCode(reviewRequest))
       .rejects.toThrow('The AI review response contained an invalid review.')
+  })
+
+  it.each([
+    ['a missing overview', { overview: undefined }],
+    ['non-string key points', { keyPoints: [1] }],
+    ['missing hints', { hints: undefined }],
+  ])('rejects help with %s', async (_name, change) => {
+    await expect(clientReturning({ ...helpResult, help: { ...help, ...change } }).reviewAiCode(reviewRequest))
+      .rejects.toThrow('The AI review response contained invalid help.')
   })
 
   it('rejects a review that is missing rather than null', async () => {
@@ -415,5 +460,135 @@ describe('AI usage responses', () => {
     await expect(clientReturning(response).aiUsage([])).rejects.toThrow(
       'The AI usage response contained an invalid model entry.',
     )
+  })
+})
+
+describe('AI review follow-up', () => {
+  const followUpRequest: AiReviewFollowUpRequest = {
+    selectedModelId: 'model-a',
+    review: reviewRequest,
+    reviewAnswer: review as AiReviewFollowUpRequest['reviewAnswer'],
+    history: [
+      { question: 'Why?', answer: 'Because.' },
+      { question: 'Fix it', answer: 'Done.', proposal: { summary: 'Swap them', outcome: 'rejected' } },
+    ],
+    question: 'And the space?',
+    currentCode: 'class A {}\n',
+  }
+  const followUpResult = {
+    outcome: 'ok',
+    answer: 'O(n) for the map.',
+    proposal: null,
+    servedModel: 'model-a',
+    fellBack: false,
+    usage: requestUsage,
+  }
+
+  it('invokes the native command with the request and an event channel, and streams valid events', async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
+    const client = createBackendClient(async (command, args) => {
+      calls.push({ command, args })
+      const channel = args?.onEvent as { onmessage?: (event: unknown) => void }
+      channel.onmessage?.({ kind: 'text', text: 'O(n) ' })
+      channel.onmessage?.({ kind: 'text', text: '' })
+      channel.onmessage?.({ kind: 'text', text: 3 })
+      channel.onmessage?.({ text: 'no kind' })
+      channel.onmessage?.({ stage: 'requesting', model: 'model-a' })
+      channel.onmessage?.(null)
+      channel.onmessage?.({ kind: 'text', text: 'for the map.', extra: true })
+      channel.onmessage?.({ kind: 'proposal-started', extra: true })
+      return followUpResult as never
+    })
+    const events: AiStreamEvent[] = []
+
+    await expect(client.askAiReviewFollowUp(followUpRequest, (event) => events.push(event)))
+      .resolves.toEqual(followUpResult)
+    expect(calls).toEqual([
+      { command: 'ai_review_follow_up', args: { request: followUpRequest, onEvent: expect.anything() } },
+    ])
+    expect(events).toEqual([
+      { kind: 'text', text: 'O(n) ' },
+      { kind: 'text', text: 'for the map.' },
+      { kind: 'proposal-started' },
+    ])
+  })
+
+  it('accepts events without a handler', async () => {
+    const client = createBackendClient(async (_command, args) => {
+      const channel = args?.onEvent as { onmessage?: (event: unknown) => void }
+      channel.onmessage?.({ kind: 'text', text: 'ignored' })
+      return followUpResult as never
+    })
+    await expect(client.askAiReviewFollowUp(followUpRequest)).resolves.toMatchObject({ outcome: 'ok' })
+  })
+
+  it('accepts each outcome, an empty refused answer, and an unknown cost', async () => {
+    const accepted = [
+      { ...followUpResult, outcome: 'truncated', answer: 'O(n) for' },
+      { ...followUpResult, outcome: 'refused', answer: '' },
+      { ...followUpResult, fellBack: true, usage: { ...requestUsage, costUsd: null } },
+      { ...followUpResult, extra: 'ignored' },
+      { ...followUpResult, proposal: { summary: 'Swap them', code: 'class B {}\n', baseCode: 'class A {}\n' } },
+      { ...followUpResult, proposal: { summary: 'Fill it', code: 'class B {}\n', baseCode: '' } },
+    ]
+    for (const response of accepted) {
+      const { extra: _extra, ...expected } = response as typeof response & { extra?: string }
+      await expect(clientReturning(response).askAiReviewFollowUp(followUpRequest)).resolves.toEqual(expected)
+    }
+  })
+
+  it.each([
+    ['an unknown outcome', { outcome: 'partial' }],
+    ['a missing answer', { answer: undefined }],
+    ['a non-text answer', { answer: 42 }],
+    ['an empty served model', { servedModel: '' }],
+    ['a missing fallback flag', { fellBack: undefined }],
+  ])('rejects %s', async (_name, change) => {
+    await expect(clientReturning({ ...followUpResult, ...change }).askAiReviewFollowUp(followUpRequest))
+      .rejects.toThrow('The AI follow-up response was invalid.')
+  })
+
+  it.each([
+    ['a missing proposal', undefined],
+    ['a non-object proposal', 'class B {}'],
+    ['a proposal with no summary', { summary: '', code: 'class B {}', baseCode: 'class A {}' }],
+    ['a proposal with no code', { summary: 'S', code: '', baseCode: 'class A {}' }],
+    ['a proposal with no base code', { summary: 'S', code: 'class B {}' }],
+    ['a proposal that changes nothing', { summary: 'S', code: 'class A {}', baseCode: 'class A {}' }],
+  ])('rejects %s', async (_name, proposal) => {
+    await expect(clientReturning({ ...followUpResult, proposal }).askAiReviewFollowUp(followUpRequest))
+      .rejects.toThrow('The AI follow-up response contained an invalid code change.')
+  })
+
+  it('rejects invalid usage and a non-object response', async () => {
+    await expect(clientReturning({ ...followUpResult, usage: { ...requestUsage, outputTokens: -1 } })
+      .askAiReviewFollowUp(followUpRequest)).rejects.toThrow('invalid usage')
+    await expect(clientReturning(null).askAiReviewFollowUp(followUpRequest))
+      .rejects.toThrow('The AI follow-up response was invalid.')
+  })
+
+  it('reads a text, proposal, thinking, or usage event and ignores anything else', () => {
+    expect(normalizeAiStreamEvent({ kind: 'text', text: 'abc' })).toEqual({ kind: 'text', text: 'abc' })
+    expect(normalizeAiStreamEvent({ kind: 'thinking', chars: 12 })).toEqual({ kind: 'thinking', chars: 12 })
+    expect(normalizeAiStreamEvent({ kind: 'thinking' })).toBeNull()
+    const usage = { inputTokens: 3, outputTokens: 2, cacheReadTokens: 1, cacheWriteTokens: 0 }
+    expect(normalizeAiStreamEvent({ kind: 'usage', usage: { ...usage, extra: 1 }, final: true }))
+      .toEqual({ kind: 'usage', usage, final: true })
+    expect(normalizeAiStreamEvent({ kind: 'usage', usage })).toBeNull()
+    expect(normalizeAiStreamEvent({ kind: 'usage', usage: { ...usage, cacheWriteTokens: null }, final: false })).toBeNull()
+    expect(normalizeAiStreamEvent({ kind: 'proposal-started' })).toEqual({ kind: 'proposal-started' })
+    expect(normalizeAiStreamEvent({ kind: 'text', text: '' })).toBeNull()
+    expect(normalizeAiStreamEvent({ kind: 'text', text: null })).toBeNull()
+    expect(normalizeAiStreamEvent({ text: 'abc' })).toBeNull()
+    expect(normalizeAiStreamEvent({ kind: 'other' })).toBeNull()
+    expect(normalizeAiStreamEvent('abc')).toBeNull()
+    expect(normalizeAiStreamEvent(undefined)).toBeNull()
+  })
+
+  it('passes a native rejection through', async () => {
+    const client = createBackendClient(async () => {
+      throw new Error('The question is longer than 4000 characters.')
+    })
+    await expect(client.askAiReviewFollowUp(followUpRequest)).rejects.toThrow('longer than 4000 characters')
   })
 })

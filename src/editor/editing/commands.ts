@@ -4,6 +4,7 @@ import { countColumn, EditorSelection, type ChangeSpec, type SelectionRange } fr
 import type { EditorView } from '@codemirror/view'
 import { expandJavaPrintTemplate, expandJavaTestTemplate } from '../../completions'
 import { formatJavaSource } from '../../java-format'
+import { diffLines } from '../../line-diff'
 
 /** Compute one CodeMirror change for replacing the differing source suffix. */
 export function minimalDocumentChange(before: string, after: string) {
@@ -19,12 +20,44 @@ export function minimalDocumentChange(before: string, after: string) {
   return { from, to: beforeTo, insert: after.slice(from, afterTo) }
 }
 
+/**
+ * Changes for each differing run of lines, aligned by a longest common
+ * subsequence of lines. A single span would cover every line between the first
+ * and last edit and collapse any cursor inside it to the span's start.
+ */
+export function lineDocumentChanges(before: string, after: string) {
+  const changes: Array<{ from: number; to: number; insert: string }> = []
+  let offset = 0
+  let removed = ''
+  let inserted = ''
+  const flush = () => {
+    if (removed === '' && inserted === '') return
+    const change = minimalDocumentChange(removed, inserted)
+    changes.push({ from: offset + change.from, to: offset + change.to, insert: change.insert })
+    offset += removed.length
+    removed = ''
+    inserted = ''
+  }
+  for (const entry of diffLines(before, after)) {
+    if (entry.kind === 'equal') {
+      flush()
+      offset += entry.line.length
+    } else if (entry.kind === 'delete') {
+      removed += entry.line
+    } else {
+      inserted += entry.line
+    }
+  }
+  flush()
+  return changes
+}
+
 /** Reformat the whole document and then re-indent through Java language support. */
 export function reformatJavaDocument(view: EditorView): boolean {
   const source = view.state.doc.toString()
   const formatted = formatJavaSource(source)
   if (formatted !== source) {
-    view.dispatch({ changes: minimalDocumentChange(source, formatted), userEvent: 'format' })
+    view.dispatch({ changes: lineDocumentChanges(source, formatted), userEvent: 'format' })
   }
   const indentation = indentRange(view.state, 0, view.state.doc.length)
   if (!indentation.empty) {
@@ -59,6 +92,23 @@ export function reformatJavaDocument(view: EditorView): boolean {
   }
   if (closingBraces.length > 0) {
     view.dispatch({ changes: closingBraces, userEvent: 'format' })
+  }
+  // Blank lines lose their whitespace above; keep the cursor's own blank line
+  // at its block indentation so typing continues where the code belongs.
+  const cursor = view.state.selection.main
+  const cursorLine = view.state.doc.lineAt(cursor.head)
+  if (cursor.empty && cursorLine.text.trim() === '') {
+    const indent = getIndentation(view.state, cursorLine.from)
+    const insert = indent === null ? null : indentString(view.state, indent)
+    if (insert !== null && insert !== cursorLine.text) {
+      const changes = view.state.changes({ from: cursorLine.from, to: cursorLine.to, insert })
+      view.dispatch({
+        changes,
+        selection: view.state.selection.map(changes)
+          .replaceRange(EditorSelection.cursor(cursorLine.from + insert.length)),
+        userEvent: 'format',
+      })
+    }
   }
   return true
 }

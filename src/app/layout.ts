@@ -1,4 +1,4 @@
-import type { SettingsSection, ShortcutPlatform, ThemeMode } from './types'
+import type { SettingsSection, ShortcutPlatform, SidebarTab, ThemeMode } from './types'
 
 export const DEFAULT_BOTTOM_PANEL_HEIGHT = 280
 export const MIN_BOTTOM_PANEL_HEIGHT = 180
@@ -8,24 +8,23 @@ export const MIN_GIT_FILE_LIST_WIDTH = 180
 export const MIN_GIT_DIFF_WIDTH = 260
 export const GIT_SPLITTER_WIDTH = 7
 export const GIT_WORKSPACE_GAP = 16
+export const DEFAULT_TEST_LIST_WIDTH = 300
+export const MIN_TEST_LIST_WIDTH = 200
+export const MIN_TEST_OUTPUT_WIDTH = 260
+export const TEST_SPLITTER_WIDTH = 10
 export const DEFAULT_SIDEBAR_WIDTH = 248
 export const MIN_SIDEBAR_WIDTH = 180
-export const MAX_SIDEBAR_WIDTH = 520
+export const MAX_SIDEBAR_WIDTH = 1200
 export const MIN_EDITOR_WIDTH = 360
 export const SIDEBAR_SPLITTER_WIDTH = 8
-export const DEFAULT_DAILY_DESCRIPTION_HEIGHT = 220
-export const MIN_DAILY_DESCRIPTION_HEIGHT = 120
-export const MAX_DAILY_DESCRIPTION_HEIGHT = 560
-export const MIN_CODE_CARD_HEIGHT = 180
-export const DAILY_DESCRIPTION_LAYOUT_OVERHEAD = 34
-export const DAILY_DESCRIPTION_SPLITTER_HEIGHT = 7
 export const VIEWPORT_MARGIN = 8
 
 export const BOTTOM_PANEL_HEIGHT_KEY = 'leetcoder.bottom-panel-height'
 export const GIT_FILE_LIST_WIDTH_KEY = 'leetcoder.git-file-list-width'
+export const TEST_LIST_WIDTH_KEY = 'leetcoder.test-list-width'
 export const SIDEBAR_WIDTH_KEY = 'leetcoder.sidebar-width'
 export const SIDEBAR_COLLAPSED_KEY = 'leetcoder.sidebar-collapsed'
-export const DAILY_DESCRIPTION_HEIGHT_KEY = 'leetcoder.daily-description-height'
+export const SIDEBAR_TAB_KEY = 'leetcoder.sidebar-tab'
 export const THEME_MODE_KEY = 'leetcoder.theme-mode'
 
 export function normalizeThemeMode(value: unknown): ThemeMode {
@@ -168,6 +167,13 @@ export function clampGitFileListWidth(value: number, availableWidth = 900): numb
   return Math.round(Math.min(maximum, Math.max(MIN_GIT_FILE_LIST_WIDTH, candidate)))
 }
 
+/** Keep both the test list and the run output usable in the Tests tab. */
+export function clampTestListWidth(value: number, availableWidth = 900): number {
+  const maximum = maxTestListWidth(availableWidth)
+  const candidate = Number.isNaN(value) ? DEFAULT_TEST_LIST_WIDTH : value
+  return Math.round(Math.min(maximum, Math.max(MIN_TEST_LIST_WIDTH, candidate)))
+}
+
 /** Keep the resizable problem-file pane usable alongside the editor. */
 export function clampSidebarWidth(value: number, availableWidth = 1000): number {
   const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 1000
@@ -176,17 +182,14 @@ export function clampSidebarWidth(value: number, availableWidth = 1000): number 
   return Math.round(Math.min(maximum, Math.max(MIN_SIDEBAR_WIDTH, candidate)))
 }
 
-/** Keep a visible editor area while resizing the open problem description. */
-export function clampDailyDescriptionHeight(value: number, availableHeight = 800): number {
-  const usableHeight = Number.isFinite(availableHeight) && availableHeight > 0 ? availableHeight : 800
-  const maximum = maxDailyDescriptionHeight(usableHeight)
-  const candidate = Number.isNaN(value) ? DEFAULT_DAILY_DESCRIPTION_HEIGHT : value
-  return Math.round(Math.min(maximum, Math.max(MIN_DAILY_DESCRIPTION_HEIGHT, candidate)))
-}
-
 export function maxGitFileListWidth(availableWidth: number): number {
   const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 900
   return Math.max(MIN_GIT_FILE_LIST_WIDTH, Math.round(usableWidth - MIN_GIT_DIFF_WIDTH - GIT_SPLITTER_WIDTH - GIT_WORKSPACE_GAP))
+}
+
+export function maxTestListWidth(availableWidth: number): number {
+  const usableWidth = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 900
+  return Math.max(MIN_TEST_LIST_WIDTH, Math.round(usableWidth - MIN_TEST_OUTPUT_WIDTH - TEST_SPLITTER_WIDTH))
 }
 
 export function maxSidebarWidth(availableWidth: number): number {
@@ -194,17 +197,6 @@ export function maxSidebarWidth(availableWidth: number): number {
   return Math.max(
     MIN_SIDEBAR_WIDTH,
     Math.min(MAX_SIDEBAR_WIDTH, Math.round(usableWidth - MIN_EDITOR_WIDTH - SIDEBAR_SPLITTER_WIDTH)),
-  )
-}
-
-export function maxDailyDescriptionHeight(availableHeight: number): number {
-  const usableHeight = Number.isFinite(availableHeight) && availableHeight > 0 ? availableHeight : 800
-  return Math.max(
-    MIN_DAILY_DESCRIPTION_HEIGHT,
-    Math.min(
-      MAX_DAILY_DESCRIPTION_HEIGHT,
-      Math.round(usableHeight - MIN_CODE_CARD_HEIGHT - DAILY_DESCRIPTION_LAYOUT_OVERHEAD),
-    ),
   )
 }
 
@@ -224,6 +216,12 @@ export function readGitFileListWidth(storage: Storage | undefined): number {
   return clampGitFileListWidth(Number.isFinite(parsed) ? parsed : DEFAULT_GIT_FILE_LIST_WIDTH)
 }
 
+export function readTestListWidth(storage: Storage | undefined): number {
+  const value = storage?.getItem(TEST_LIST_WIDTH_KEY)
+  const parsed = value ? Number(value) : DEFAULT_TEST_LIST_WIDTH
+  return clampTestListWidth(Number.isFinite(parsed) ? parsed : DEFAULT_TEST_LIST_WIDTH)
+}
+
 export function readSidebarWidth(storage: Storage | undefined): number {
   const value = storage?.getItem(SIDEBAR_WIDTH_KEY)
   const parsed = value ? Number(value) : DEFAULT_SIDEBAR_WIDTH
@@ -234,12 +232,8 @@ export function readSidebarCollapsed(storage: Storage | undefined): boolean {
   return storage?.getItem(SIDEBAR_COLLAPSED_KEY) === 'collapsed'
 }
 
-export function readDailyDescriptionHeight(storage: Storage | undefined): number {
-  const value = storage?.getItem(DAILY_DESCRIPTION_HEIGHT_KEY)
-  const parsed = value ? Number(value) : DEFAULT_DAILY_DESCRIPTION_HEIGHT
-  return clampDailyDescriptionHeight(
-    Number.isFinite(parsed) ? parsed : DEFAULT_DAILY_DESCRIPTION_HEIGHT,
-  )
+export function readSidebarTab(storage: Storage | undefined): SidebarTab {
+  return storage?.getItem(SIDEBAR_TAB_KEY) === 'description' ? 'description' : 'problems'
 }
 
 export function windowHeight(): number {

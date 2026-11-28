@@ -14,7 +14,10 @@ const testMocks = vi.hoisted(() => ({
     emitChange: (source: string) => void
     triggerProjectSearch: () => void
     triggerWorkspaceShortcut: (id: WorkspaceShortcutId) => void
+    moveCursor: (testMethod: string | null) => void
     applyAiTests: (statements: readonly string[]) => unknown
+    /** The waiting AI request's lock as last shown, or null when none is. */
+    aiPending: { kind: string; status: { label: string; detail: string | null; step: number } } | null
     focus: () => void
     metadataUpdates: Array<PsLibraryMetadata | null>
     revealedLocations: Array<{ line: number; column?: number | null }>
@@ -24,8 +27,11 @@ const testMocks = vi.hoisted(() => ({
   }>,
   filenameMatchedPaths: [] as string[],
   testRunControllers: [] as Array<{
+    runCurrentTest: ReturnType<typeof vi.fn>
     stopCurrentRun: ReturnType<typeof vi.fn>
   }>,
+  /** What the mocked editor reports as the @Test method at the cursor. */
+  testMethodAtCursor: null as string | null,
   contentSearchControllers: [] as Array<{
     update: ReturnType<typeof vi.fn>
     reset: ReturnType<typeof vi.fn>
@@ -43,6 +49,8 @@ const testMocks = vi.hoisted(() => ({
   settingsSections: [] as Array<string | undefined>,
   /** Every progress popup update, with null for removal. */
   progressOverlays: [] as Array<ProgressOverlayState | null>,
+  /** Every AI lock shown in the editor, as `kind: label`, with null for removal. */
+  aiPendingUpdates: [] as Array<string | null>,
   toasts: [] as Array<{
     message: string
     tone: string
@@ -67,29 +75,51 @@ vi.mock('../../../src/editor', async () => {
   class FakeJavaEditor {
     readonly view = { state: {} }
     source = ''
+    aiPending: { kind: string; status: { label: string; detail: string | null; step: number } } | null = null
     readonly revealedLocations: Array<{ line: number; column?: number | null }> = []
     readonly metadataUpdates: Array<PsLibraryMetadata | null> = []
     private readonly callbacks: {
       onChange?: (source: string) => void
       onSearchProject?: () => void
       onWorkspaceShortcut?: (id: WorkspaceShortcutId) => void
+      onCursorChange?: () => void
     }
 
     constructor(_parent: HTMLElement, callbacks: {
       onChange?: (source: string) => void
       onSearchProject?: () => void
       onWorkspaceShortcut?: (id: WorkspaceShortcutId) => void
+      onCursorChange?: () => void
     }) {
       this.callbacks = callbacks
       testMocks.editorInstances.push(this)
     }
 
+    // Loading a document drops any lock, as in the editor.
     setValue(source: string): void {
       this.source = source
+      this.aiPending = null
     }
 
     reloadExternalValue(source: string): void {
       this.source = source
+      this.aiPending = null
+    }
+
+    showAiPending(kind: string, status: { label: string; detail: string | null; step: number }): void {
+      this.aiPending = { kind, status }
+      testMocks.aiPendingUpdates.push(`${kind}: ${status.label}`)
+    }
+
+    clearAiPending(): void {
+      if (this.aiPending === null) return
+      this.aiPending = null
+      testMocks.aiPendingUpdates.push(null)
+    }
+
+    replaceValue(source: string): void {
+      this.source = source
+      this.callbacks.onChange?.(source)
     }
 
     aiTestStub(): string {
@@ -111,6 +141,7 @@ vi.mock('../../../src/editor', async () => {
     applyAiTests(statements: readonly string[]): ReturnType<typeof planAiTestInsertion> {
       const plan = planAiTestInsertion(this.source, statements)
       if (plan.ok) {
+        this.aiPending = null
         this.emitChange(`${this.source.slice(0, plan.from)}${plan.insert}${this.source.slice(plan.to)}`)
       }
       return plan
@@ -119,9 +150,21 @@ vi.mock('../../../src/editor', async () => {
     applyAiCaseTest(statements: readonly string[]): ReturnType<typeof planAiCaseTestInsertion> {
       const plan = planAiCaseTestInsertion(this.source, statements)
       if (plan.ok) {
+        this.aiPending = null
         this.emitChange(`${this.source.slice(0, plan.from)}${plan.insert}${this.source.slice(plan.to)}`)
       }
       return plan
+    }
+
+    fillAiTestsInSource(kind: string, source: string, statements: readonly string[]): {
+      result: ReturnType<typeof planAiTestInsertion> | ReturnType<typeof planAiCaseTestInsertion>
+      source: string | null
+    } {
+      const result = kind === 'case' ? planAiCaseTestInsertion(source, statements) : planAiTestInsertion(source, statements)
+      return {
+        result,
+        source: result.ok ? `${source.slice(0, result.from)}${result.insert}${source.slice(result.to)}` : null,
+      }
     }
 
     focus(): void {}
@@ -150,11 +193,16 @@ vi.mock('../../../src/editor', async () => {
     triggerWorkspaceShortcut(id: WorkspaceShortcutId): void {
       this.callbacks.onWorkspaceShortcut?.(id)
     }
+
+    moveCursor(testMethod: string | null): void {
+      testMocks.testMethodAtCursor = testMethod
+      this.callbacks.onCursorChange?.()
+    }
   }
 
   return {
     JavaEditor: FakeJavaEditor,
-    findJavaTestMethodAt: () => null,
+    findJavaTestMethodAt: () => testMocks.testMethodAtCursor,
     isShortcutHelpAltShortcut: () => false,
   }
 })
@@ -273,8 +321,8 @@ vi.mock('../../../src/app/pane-layout', () => ({
         layout.sidebarCollapsed = collapsed
       }),
       apply: vi.fn(),
-      applyDailyDescriptionHeight: vi.fn(),
       applyGitFileListWidth: vi.fn(),
+      applyTestListWidth: vi.fn(),
       destroy: vi.fn(),
     }
     testMocks.paneLayouts.push(layout)
@@ -317,14 +365,13 @@ vi.mock('../../../src/app/overlay-controller', () => ({
 vi.mock('../../../src/app/test-run-controller', () => ({
   TestRunController: class {
     resultSource: null = null
+    runCurrentTest = vi.fn((_testMethod?: string): Promise<void> => Promise.resolve())
     stopCurrentRun = vi.fn()
 
     constructor(_options: unknown) {
       testMocks.testRunControllers.push(this)
     }
-    runCurrentTest(_testMethod?: string): Promise<void> { return Promise.resolve() }
     resetTestState(): void {}
-    cancelCurrentRun(): void {}
     selectTestResult(_key: string, _focus: boolean): void {}
     acceptRenderedSelection(_key: string | null): void {}
     isResultSourceCurrent(_source: unknown): boolean { return false }
@@ -372,6 +419,7 @@ vi.mock('../../../src/app/git-controller', () => ({
     clearScheduledRefresh(): void {}
     selectAllFiles(): void {}
     selectNoFiles(): void {}
+    selectAllForShortcutCommit(): boolean { return false }
     toggleFile(_path: string, _selected: boolean): void {}
     setActiveFile(_path: string): void {}
     selectRow(_path: string, _modifiers?: unknown): void {}
@@ -391,11 +439,13 @@ beforeEach(() => {
   testMocks.fileViewCallbacks.length = 0
   testMocks.filenameMatchedPaths = []
   testMocks.testRunControllers.length = 0
+  testMocks.testMethodAtCursor = null
   testMocks.contentSearchControllers.length = 0
   testMocks.paneLayouts.length = 0
   testMocks.overlayOptions.length = 0
   testMocks.settingsSections.length = 0
   testMocks.progressOverlays.length = 0
+  testMocks.aiPendingUpdates.length = 0
   testMocks.toasts.length = 0
 })
 

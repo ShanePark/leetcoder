@@ -34,7 +34,7 @@ class DialogElement extends EventTarget {
 function harness() {
   const document: { activeElement: DialogElement | null } = { activeElement: null }
   const elements = new Map<string, DialogElement>()
-  for (const id of ['commit-git-dialog', 'cancel-commit-git', 'confirm-commit-git',
+  for (const id of ['commit-git-dialog', 'cancel-commit-git', 'confirm-commit-git', 'confirm-commit-git-label',
     'commit-git-message', 'commit-git-paths', 'commit-git-branch', 'commit-git-title', 'editor']) {
     elements.set(`#${id}`, new DialogElement(document))
   }
@@ -48,6 +48,19 @@ function harness() {
   return { controller, document, element }
 }
 
+function keydown(key: string, init: { isComposing?: boolean; ctrlKey?: boolean } = {}): Event {
+  const event = new Event('keydown', { cancelable: true })
+  return Object.assign(event, {
+    key,
+    code: '',
+    shiftKey: false,
+    altKey: false,
+    metaKey: false,
+    ctrlKey: init.ctrlKey ?? false,
+    isComposing: init.isComposing ?? false,
+  })
+}
+
 const request: GitCommitConfirmation = {
   branch: 'feature',
   paths: ['Q1.java', 'Q2.java'],
@@ -56,14 +69,14 @@ const request: GitCommitConfirmation = {
 }
 
 describe('GitCommitDialog', () => {
-  it('shows the commit details with Cancel focused and resolves false when cancelled', async () => {
+  it('shows the commit details with the confirm action focused and resolves false when cancelled', async () => {
     const { controller, document, element } = harness()
     const pending = controller.confirm(request)
 
     expect(controller.isOpen).toBe(true)
     expect(element('#commit-git-dialog').open).toBe(true)
     expect(element('#commit-git-dialog').hidden).toBe(false)
-    expect(document.activeElement).toBe(element('#cancel-commit-git'))
+    expect(document.activeElement).toBe(element('#confirm-commit-git'))
     expect(element('#commit-git-branch').textContent).toContain('2 files to feature')
     expect(element('#commit-git-message').textContent).toBe(request.message)
     expect(element('#commit-git-paths').textContent).toBe('Q1.java\nQ2.java')
@@ -78,14 +91,14 @@ describe('GitCommitDialog', () => {
     controller.dispose()
   })
 
-  it('requires an explicit confirmation click and rejects a duplicate prompt', async () => {
+  it('ignores other keys until confirmed and rejects a duplicate prompt', async () => {
     const { controller, element } = harness()
     const resolved = vi.fn()
     const pending = controller.confirm(request)
     void pending.then(resolved)
 
     await expect(controller.confirm(request)).resolves.toBe(false)
-    element('#commit-git-dialog').dispatchEvent(new Event('keydown'))
+    element('#commit-git-dialog').dispatchEvent(keydown('a'))
     await Promise.resolve()
     expect(resolved).not.toHaveBeenCalled()
     expect(controller.isOpen).toBe(true)
@@ -97,6 +110,26 @@ describe('GitCommitDialog', () => {
     controller.dispose()
   })
 
+  it('confirms with Enter unless it is pressed on Cancel, modified, or composing', async () => {
+    const { controller, element } = harness()
+    const pending = controller.confirm(request)
+
+    element('#commit-git-dialog').dispatchEvent(keydown('Enter', { isComposing: true }))
+    element('#commit-git-dialog').dispatchEvent(keydown('Enter', { ctrlKey: true }))
+    // The fake elements do not bubble, so deliver Cancel's keydown to the dialog directly.
+    const onCancel = keydown('Enter')
+    Object.defineProperty(onCancel, 'target', { value: element('#cancel-commit-git') })
+    element('#commit-git-dialog').dispatchEvent(onCancel)
+    expect(controller.isOpen).toBe(true)
+    expect(onCancel.defaultPrevented).toBe(false)
+
+    const enter = keydown('Enter')
+    element('#commit-git-dialog').dispatchEvent(enter)
+    await expect(pending).resolves.toBe(true)
+    expect(enter.defaultPrevented).toBe(true)
+    controller.dispose()
+  })
+
   it('updates the title, action and branch summary when reused for each commit mode', async () => {
     const { controller, element } = harness()
 
@@ -105,7 +138,7 @@ describe('GitCommitDialog', () => {
 
       expect(element('#commit-git-title').textContent)
         .toBe(pushAfterCommit ? 'Commit and push?' : 'Commit changes?')
-      expect(element('#confirm-commit-git').textContent)
+      expect(element('#confirm-commit-git-label').textContent)
         .toBe(pushAfterCommit ? 'Commit & Push' : 'Commit')
       expect(element('#commit-git-branch').textContent)
         .toBe(pushAfterCommit

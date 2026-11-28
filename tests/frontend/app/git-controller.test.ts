@@ -527,3 +527,64 @@ describe('GitController row selection', () => {
     expect(controller.state.rowSelectionAnchor).toBe('Q1.java')
   })
 })
+
+describe('GitController shortcut commit selection', () => {
+  function withFiles(paths: string[]): ReturnType<typeof harness> {
+    const result = harness({})
+    result.controller.state.files = paths.map((path) => ({
+      path, status: 'added', staged: false, additions: 1, deletions: 0,
+    }))
+    return result
+  }
+
+  it('checks a single changed file when nothing is checked', () => {
+    const { controller, renders } = withFiles(['Q1Two.java'])
+
+    expect(controller.selectAllForShortcutCommit()).toBe(true)
+    expect(controller.state.selectedPaths).toEqual(['Q1Two.java'])
+    expect(renders).toHaveLength(1)
+  })
+
+  it('checks a problem and its duplicates when nothing is checked', () => {
+    const { controller } = withFiles(['src/Q1Two.java', 'src/Q1Two2.java'])
+
+    expect(controller.selectAllForShortcutCommit()).toBe(true)
+    expect(controller.state.selectedPaths).toEqual(['src/Q1Two.java', 'src/Q1Two2.java'])
+  })
+
+  it('leaves unrelated files unchecked', () => {
+    const { controller, renders } = withFiles(['Q1First.java', 'Q2Second.java'])
+
+    expect(controller.selectAllForShortcutCommit()).toBe(false)
+    expect(controller.state.selectedPaths).toEqual([])
+    expect(renders).toEqual([])
+  })
+
+  it('keeps an existing selection', () => {
+    const { controller } = withFiles(['Q1Two.java', 'Q1Two2.java'])
+    controller.state.selectedPaths = ['Q1Two2.java']
+
+    expect(controller.selectAllForShortcutCommit()).toBe(false)
+    expect(controller.state.selectedPaths).toEqual(['Q1Two2.java'])
+  })
+
+  it('does nothing while Git or the app is busy or loading', () => {
+    const { controller, context } = withFiles(['Q1Two.java'])
+
+    controller.state.busy = true
+    expect(controller.selectAllForShortcutCommit()).toBe(false)
+    controller.state.busy = false
+    controller.state.loading = true
+    expect(controller.selectAllForShortcutCommit()).toBe(false)
+    controller.state.loading = false
+    context.appBusy = true
+    expect(controller.selectAllForShortcutCommit()).toBe(false)
+    expect(controller.state.selectedPaths).toEqual([])
+  })
+
+  it('does nothing without changes', () => {
+    const { controller } = withFiles([])
+
+    expect(controller.selectAllForShortcutCommit()).toBe(false)
+  })
+})

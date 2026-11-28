@@ -1,6 +1,5 @@
 import {
   ArrowRight,
-  BookOpen,
   CalendarDays,
   Check,
   ChevronDown,
@@ -18,6 +17,7 @@ import {
   GitBranch,
   Info,
   Keyboard,
+  Lightbulb,
   LoaderCircle,
   LocateFixed,
   Menu,
@@ -57,7 +57,6 @@ const PanelLeftToggle: IconNode = [
 export const appIcons = {
   alert: CircleAlert,
   arrowRight: ArrowRight,
-  bookOpen: BookOpen,
   calendarDays: CalendarDays,
   check: Check,
   chevronDown: ChevronDown,
@@ -74,6 +73,7 @@ export const appIcons = {
   gitBranch: GitBranch,
   info: Info,
   keyboard: Keyboard,
+  lightbulb: Lightbulb,
   loader: LoaderCircle,
   locate: LocateFixed,
   menu: Menu,

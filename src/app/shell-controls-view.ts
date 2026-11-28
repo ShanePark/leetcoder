@@ -1,10 +1,12 @@
 import {
   aiButtonPresentation,
   aiReviewButtonPresentation,
+  aiReviewMode,
   type AiButtonPresentation,
   type AiRequestKind,
 } from './ai-controller'
-import type { AppState, BottomPanelTab } from './types'
+import type { AiReviewMode } from '../backend'
+import type { AppState, BottomPanelTab, SidebarTab } from './types'
 import { gitFileName, hasPendingGitWork } from './git-helpers'
 import { updateGitCommitControls as updateGitCommitControlsView } from './git-view'
 import type { AiTestStub } from '../editor'
@@ -14,6 +16,9 @@ import { shortcutLabel } from '../shortcuts'
 /** Bottom panel tabs in strip order. */
 export const BOTTOM_PANEL_TABS: readonly BottomPanelTab[] = ['tests', 'review', 'git']
 
+/** Sidebar tabs in strip order. */
+export const SIDEBAR_TABS: readonly SidebarTab[] = ['problems', 'description']
+
 interface ShellControlsViewOptions {
   root: HTMLElement
   state: AppState
@@ -22,8 +27,12 @@ interface ShellControlsViewOptions {
   invalidatePendingNavigation: () => void
   aiRequestPath: () => string | null
   aiRequestKind: () => AiRequestKind | null
+  /** What the running review asks for, or null. */
+  aiRequestReviewMode: () => AiReviewMode | null
   aiTestStub: () => AiTestStub
   aiCaseTestAvailable: () => boolean
+  /** The @Test method holding the editor cursor, which Run selected targets. */
+  testMethodAtCursor: () => string | null
 }
 
 /** Update shell controls directly without rebuilding focused editor or Git inputs. */
@@ -46,8 +55,28 @@ export class ShellControlsView {
       button.tabIndex = selected ? 0 : -1
       this.element<HTMLElement>(`#${tab}-panel`).hidden = !selected
     }
-    this.element<HTMLButtonElement>('#run-test').hidden = this.state.bottomPanelTab !== 'tests'
+    const testsTab = this.state.bottomPanelTab === 'tests'
+    this.element<HTMLButtonElement>('#run-test').hidden = !testsTab
+    this.element<HTMLButtonElement>('#run-selected-test').hidden = !testsTab
     this.element<HTMLElement>('#git-tab-indicator').hidden = !hasPendingGitWork(this.state.git)
+  }
+
+  /**
+   * The header toggle reads as pressed only while the Problems tab is on
+   * screen, because pressing it then hides the sidebar; from the Description
+   * tab or a hidden sidebar it shows Problems instead.
+   */
+  renderSidebarTabs(activeTab: SidebarTab, sidebarCollapsed: boolean): void {
+    for (const tab of SIDEBAR_TABS) {
+      const selected = activeTab === tab
+      const button = this.element<HTMLButtonElement>(`#sidebar-${tab}-tab`)
+      button.classList.toggle('is-active', selected)
+      button.setAttribute('aria-selected', String(selected))
+      button.tabIndex = selected ? 0 : -1
+      this.element<HTMLElement>(`#sidebar-${tab}-panel`).hidden = !selected
+    }
+    this.element<HTMLButtonElement>('#sidebar-toggle')
+      .setAttribute('aria-pressed', String(!sidebarCollapsed && activeTab === 'problems'))
   }
 
   /**
@@ -79,7 +108,7 @@ export class ShellControlsView {
     })
     const dailyPrimary = this.root.querySelector<HTMLButtonElement>('.daily-primary')
     if (dailyPrimary) {
-      dailyPrimary.disabled = busy || !this.state.projectValid
+      dailyPrimary.disabled = busy || !this.state.projectValid || dailyPrimary.dataset.fileOpen === 'true'
     }
     this.root.querySelectorAll<HTMLButtonElement>('.daily-today, .problem-lookup-submit').forEach((button) => {
       button.disabled = busy || this.state.dailyLoading
@@ -103,7 +132,10 @@ export class ShellControlsView {
     this.updateGitCommitControls()
   }
 
-  /** The AI buttons: generation follows the open file (see `aiButtonMode`), and review sits beside it. */
+  /**
+   * The AI buttons: generation follows the open file (see `aiButtonMode`), and
+   * review sits beside it, offering help while the solution is unimplemented.
+   */
   updateAiButton(): void {
     this.renderAiButton('#ai-review-code', aiReviewButtonPresentation(
       this.state.selectedPath,
@@ -111,6 +143,8 @@ export class ShellControlsView {
       this.options.aiRequestKind(),
       this.state.busy,
       this.state.dailyProblem,
+      aiReviewMode(this.state.selectedSource),
+      this.options.aiRequestReviewMode(),
     ))
     this.renderAiButton('#ai-generate-tests', aiButtonPresentation(
       this.state.selectedPath,
@@ -172,6 +206,30 @@ export class ShellControlsView {
       )
       runButton.dataset.runAction = action
     }
+    this.updateRunSelectedButton()
+  }
+
+  /**
+   * Run selected follows the cursor, so the editor refreshes it on every
+   * selection change. It stays disabled during a run rather than becoming a
+   * second Stop button.
+   */
+  updateRunSelectedButton(): void {
+    const button = this.element<HTMLButtonElement>('#run-selected-test')
+    const running = this.state.testRun?.status === 'running'
+    const method = this.state.selectedFqcn ? this.options.testMethodAtCursor() : null
+    const shortcut = shortcutLabel('run-test-at-cursor', this.options.macPlatform())
+    button.disabled = running || this.state.busy || method === null
+    button.title = running
+      ? 'Wait for the current test run to finish'
+      : !this.state.selectedFqcn
+        ? 'Select a Java problem file to run'
+        : method === null
+          ? 'Put the cursor in an @Test method to run only that test'
+          : `Run ${method}() (${shortcut})`
+    button.setAttribute('aria-label', method === null || running
+      ? `Run selected test (${shortcut})`
+      : `Run ${method}() (${shortcut})`)
   }
 
   updateEditorVisibility(): void {

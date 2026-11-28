@@ -12,13 +12,13 @@
   border-radius: 0 0 var(--panel-radius) var(--panel-radius);
 }
 
-.test-status-row {
+.test-idle {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-height: 28px;
-  padding: 0 12px 8px;
 }
 
 .test-idle-copy {
@@ -29,21 +29,6 @@
   font-size: 12px;
 }
 
-.test-verdict {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.test-status-row.is-success { color: var(--green); }
-.test-status-row.is-failure { color: var(--red); }
-.test-status-row.is-error { color: var(--red); }
-.test-status-row.is-warning { color: var(--amber); }
-.test-status-row.is-running { color: var(--text-dim); }
-
-.test-status-row .test-status-svg {
-  flex: none;
-}
-
 .test-facts {
   color: var(--text-faint);
   font-size: 12px;
@@ -52,9 +37,14 @@
 }
 
 .test-run-target {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .test-body {
@@ -68,14 +58,47 @@
 }
 
 /* Test results layout: two borderless wells. The tree remains visible while
-   the selected test's assertion details and console output take the larger one. */
+   the selected test's assertion details and console output take the larger
+   one. The splitter column doubles as the gap between them. */
 .test-results-workspace {
   display: grid;
   flex: 1 1 0;
-  grid-template-columns: minmax(200px, 30%) minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: var(--test-list-width, 300px) 10px minmax(0, 1fr);
   min-height: 150px;
   overflow: hidden;
+}
+
+.test-splitter {
+  position: relative;
+  cursor: col-resize;
+}
+
+/* Invisible at rest; a 2px accent pill appears while hovering, focused or
+   dragging, inset by the well radius like the Git splitter. */
+.test-splitter span {
+  position: absolute;
+  top: var(--radius-md);
+  bottom: var(--radius-md);
+  left: calc(50% - 1px);
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+
+.test-splitter:hover span,
+.test-splitter:focus-visible span,
+.is-resizing-tests .test-splitter span {
+  background: var(--accent);
+}
+
+.test-splitter:focus-visible {
+  outline: none;
+}
+
+.is-resizing-tests {
+  cursor: col-resize;
+  user-select: none;
 }
 
 /* 4px well padding + 8px row padding keeps text 12px from the well edge. */
@@ -130,6 +153,32 @@
 .test-tree-root .test-name {
   font-weight: 600;
 }
+
+/* The verdict never shrinks; the method target and live-check note give way
+   first so the row stays on one line in a narrow list. */
+.test-tree-root .test-verdict {
+  flex: 1 0 auto;
+}
+
+.test-tree-root .test-run-target,
+.test-tree-root .live-diagnostics-status {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The run item carries the verdict, so its icon and label take the tone. */
+.test-tree-root.is-success .test-status-icon,
+.test-tree-root.is-success .test-verdict { color: var(--green); }
+.test-tree-root.is-failure .test-status-icon,
+.test-tree-root.is-failure .test-verdict,
+.test-tree-root.is-error .test-status-icon,
+.test-tree-root.is-error .test-verdict { color: var(--red); }
+.test-tree-root.is-warning .test-status-icon,
+.test-tree-root.is-warning .test-verdict { color: var(--amber); }
+.test-tree-root.is-running .test-status-icon { color: var(--text-dim); }
 
 .test-tree-facts {
   flex: none;

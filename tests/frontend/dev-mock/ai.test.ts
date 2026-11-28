@@ -1,10 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { AiGenerateRequest, AiProgress, AiReviewRequest } from '../../../src/backend'
+import type {
+  AiStreamEvent,
+  AiGenerateRequest,
+  AiProgress,
+  AiReviewFollowUpRequest,
+  AiReviewRequest,
+} from '../../../src/backend'
 import { createDevMockBackend } from '../../../src/dev-mock'
+import { AI_PROBLEM_HELP, AI_REVIEW } from '../../../src/dev-mock/fixtures'
 
 const day = 86_400_000
 const reviewRequest: AiReviewRequest = {
+  mode: 'review',
   selectedModelId: null,
   problemTitle: 'Two Sum',
   problemContent: '<p>Input: nums = [3,2,4], target = 6</p>',
@@ -215,14 +223,14 @@ describe('browser preview AI review', () => {
       testRun: { ...run, success: false, summary: { ...run.summary, passed: 0, failed: 1 } },
     }))
 
-    expect(noRun).toMatchObject({ outcome: 'ok', servedModel: 'claude-sonnet-5-5', fellBack: false })
+    expect(noRun).toMatchObject({ outcome: 'ok', help: null, servedModel: 'claude-sonnet-5-5', fellBack: false })
     expect(noRun.review?.failureCause).toBeNull()
     expect(passed.review).toEqual(noRun.review)
     expect(failed.review?.verdict).toBe('incorrect')
     expect(failed.review?.failureCause).toEqual(expect.any(String))
     for (const { review } of [noRun, failed]) {
       expect(review?.missedCases.length).toBeGreaterThan(0)
-      expect(review?.efficiency.time).toBe('O(n)')
+      expect(review?.efficiency.time).toBe('O(d)')
     }
   })
 
@@ -242,10 +250,213 @@ describe('browser preview AI review', () => {
     ])
   })
 
+  it('streams a thinking pause, the review JSON in small pieces, and its usage', async () => {
+    const backend = await configuredBackend()
+    const events: Array<{ event: AiStreamEvent; at: number }> = []
+    const started = Date.now()
+    const pending = backend.reviewAiCode(reviewRequest, undefined, (event) => events.push({ event, at: Date.now() - started }))
+
+    await vi.advanceTimersByTimeAsync(900)
+    expect(events.map(({ event }) => event.kind)).toEqual(['usage', 'thinking', 'thinking'])
+    const result = await finishDelayed(pending)
+
+    const kinds = events.map(({ event }) => event.kind)
+    expect(kinds.slice(0, 8)).toEqual(['usage', 'thinking', ...Array(6).fill('thinking')])
+    expect(kinds.at(-1)).toBe('usage')
+    const texts = events.flatMap(({ event }) => event.kind === 'text' ? [event.text] : [])
+    expect(texts.every((text) => text.length > 0 && text.length <= 16)).toBe(true)
+    expect(JSON.parse(texts.join(''))).toEqual(result.review)
+    expect(events.find(({ event }) => event.kind === 'text')!.at).toBeGreaterThanOrEqual(2_000)
+    expect(events[0].event).toEqual({
+      kind: 'usage', usage: { inputTokens: 2_480, outputTokens: 1, cacheReadTokens: 1_650, cacheWriteTokens: 0 }, final: false,
+    })
+    expect(events.at(-1)!.event).toEqual({
+      kind: 'usage', usage: { inputTokens: 2_480, outputTokens: 412, cacheReadTokens: 1_650, cacheWriteTokens: 0 }, final: true,
+    })
+  })
+
+  it('streams help instead of a review in help mode', async () => {
+    const backend = await configuredBackend()
+    const texts: string[] = []
+    const result = await finishDelayed(backend.reviewAiCode({ ...reviewRequest, mode: 'help' }, undefined, (event) => {
+      if (event.kind === 'text') texts.push(event.text)
+    }))
+
+    expect(result).toMatchObject({ outcome: 'ok', review: null, help: AI_PROBLEM_HELP })
+    expect(AI_PROBLEM_HELP.hints.length).toBeGreaterThan(1)
+    expect(JSON.parse(texts.join(''))).toEqual(AI_PROBLEM_HELP)
+  })
+
   it('reports no cost for a review by a model without a price', async () => {
     const backend = await configuredBackend()
     const result = await finishDelayed(backend.reviewAiCode({ ...reviewRequest, selectedModelId: 'claude-sonnet-4-5' }))
     expect(result.usage).toMatchObject({ inputTokens: 2_480, costUsd: null })
+  })
+})
+
+describe('browser preview AI review follow-up', () => {
+  const followUpRequest = (overrides: Partial<AiReviewFollowUpRequest> = {}): AiReviewFollowUpRequest => ({
+    selectedModelId: 'claude-haiku-5',
+    review: reviewRequest,
+    reviewAnswer: AI_REVIEW,
+    helpAnswer: null,
+    history: [],
+    question: 'Can the product overflow?',
+    currentCode: 'class Q1TwoSum {}',
+    ...overrides,
+  })
+
+  it('requires a key and a question', async () => {
+    const events: AiStreamEvent[] = []
+    await expect(createDevMockBackend().askAiReviewFollowUp(followUpRequest(), (event) => events.push(event)))
+      .rejects.toThrow('No API key is configured.')
+    const backend = await configuredBackend()
+    await expect(backend.askAiReviewFollowUp(followUpRequest({ question: ' ' }), (event) => events.push(event)))
+      .rejects.toThrow('The question is empty.')
+    expect(events).toEqual([])
+  })
+
+  it('answers about help, and refuses an answer that does not match the mode', async () => {
+    const backend = await configuredBackend()
+    const help = { review: { ...reviewRequest, mode: 'help' as const }, reviewAnswer: null, helpAnswer: AI_PROBLEM_HELP }
+    await expect(finishDelayed(backend.askAiReviewFollowUp(followUpRequest(help))))
+      .resolves.toMatchObject({ outcome: 'ok' })
+    for (const mismatch of [{ ...help, reviewAnswer: AI_REVIEW }, { ...help, helpAnswer: null }, { helpAnswer: AI_PROBLEM_HELP }]) {
+      await expect(backend.askAiReviewFollowUp(followUpRequest(mismatch)))
+        .rejects.toThrow('The follow-up answer does not match the request mode.')
+    }
+  })
+
+  it('streams a markdown answer in small pieces over about a second and a half', async () => {
+    const backend = await configuredBackend()
+    const deltas: Array<{ text: string; at: number }> = []
+    const usages: AiStreamEvent[] = []
+    const started = Date.now()
+    const pending = backend.askAiReviewFollowUp(followUpRequest(), (event) => {
+      if (event.kind === 'text') deltas.push({ text: event.text, at: Date.now() - started })
+      else if (event.kind === 'usage') usages.push(event)
+      else throw new Error('A question proposed a change.')
+    })
+
+    await vi.advanceTimersByTimeAsync(800)
+    const midway = deltas.length
+    expect(midway).toBeGreaterThan(0)
+    const result = await finishDelayed(pending)
+
+    expect(deltas.length).toBeGreaterThan(midway)
+    expect(deltas.every(({ text }) => text.length > 0 && text.length <= 12)).toBe(true)
+    expect(deltas.map(({ text }) => text).join('')).toBe(result.answer)
+    expect(deltas.at(-1)!.at).toBeGreaterThanOrEqual(1_400)
+    expect(deltas.at(-1)!.at).toBeLessThanOrEqual(2_000)
+    expect(result.answer).toContain('```java')
+    expect(result.answer).toMatch(/^- /m)
+    expect(result).toMatchObject({ outcome: 'ok', proposal: null, servedModel: 'claude-haiku-5', fellBack: false })
+    expect(usages).toEqual([
+      { kind: 'usage', usage: { inputTokens: 3_120, outputTokens: 1, cacheReadTokens: 2_480, cacheWriteTokens: 0 }, final: false },
+      { kind: 'usage', usage: { inputTokens: 3_120, outputTokens: 236, cacheReadTokens: 2_480, cacheWriteTokens: 0 }, final: true },
+    ])
+  })
+
+  it.each(['코드를 수정해줘', '개선해줘', 'Please fix the bug', 'Refactor this', 'rewrite it'])(
+    'streams text, then proposes a change to the current code for "%s"',
+    async (question) => {
+      const backend = await configuredBackend()
+      const currentCode = [
+        'class Q1TwoSum {',
+        '    int[] twoSum(int[] nums, int target) {',
+        '        for (int i = 0; i < nums.length; i++) {',
+        '        }',
+        '    }',
+        '}',
+        '',
+      ].join('\n')
+      const events: AiStreamEvent[] = []
+      const result = await finishDelayed(
+        backend.askAiReviewFollowUp(followUpRequest({ question, currentCode }), (event) => events.push(event)),
+      )
+
+      expect(events[0]).toMatchObject({ kind: 'usage', final: false })
+      expect(events.at(-2)).toEqual({ kind: 'proposal-started' })
+      expect(events.at(-1)).toMatchObject({ kind: 'usage', final: true })
+      const texts = events.slice(1, -2)
+      expect(texts.every((event) => event.kind === 'text')).toBe(true)
+      expect(texts.map((event) => event.kind === 'text' ? event.text : '').join('')).toBe(result.answer)
+      expect(result.proposal).toEqual({
+        summary: expect.any(String),
+        baseCode: currentCode,
+        code: [
+          'class Q1TwoSum {',
+          '',
+          '    int[] twoSum(int[] nums, int target) {',
+          '        for (int i = 0; i < nums.length; ++i) {',
+          '        }',
+          '    }',
+          '}',
+          '',
+        ].join('\n'),
+      })
+    },
+  )
+
+  it('rewrites a loop over the digits of Integer.toString into arithmetic', async () => {
+    const backend = await configuredBackend()
+    const currentCode = [
+      '    public boolean checkDivisibility(int n) {',
+      '        String digits = Integer.toString(n);',
+      '        int sum = 0;',
+      '        int product = 1;',
+      '        for (int i = 0; i < digits.length(); i++) {',
+      "            int digit = digits.charAt(i) - '0';",
+      '            sum += digit;',
+      '            product *= digit;',
+      '        }',
+      '        return n % (sum + product) == 0;',
+      '    }',
+      '',
+    ].join('\n')
+    const result = await finishDelayed(
+      backend.askAiReviewFollowUp(followUpRequest({ question: 'Please improve it', currentCode })),
+    )
+    expect(result.proposal).toEqual({
+      summary: 'Read the digits with % 10 and / 10 instead of through Integer.toString.',
+      baseCode: currentCode,
+      code: [
+        '    public boolean checkDivisibility(int n) {',
+        '        int sum = 0;',
+        '        int product = 1;',
+        '        for (int x = n; x > 0; x /= 10) {',
+        '            int digit = x % 10;',
+        '            sum += digit;',
+        '            product *= digit;',
+        '        }',
+        '        return n % (sum + product) == 0;',
+        '    }',
+        '',
+      ].join('\n'),
+    })
+  })
+
+  it('proposes a change to code with no block by adding a line at the end', async () => {
+    const backend = await configuredBackend()
+    const result = await finishDelayed(backend.askAiReviewFollowUp(followUpRequest({ question: 'improve it' })))
+    expect(result.proposal?.code).toBe('class Q1TwoSum {}\n')
+    expect(result.proposal?.baseCode).toBe('class Q1TwoSum {}')
+  })
+
+  it('records the answer in the ledger with the cost it reports, and falls back like a review', async () => {
+    const backend = await configuredBackend()
+    const result = await finishDelayed(backend.askAiReviewFollowUp(followUpRequest()))
+    expect(result.usage).toMatchObject({ inputTokens: 3_120, outputTokens: 236, costUsd: expect.any(Number) })
+    const summary = await backend.aiUsage([Date.now() - 1])
+    expect(summary.buckets[0].perModel).toEqual([
+      {
+        model: 'claude-haiku-5',
+        totals: expect.objectContaining({ requests: 1, outputTokens: 236, costUsd: result.usage.costUsd }),
+      },
+    ])
+
+    const fallback = await finishDelayed(backend.askAiReviewFollowUp(followUpRequest({ selectedModelId: 'retired-model' })))
+    expect(fallback).toMatchObject({ servedModel: 'claude-sonnet-5-5', fellBack: true })
   })
 })
 

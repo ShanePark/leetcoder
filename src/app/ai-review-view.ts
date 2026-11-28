@@ -1,4 +1,4 @@
-import type { AiRequestUsage, AiReviewVerdict } from '../backend'
+import type { AiReviewVerdict } from '../backend'
 import type { AiReviewTestRunOmission, StoredAiReview } from './ai-controller'
 
 const VERDICT_LABELS: Readonly<Record<AiReviewVerdict, string>> = {
@@ -13,7 +13,8 @@ const TEST_RUN_NOTES: Readonly<Record<AiReviewTestRunOmission | 'included', stri
   changed: 'Based on the code only, because it changed after the last test run.',
 }
 
-export const AI_REVIEW_EMPTY_COPY = 'No review yet. Review the open solution from the editor toolbar.'
+export const AI_REVIEW_EMPTY_COPY =
+  'Nothing from AI yet. From the editor toolbar, review the open solution, or get hints while it is still unimplemented.'
 
 /** What the review was based on, for the line under its verdict. */
 export function aiReviewTestRunNote(omitted: AiReviewTestRunOmission | null): string {
@@ -39,61 +40,227 @@ export function formatReviewCost(costUsd: number | null): string {
   return `$${costUsd.toLocaleString('en-US', { maximumSignificantDigits: 2 })}`
 }
 
-/** Token rows for the usage card. Cache rows appear only when the request used the cache. */
-export function aiReviewUsageRows(usage: AiRequestUsage): Array<{ label: string; value: string }> {
-  const rows = [
-    { label: 'Input', count: usage.inputTokens, always: true },
-    { label: 'Output', count: usage.outputTokens, always: true },
-    { label: 'Cache read', count: usage.cacheReadTokens, always: false },
-    { label: 'Cache write', count: usage.cacheWriteTokens, always: false },
-  ]
-  return rows
-    .filter((row) => row.always || row.count > 0)
-    .map((row) => ({ label: row.label, value: formatReviewTokens(row.count) }))
+/** A review as far as its streamed JSON has arrived. Any field may be missing. */
+export interface PartialAiReview {
+  verdict?: AiReviewVerdict
+  summary?: string
+  failureCause?: string | null
+  issues?: string[]
+  missedCases?: Array<{ input?: string; reason?: string }>
+  efficiency?: { time?: string; space?: string; assessment?: string }
+  improvements?: string[]
+}
+
+/** Help as far as its streamed JSON has arrived. Any field may be missing. */
+export interface PartialAiProblemHelp {
+  overview?: string
+  keyPoints?: string[]
+  hints?: string[]
+}
+
+const isVerdict = (value: unknown): value is AiReviewVerdict =>
+  typeof value === 'string' && Object.hasOwn(VERDICT_LABELS, value)
+
+const texts = (value: unknown): string[] | undefined =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : undefined
+
+const text = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
+
+const record = (value: unknown): Record<string, unknown> | null =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null
+
+/**
+ * The fields of a partly parsed review that have the right shape. A verdict
+ * counts only once it is a whole verdict word.
+ */
+export function partialAiReview(value: unknown): PartialAiReview {
+  const document = record(value)
+  if (!document) return {}
+  const efficiency = record(document.efficiency)
+  return {
+    verdict: isVerdict(document.verdict) ? document.verdict : undefined,
+    summary: text(document.summary),
+    failureCause: text(document.failureCause),
+    issues: texts(document.issues),
+    missedCases: Array.isArray(document.missedCases)
+      ? document.missedCases.map(record).filter((missed) => missed !== null)
+        .map((missed) => ({ input: text(missed.input), reason: text(missed.reason) }))
+      : undefined,
+    efficiency: efficiency
+      ? { time: text(efficiency.time), space: text(efficiency.space), assessment: text(efficiency.assessment) }
+      : undefined,
+    improvements: texts(document.improvements),
+  }
+}
+
+/** The fields of partly parsed help that have the right shape. */
+export function partialAiProblemHelp(value: unknown): PartialAiProblemHelp {
+  const document = record(value)
+  if (!document) return {}
+  return {
+    overview: text(document.overview),
+    keyPoints: texts(document.keyPoints),
+    hints: texts(document.hints),
+  }
+}
+
+type Make = (tag: string, className: string, text?: string) => HTMLElement
+
+const maker = (documentRef: Document): Make => (tag, className, text) => {
+  const element = documentRef.createElement(tag)
+  element.className = className
+  if (text !== undefined) element.textContent = text
+  return element
 }
 
 /**
- * Render the last review into the Review tab. Model text is set only through
- * `textContent`, so it can never become markup. Empty sections are left out.
+ * Render the last review or help answer into the AI tab. Model text is set only
+ * through `textContent`, so it can never become markup. Empty sections are left
+ * out. `conversation`, the follow-up section, goes after the answer's sections,
+ * and `meter`, the conversation's usage, beside them.
  */
-export function renderAiReviewPanel(body: HTMLElement, stored: StoredAiReview | null): void {
-  const documentRef = body.ownerDocument
-  const make = (tag: string, className: string, text?: string): HTMLElement => {
-    const element = documentRef.createElement(tag)
-    element.className = className
-    if (text !== undefined) element.textContent = text
-    return element
-  }
-
+export function renderAiReviewPanel(
+  body: HTMLElement,
+  stored: StoredAiReview | null,
+  conversation: HTMLElement | null = null,
+  meter: HTMLElement | null = null,
+): void {
+  const make = maker(body.ownerDocument)
   if (!stored) {
     body.replaceChildren(make('p', 'review-empty', AI_REVIEW_EMPTY_COPY))
     return
   }
+  const main = make('div', 'review-main')
+  const meta = `${stored.fileName} · ${stored.servedModel}`
+  let head: HTMLElement
+  if (stored.help) {
+    main.append(...helpSections(make, stored.help))
+    head = helpHead(make, meta)
+  } else {
+    main.append(...(stored.review ? reviewSections(make, stored.review) : []))
+    head = reviewHead(make, stored.review?.verdict ?? null, meta, stored.testRunOmitted)
+  }
+  if (conversation) main.append(conversation)
+  layout(body, make, head, meter, main)
+}
 
-  const { review } = stored
-  const nodes: HTMLElement[] = []
+/** What the Review tab shows while a review streams in. */
+export interface AiReviewDraft {
+  fileName: string
+  modelId: string
+  testRunOmitted: AiReviewTestRunOmission | null
+  review: PartialAiReview
+}
 
+/**
+ * Render a review on its way with the same sections as the finished one, as
+ * far as they have arrived. `status`, which says the review is still being
+ * written, goes under the head; it is kept by the caller so it can tick
+ * without a render.
+ */
+export function renderAiReviewDraft(
+  body: HTMLElement,
+  draft: AiReviewDraft,
+  status: HTMLElement,
+  meter: HTMLElement | null = null,
+): void {
+  const make = maker(body.ownerDocument)
+  const head = reviewHead(make, draft.review.verdict ?? null, `${draft.fileName} · ${draft.modelId}`, draft.testRunOmitted)
+  head.append(status)
+  const main = make('div', 'review-main')
+  main.setAttribute('aria-busy', 'true')
+  main.append(...reviewSections(make, draft.review))
+  layout(body, make, head, meter, main)
+}
+
+/** What the AI tab shows while help streams in. */
+export interface AiHelpDraft {
+  fileName: string
+  modelId: string
+  help: PartialAiProblemHelp
+}
+
+/** Render help on its way as `renderAiReviewDraft` renders a review. */
+export function renderAiHelpDraft(
+  body: HTMLElement,
+  draft: AiHelpDraft,
+  status: HTMLElement,
+  meter: HTMLElement | null = null,
+): void {
+  const make = maker(body.ownerDocument)
+  const head = helpHead(make, `${draft.fileName} · ${draft.modelId}`)
+  head.append(status)
+  const main = make('div', 'review-main')
+  main.setAttribute('aria-busy', 'true')
+  main.append(...helpSections(make, draft.help))
+  layout(body, make, head, meter, main)
+}
+
+function layout(body: HTMLElement, make: Make, head: HTMLElement, meter: HTMLElement | null, main: HTMLElement): void {
+  const element = make('div', 'review-layout')
+  element.append(head, ...(meter ? [meter] : []), main)
+  body.replaceChildren(element)
+}
+
+function reviewHead(
+  make: Make,
+  verdict: AiReviewVerdict | null,
+  meta: string,
+  testRunOmitted: AiReviewTestRunOmission | null,
+): HTMLElement {
   const head = make('div', 'review-head')
   const header = make('div', 'review-header')
-  const verdict = make('span', `review-verdict is-${review.verdict}`, VERDICT_LABELS[review.verdict] ?? VERDICT_LABELS.unsure)
-  header.append(verdict, make('span', 'review-meta', `${stored.fileName} · ${stored.servedModel}`))
-  head.append(header, make('p', 'review-context', aiReviewTestRunNote(stored.testRunOmitted)))
+  if (verdict) header.append(make('span', `review-verdict is-${verdict}`, VERDICT_LABELS[verdict] ?? VERDICT_LABELS.unsure))
+  header.append(make('span', 'review-meta', meta))
+  head.append(header, make('p', 'review-context', aiReviewTestRunNote(testRunOmitted)))
+  return head
+}
 
-  const summary = review.summary.trim()
+/** Help has no verdict, and no test run went with it. */
+function helpHead(make: Make, meta: string): HTMLElement {
+  const head = make('div', 'review-head')
+  const header = make('div', 'review-header')
+  header.append(make('span', 'review-meta', meta))
+  head.append(header)
+  return head
+}
+
+const sectionMaker = (make: Make) => (title: string, ...content: HTMLElement[]): HTMLElement => {
+  const element = make('section', 'review-section')
+  element.append(make('h3', 'review-section-title', title), ...content)
+  return element
+}
+
+/** A list of the non-blank items, or null when none is left. */
+const listMaker = (make: Make) => (items: readonly string[] | undefined, tag: 'ul' | 'ol' = 'ul'): HTMLElement | null => {
+  const entries = (items ?? []).map((item) => item.trim()).filter(Boolean)
+  if (entries.length === 0) return null
+  const element = make(tag, 'review-list')
+  element.append(...entries.map((entry) => make('li', 'review-item', entry)))
+  return element
+}
+
+/** Overview, key points, then the hints in order, gentlest first. */
+function helpSections(make: Make, help: PartialAiProblemHelp): HTMLElement[] {
+  const nodes: HTMLElement[] = []
+  const section = sectionMaker(make)
+  const list = listMaker(make)
+  const overview = help.overview?.trim()
+  if (overview) nodes.push(section('Overview', make('p', 'review-text', overview)))
+  const keyPoints = list(help.keyPoints)
+  if (keyPoints) nodes.push(section('Key points', keyPoints))
+  const hints = list(help.hints, 'ol')
+  if (hints) nodes.push(section('Hints', hints))
+  return nodes
+}
+
+function reviewSections(make: Make, review: PartialAiReview): HTMLElement[] {
+  const nodes: HTMLElement[] = []
+  const summary = review.summary?.trim()
   if (summary) nodes.push(make('p', 'review-summary', summary))
 
-  const section = (title: string, ...content: HTMLElement[]): HTMLElement => {
-    const element = make('section', 'review-section')
-    element.append(make('h3', 'review-section-title', title), ...content)
-    return element
-  }
-  const list = (items: readonly string[]): HTMLElement | null => {
-    const texts = items.map((item) => item.trim()).filter(Boolean)
-    if (texts.length === 0) return null
-    const element = make('ul', 'review-list')
-    element.append(...texts.map((text) => make('li', 'review-item', text)))
-    return element
-  }
+  const section = sectionMaker(make)
+  const list = listMaker(make)
 
   const failureCause = review.failureCause?.trim()
   if (failureCause) nodes.push(section('Failure cause', make('p', 'review-text', failureCause)))
@@ -101,8 +268,8 @@ export function renderAiReviewPanel(body: HTMLElement, stored: StoredAiReview | 
   const issues = list(review.issues)
   if (issues) nodes.push(section('Issues', issues))
 
-  const missedCases = review.missedCases
-    .map((missed) => ({ input: missed.input.trim(), reason: missed.reason.trim() }))
+  const missedCases = (review.missedCases ?? [])
+    .map((missed) => ({ input: missed.input?.trim() ?? '', reason: missed.reason?.trim() ?? '' }))
     .filter((missed) => missed.input || missed.reason)
   if (missedCases.length > 0) {
     const element = make('ul', 'review-list review-missed-cases')
@@ -117,57 +284,16 @@ export function renderAiReviewPanel(body: HTMLElement, stored: StoredAiReview | 
 
   const efficiency: HTMLElement[] = []
   const facts = make('dl', 'review-efficiency')
-  for (const [label, value] of [['Time', review.efficiency.time], ['Space', review.efficiency.space]] as const) {
-    const text = value.trim()
-    if (text) facts.append(make('dt', 'review-efficiency-label', label), make('dd', 'review-efficiency-value', text))
+  for (const [label, value] of [['Time', review.efficiency?.time], ['Space', review.efficiency?.space]] as const) {
+    const fact = value?.trim()
+    if (fact) facts.append(make('dt', 'review-efficiency-label', label), make('dd', 'review-efficiency-value', fact))
   }
   if (facts.children.length > 0) efficiency.push(facts)
-  const assessment = review.efficiency.assessment.trim()
+  const assessment = review.efficiency?.assessment?.trim()
   if (assessment) efficiency.push(make('p', 'review-text', assessment))
   if (efficiency.length > 0) nodes.push(section('Efficiency', ...efficiency))
 
   const improvements = list(review.improvements)
   if (improvements) nodes.push(section('Improvements', improvements))
-
-  const main = make('div', 'review-main')
-  main.append(...nodes)
-  const layout = make('div', 'review-layout')
-  layout.append(head, renderUsageCard(make, stored), main)
-  body.replaceChildren(layout)
-}
-
-/** What the request cost and what it was based on, beside the review. */
-function renderUsageCard(
-  make: (tag: string, className: string, text?: string) => HTMLElement,
-  stored: StoredAiReview,
-): HTMLElement {
-  const { usage } = stored
-  const card = make('aside', 'review-usage')
-  card.setAttribute('aria-label', 'Request usage')
-  const cost = make(
-    'p',
-    usage.costUsd === null ? 'review-usage-cost is-unknown' : 'review-usage-cost',
-    formatReviewCost(usage.costUsd),
-  )
-  const model = make('p', 'review-usage-model', stored.servedModelName)
-  model.title = stored.servedModel
-  const stats = make('dl', 'review-usage-stats')
-  for (const row of aiReviewUsageRows(usage)) {
-    stats.append(make('dt', 'review-usage-label', row.label), make('dd', 'review-usage-value', row.value))
-  }
-  const included = stored.testRunOmitted === null
-  const tests = make(
-    'p',
-    `review-usage-tests ${included ? 'is-included' : 'is-omitted'}`,
-    included ? 'Test results included' : 'Test results not included',
-  )
-  card.append(
-    make('h3', 'review-usage-title', 'Usage'),
-    cost,
-    model,
-    make('p', 'review-usage-caption', 'Tokens'),
-    stats,
-    tests,
-  )
-  return card
+  return nodes
 }

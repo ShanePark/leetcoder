@@ -1,4 +1,4 @@
-import type { AiModel, AiReview, AiReviewResult, DailyProblem } from '../backend'
+import type { AiModel, AiProblemHelp, AiReview, AiReviewResult, DailyProblem } from '../backend'
 
 export const DAILY_PROBLEM: DailyProblem = {
   date: new Date().toISOString().slice(0, 10),
@@ -110,33 +110,116 @@ export const AI_REVIEW_TOKENS: Omit<AiReviewResult['usage'], 'costUsd'> = {
   cacheWriteTokens: 0,
 }
 
+/** The tokens of each preview follow-up answer, priced by the served model. */
+export const AI_FOLLOW_UP_TOKENS: Omit<AiReviewResult['usage'], 'costUsd'> = {
+  inputTokens: 3_120,
+  outputTokens: 236,
+  cacheReadTokens: 2_480,
+  cacheWriteTokens: 0,
+}
+
+/** The preview answer to any follow-up question, streamed in small pieces. */
+export const AI_FOLLOW_UP_ANSWER = `No. For **n ≤ 10^6** the largest product is 9^6 = 531441 (from \`999999\`), and even the worst \`int\`, \`1999999999\`, only reaches 9^9 = 387420489, below \`Integer.MAX_VALUE\`.
+
+- The digit sum is at most 54, so \`sum + product\` fits as well.
+- Reading the digits arithmetically also skips the string:
+
+\`\`\`java
+for (int x = n; x > 0; x /= 10) product *= x % 10;
+\`\`\``
+
+/** Asks for a code change, in either supported answer language. */
+export const AI_EDIT_REQUEST = /수정|개선|고쳐|바꿔|리팩터|\b(?:fix|improve|refactor|change|rewrite)\b/i
+
+/** The preview answer to a question that asks for a change, streamed before the change. */
+export const AI_FOLLOW_UP_EDIT_ANSWER = 'I will read the digits with `% 10` and `/ 10` instead of building a string first.'
+
+const FALLBACK_PROPOSAL_SUMMARY = 'Separate the method with a blank line and use a pre-increment.'
+
+/**
+ * The preview change to the editor's code. A loop over the characters of
+ * `Integer.toString(n)` becomes the arithmetic digit loop. Other code gets a
+ * comment above the first block that opens after a parameter list and the first
+ * `i++` as `++i`, or a comment at the end, so there is always something to accept.
+ */
+export function mockProposal(code: string): { summary: string; code: string } {
+  const digits = readDigitsArithmetically(code)
+  if (digits !== null) {
+    return { summary: 'Read the digits with % 10 and / 10 instead of through Integer.toString.', code: digits }
+  }
+  const lines = code.split('\n')
+  const opener = lines.findIndex((line) => /\)\s*\{\s*$/.test(line))
+  if (opener >= 0) {
+    lines.splice(opener, 0, '')
+    return { summary: FALLBACK_PROPOSAL_SUMMARY, code: lines.join('\n').replace('i++', '++i') }
+  }
+  return { summary: FALLBACK_PROPOSAL_SUMMARY, code: `${code}\n` }
+}
+
+/** Rewrites `String s = Integer.toString(n)` and its index loop over `s.charAt(i) - '0'`, or returns null. */
+function readDigitsArithmetically(code: string): string | null {
+  const declaration = /^[ \t]*String (\w+) = Integer\.toString\((\w+)\);\r?\n/m.exec(code)
+  if (!declaration) {
+    return null
+  }
+  const [line, text, number] = declaration
+  const loop = new RegExp(`for \\(int (\\w+) = 0; \\1 < ${text}\\.length\\(\\); (?:\\1\\+\\+|\\+\\+\\1)\\)`)
+  const header = loop.exec(code)
+  if (!header) {
+    return null
+  }
+  const index = header[1]
+  const digit = new RegExp(`${text}\\.charAt\\(${index}\\) - '0'`, 'g')
+  if (code.search(digit) < 0) {
+    return null
+  }
+  return code
+    .replace(line, '')
+    .replace(header[0], `for (int x = ${number}; x > 0; x /= 10)`)
+    .replace(digit, 'x % 10')
+}
+
 /** The preview review of code whose tests passed, or that was sent without a run. */
 export const AI_REVIEW: AiReview = {
-  verdict: 'unsure',
-  summary: 'The approach is right, but the result depends on map lookups that the tests only partly cover.',
+  verdict: 'correct',
+  summary: 'The loop collects the digit sum and product, and the check divides n by their total.',
   failureCause: null,
-  issues: [
-    'The complement is looked up after the current value is stored, so a value that is half of the target can match itself.',
-  ],
+  issues: [],
   missedCases: [
-    { input: 'nums = [3,2,4], target = 6', reason: 'Index 0 pairs with itself because 3 + 3 = 6.' },
-    { input: 'nums = [3,3], target = 6', reason: 'Duplicate values share one map entry.' },
+    { input: 'n = 109', reason: 'A zero digit in the middle makes the product 0, so only the digit sum divides n.' },
   ],
   efficiency: {
-    time: 'O(n)',
-    space: 'O(n)',
-    assessment: 'One pass over at most 10^4 numbers fits the limits easily.',
+    time: 'O(d)',
+    space: 'O(d)',
+    assessment: 'd is the number of digits, at most 7 for n ≤ 10^6; the string copy is the only extra space.',
   },
-  improvements: ['Look up the complement before storing the current value.'],
+  improvements: ['Read the digits with n % 10 and n / 10 instead of Integer.toString, which drops the space to O(1).'],
 }
 
 /** The preview review of code whose last run failed. */
 export const AI_FAILING_REVIEW: AiReview = {
   ...AI_REVIEW,
   verdict: 'incorrect',
-  summary: 'The failing test catches a real bug: an element can be paired with itself.',
+  summary: 'The failing test catches a real bug: the product never leaves 0.',
   failureCause:
-    'For nums = [3,2,4] and target = 6, the value 3 is stored before its complement is checked, so the method returns [0, 0] instead of [1, 2].',
+    'With product starting at 0 instead of 1, n = 99 is checked against 18 + 0 = 18, and 99 % 18 = 9, so the method returns false instead of true.',
+  issues: ['The product starts at 0, so multiplying the digits into it always gives 0.'],
+}
+
+/** The preview help for a solution that is still unimplemented. */
+export const AI_PROBLEM_HELP: AiProblemHelp = {
+  overview:
+    'Given a positive integer n, add up its digits and multiply them together, then return whether n is divisible by the sum of those two results. In the first example, 99 has digit sum 18 and digit product 81, and 99 % 99 = 0.',
+  keyPoints: [
+    'n is at most 10^6, so it has at most 7 digits and any per-digit work is cheap.',
+    'A zero digit makes the product 0, so only the digit sum is left in the divisor.',
+    'The divisor is never 0, because n is positive and has at least one nonzero digit.',
+  ],
+  hints: [
+    'You only need two running values while you look at each digit once.',
+    'What should each value start at so that the first digit does not change it?',
+    'n % 10 gives the last digit and n / 10 drops it; repeat on a copy until it reaches 0.',
+  ],
 }
 
 export function seedAiUsage(now: number): AiUsageEntry[] {

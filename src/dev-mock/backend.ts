@@ -1,10 +1,13 @@
 import type {
+  AiStreamEvent,
   AiGenerateRequest,
   AiGenerateResult,
   AiKeySaveResult,
   AiModelList,
   AiModel,
   AiProgressHandler,
+  AiReviewFollowUpRequest,
+  AiReviewFollowUpResult,
   AiReviewRequest,
   AiReviewResult,
   AiStatus,
@@ -27,9 +30,14 @@ import type {
 import type { ProblemFilePlan } from '../domain'
 import {
   AI_DEFAULT_MODEL_ID,
+  AI_EDIT_REQUEST,
   AI_FAILING_REVIEW,
+  AI_FOLLOW_UP_ANSWER,
+  AI_FOLLOW_UP_EDIT_ANSWER,
+  AI_FOLLOW_UP_TOKENS,
   AI_GENERATION_USAGE,
   AI_MODELS,
+  AI_PROBLEM_HELP,
   AI_REVIEW,
   AI_REVIEW_TOKENS,
   AI_STATEMENTS,
@@ -37,6 +45,7 @@ import {
   MANUAL_PROBLEM,
   MODIFIED_DIFF,
   addedDiffFor,
+  mockProposal,
   seedAiUsage,
   seedFiles,
   type AiUsageEntry,
@@ -325,6 +334,7 @@ type MockAi = Pick<
   | 'aiListModels'
   | 'aiGenerateTests'
   | 'reviewAiCode'
+  | 'askAiReviewFollowUp'
   | 'aiUsage'
 >
 
@@ -373,7 +383,8 @@ function createMockAi(): MockAi {
         throw new Error('No API key is configured.')
       }
       const { servedModel, fellBack } = mockServedModel(request.selectedModelId)
-      await mockAiRequest(servedModel, 900, onProgress)
+      // Long enough to switch files and back while the test region is locked.
+      await mockAiRequest(servedModel, 3_500, onProgress)
       usage.push({ ...AI_GENERATION_USAGE, ts: Date.now(), model: servedModel })
       return { outcome: 'ok', statements: mockAiStatements(request), servedModel, fellBack }
     },
@@ -381,6 +392,7 @@ function createMockAi(): MockAi {
     async reviewAiCode(
       request: AiReviewRequest,
       onProgress?: AiProgressHandler,
+      onEvent?: (event: AiStreamEvent) => void,
     ): Promise<AiReviewResult> {
       if (!configured) {
         throw new Error('No API key is configured.')
@@ -389,17 +401,75 @@ function createMockAi(): MockAi {
         throw new Error('The solution file is empty.')
       }
       const { servedModel, fellBack } = mockServedModel(request.selectedModelId)
-      await mockAiRequest(servedModel, 1_800, onProgress)
+      const help = request.mode === 'help'
+      const failed = !help && request.testRun !== null && !request.testRun.success
+      const review = help ? null : failed ? AI_FAILING_REVIEW : AI_REVIEW
+      await delay(100)
+      onProgress?.({ stage: 'requesting', model: servedModel })
+      await delay(400)
+      onEvent?.(mockStreamUsage(AI_REVIEW_TOKENS, false))
+      // A thinking pause, then the answer's JSON in small pieces over about 2.5 seconds.
+      onEvent?.({ kind: 'thinking', chars: 0 })
+      for (let step = 0; step < 6; step += 1) {
+        await delay(250)
+        onEvent?.({ kind: 'thinking', chars: 40 })
+      }
+      const pieces = JSON.stringify(review ?? AI_PROBLEM_HELP).match(/[\s\S]{1,16}/g) ?? []
+      for (const piece of pieces) {
+        onEvent?.({ kind: 'text', text: piece })
+        await delay(Math.round(2_500 / pieces.length))
+      }
+      onEvent?.(mockStreamUsage(AI_REVIEW_TOKENS, true))
+      onProgress?.({ stage: 'received' })
+      await delay(100)
       const requestUsage = mockRequestUsage(servedModel, AI_REVIEW_TOKENS)
       usage.push({ ...requestUsage, approximate: false, refused: false, ts: Date.now(), model: servedModel })
-      const failed = request.testRun !== null && !request.testRun.success
       return {
         outcome: 'ok',
-        review: failed ? AI_FAILING_REVIEW : AI_REVIEW,
+        review,
+        help: help ? AI_PROBLEM_HELP : null,
         servedModel,
         fellBack,
         usage: requestUsage,
       }
+    },
+
+    async askAiReviewFollowUp(
+      request: AiReviewFollowUpRequest,
+      onEvent?: (event: AiStreamEvent) => void,
+    ): Promise<AiReviewFollowUpResult> {
+      if (!configured) {
+        throw new Error('No API key is configured.')
+      }
+      if (request.question.trim() === '') {
+        throw new Error('The question is empty.')
+      }
+      const help = request.review.mode === 'help'
+      if ((help ? request.helpAnswer : request.reviewAnswer) === null
+        || (help ? request.reviewAnswer : request.helpAnswer) !== null) {
+        throw new Error('The follow-up answer does not match the request mode.')
+      }
+      const { servedModel, fellBack } = mockServedModel(request.selectedModelId)
+      const editing = AI_EDIT_REQUEST.test(request.question)
+      const answer = editing ? AI_FOLLOW_UP_EDIT_ANSWER : AI_FOLLOW_UP_ANSWER
+      await delay(300)
+      onEvent?.(mockStreamUsage(AI_FOLLOW_UP_TOKENS, false))
+      // About 1.5 seconds of small pieces, as a streamed answer arrives.
+      const pieces = answer.match(/[\s\S]{1,12}/g) ?? []
+      for (const piece of pieces) {
+        onEvent?.({ kind: 'text', text: piece })
+        await delay(Math.round(1_500 / pieces.length))
+      }
+      if (editing) {
+        // The change arrives whole after a moment, as a tool call's input does.
+        onEvent?.({ kind: 'proposal-started' })
+        await delay(1_200)
+      }
+      onEvent?.(mockStreamUsage(AI_FOLLOW_UP_TOKENS, true))
+      const requestUsage = mockRequestUsage(servedModel, AI_FOLLOW_UP_TOKENS)
+      usage.push({ ...requestUsage, approximate: false, refused: false, ts: Date.now(), model: servedModel })
+      const proposal = editing ? { ...mockProposal(request.currentCode), baseCode: request.currentCode } : null
+      return { outcome: 'ok', answer, proposal, servedModel, fellBack, usage: requestUsage }
     },
 
     async aiUsage(bucketStartsMs: number[]): Promise<AiUsageSummary> {
@@ -441,6 +511,14 @@ async function mockAiRequest(
   await delay(totalMs - 200)
   onProgress?.({ stage: 'received' })
   await delay(100)
+}
+
+/**
+ * The counts a stream reports: the message start carries the input and cache
+ * counts with a token of output, and the end carries the final counts.
+ */
+function mockStreamUsage(tokens: Omit<AiRequestUsage, 'costUsd'>, final: boolean): AiStreamEvent {
+  return { kind: 'usage', usage: { ...tokens, outputTokens: final ? tokens.outputTokens : 1 }, final }
 }
 
 /** Prices tokens as the native ledger does: a used token class without a price leaves the cost unknown. */

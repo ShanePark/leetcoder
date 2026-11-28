@@ -10,12 +10,15 @@ use std::time::Duration;
 
 use super::key_store::ApiKey;
 use super::prices::PriceCache;
+use super::stream::{MessageStream, SseParser, StreamUpdate, ToolUse};
 use super::{
-    now_ms, prompt, write_cache_file, AiGenerateRequest, AiModel, AiReview, AiReviewRequest, DAY_MS,
+    now_ms, prompt, write_cache_file, AiGenerateRequest, AiModel, AiProblemHelp, AiReview,
+    AiReviewFollowUpRequest, AiReviewMode, AiReviewRequest, DAY_MS,
 };
 
 const API_VERSION: &str = "2026-10-21";
 const MAX_OUTPUT_TOKENS: u32 = 16000;
+const MAX_FOLLOW_UP_TOKENS: u32 = 8000;
 pub(super) const MESSAGE_TIMEOUT: Duration = Duration::from_secs(300);
 const MODELS_TIMEOUT: Duration = Duration::from_secs(30);
 const MODELS_PAGE_SIZE: &str = "1000";
@@ -40,6 +43,10 @@ pub(super) enum ApiError {
     },
     InvalidKey,
     Malformed,
+    /// An `error` event ended a stream after a 2xx.
+    StreamFailed {
+        error_type: Option<String>,
+    },
 }
 
 impl fmt::Display for ApiError {
@@ -56,6 +63,15 @@ impl fmt::Display for ApiError {
             ),
             Self::InvalidKey => formatter.write_str("The API key contains invalid characters."),
             Self::Malformed => formatter.write_str("The AI provider sent an unreadable response."),
+            Self::StreamFailed {
+                error_type: Some(error_type),
+            } => write!(
+                formatter,
+                "The AI provider stopped with an error ({error_type})."
+            ),
+            Self::StreamFailed { error_type: None } => {
+                formatter.write_str("The AI provider stopped with an error.")
+            }
             Self::Status { status, error_type } => {
                 let summary = match status {
                     300..=399 => "The AI provider sent an unexpected redirect",
@@ -132,7 +148,11 @@ pub(super) async fn read_capped(response: &mut Response, cap: usize) -> Result<V
 
 fn parse_error_type(body: &[u8]) -> Option<String> {
     let document: Value = serde_json::from_slice(body).ok()?;
-    let error_type = document.pointer("/error/type")?.as_str()?;
+    error_identifier(document.pointer("/error/type")?.as_str()?)
+}
+
+/// Only a short identifier from the provider is safe to show.
+pub(super) fn error_identifier(error_type: &str) -> Option<String> {
     let is_identifier = error_type.len() <= MAX_ERROR_TYPE_CHARS
         && !error_type.is_empty()
         && error_type.chars().all(|character| {
@@ -142,11 +162,15 @@ fn parse_error_type(body: &[u8]) -> Option<String> {
 }
 
 async fn read_success(mut response: Response) -> Result<Value, ApiError> {
-    let status = response.status();
-    if status.is_success() {
+    if response.status().is_success() {
         let body = read_capped(&mut response, MAX_RESPONSE_BYTES).await?;
         return serde_json::from_slice(&body).map_err(|_| ApiError::Malformed);
     }
+    Err(status_error(response).await)
+}
+
+async fn status_error(mut response: Response) -> ApiError {
+    let status = response.status();
     let error_type = if status.is_redirection() {
         None
     } else {
@@ -155,10 +179,10 @@ async fn read_success(mut response: Response) -> Result<Value, ApiError> {
             .ok()
             .and_then(|body| parse_error_type(&body))
     };
-    Err(ApiError::Status {
+    ApiError::Status {
         status: status.as_u16(),
         error_type,
-    })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -493,15 +517,91 @@ pub(super) fn request_body(model_id: &str, effort_low: bool, request: &AiGenerat
     )
 }
 
-/// A review judges correctness, so it keeps the model's default effort.
+/// A review judges correctness, so it keeps the model's default effort, and
+/// help does the same. Both stream, so the panel can show them as they are
+/// written. The JSON is still read only once the stream ends. Each mode has its
+/// own system prompt and schema, so each keeps its own cached prefix.
 pub(super) fn review_request_body(model_id: &str, request: &AiReviewRequest) -> Value {
-    message_body(
-        model_id,
-        false,
-        prompt::REVIEW_SYSTEM_PROMPT,
-        prompt::review_user_message(request),
-        prompt::review_output_schema(),
-    )
+    let (system, user, schema) = match request.mode {
+        AiReviewMode::Review => (
+            prompt::REVIEW_SYSTEM_PROMPT,
+            prompt::review_user_message(request),
+            prompt::review_output_schema(),
+        ),
+        AiReviewMode::Help => (
+            prompt::HELP_SYSTEM_PROMPT,
+            prompt::help_user_message(request),
+            prompt::help_output_schema(),
+        ),
+    };
+    let mut body = message_body(model_id, false, system, user, schema);
+    body["stream"] = json!(true);
+    body
+}
+
+/// The second breakpoint ends the review or help context, which stays the same
+/// for every question about one answer. The conversation after it changes each
+/// time, and the editor's code joins only its latest question. The tool list
+/// renders before the system prompt, so it is part of the cached prefix. The
+/// request was checked first, so the answer its mode needs is present.
+pub(super) fn follow_up_request_body(model_id: &str, request: &AiReviewFollowUpRequest) -> Value {
+    let language = request.review.language;
+    let mode = request.review.mode;
+    let (system, context, answer) = match mode {
+        AiReviewMode::Review => (
+            prompt::FOLLOW_UP_SYSTEM_PROMPT,
+            prompt::review_user_message(&request.review),
+            serde_json::to_string(&request.review_answer),
+        ),
+        AiReviewMode::Help => (
+            prompt::HELP_FOLLOW_UP_SYSTEM_PROMPT,
+            prompt::help_user_message(&request.review),
+            serde_json::to_string(&request.help_answer),
+        ),
+    };
+    let mut messages = vec![
+        json!({
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": context,
+                "cache_control": { "type": "ephemeral" },
+            }],
+        }),
+        json!({
+            "role": "assistant",
+            "content": answer.unwrap_or_default(),
+        }),
+    ];
+    for turn in &request.history {
+        messages.push(json!({
+            "role": "user",
+            "content": prompt::follow_up_question(&turn.question, language, mode, None),
+        }));
+        messages.push(json!({
+            "role": "assistant",
+            "content": prompt::follow_up_answer(&turn.answer, turn.proposal.as_ref()),
+        }));
+    }
+    let current_code = Some(request.current_code.as_str())
+        .filter(|code| code.trim_end() != request.review.source.trim_end());
+    messages.push(json!({
+        "role": "user",
+        "content": prompt::follow_up_question(&request.question, language, mode, current_code),
+    }));
+    json!({
+        "model": model_id,
+        "max_tokens": MAX_FOLLOW_UP_TOKENS,
+        "stream": true,
+        "tools": prompt::follow_up_tools(),
+        "tool_choice": { "type": "auto", "disable_parallel_tool_use": true },
+        "system": [{
+            "type": "text",
+            "text": system,
+            "cache_control": { "type": "ephemeral" },
+        }],
+        "messages": messages,
+    })
 }
 
 fn parse_usage(usage: Option<&Value>) -> MessageUsage {
@@ -550,6 +650,10 @@ pub(super) fn parse_statements(document: &Value) -> Option<Vec<String>> {
 
 pub(super) fn parse_review(document: &Value) -> Option<AiReview> {
     AiReview::deserialize(document).ok()
+}
+
+pub(super) fn parse_help(document: &Value) -> Option<AiProblemHelp> {
+    AiProblemHelp::deserialize(document).ok()
 }
 
 /// `stop_reason` decides before any content is read: a refused or cut-off reply
@@ -637,4 +741,122 @@ pub(super) async fn send_message_within<T>(
         Err(error) if succeeded => Ok(unreadable_reply(model_id, generation_error(error))),
         Err(error) => Err(error),
     }
+}
+
+/// A streamed reply, the text it spelled out, and its tool call, complete or not.
+#[derive(Debug, PartialEq)]
+pub(super) struct StreamedReply {
+    pub reply: MessageReply<()>,
+    pub text: String,
+    pub tool_use: Option<ToolUse>,
+}
+
+/// Reads the JSON document a finished stream's text spells out, as
+/// `parse_reply` reads a whole reply: only a stream that ended normally is
+/// parsed, and text that does not parse is invalid.
+pub(super) fn streamed_document<T>(
+    reply: MessageReply<()>,
+    text: &str,
+    parse: fn(&Value) -> Option<T>,
+) -> MessageReply<T> {
+    let outcome = match reply.outcome {
+        ReplyOutcome::Parsed(()) => serde_json::from_str::<Value>(text)
+            .ok()
+            .as_ref()
+            .and_then(parse)
+            .map_or(ReplyOutcome::Invalid, ReplyOutcome::Parsed),
+        ReplyOutcome::Refused => ReplyOutcome::Refused,
+        ReplyOutcome::Truncated => ReplyOutcome::Truncated,
+        ReplyOutcome::Unreadable(error) => ReplyOutcome::Unreadable(error),
+        ReplyOutcome::Invalid => ReplyOutcome::Invalid,
+    };
+    MessageReply {
+        model: reply.model,
+        usage: reply.usage,
+        stop_category: reply.stop_category,
+        outcome,
+    }
+}
+
+fn stream_outcome(stop_reason: Option<&str>, called_tool: bool) -> ReplyOutcome<()> {
+    match stop_reason {
+        Some("end_turn") => ReplyOutcome::Parsed(()),
+        Some("tool_use") if called_tool => ReplyOutcome::Parsed(()),
+        Some("refusal") => ReplyOutcome::Refused,
+        Some("max_tokens" | "model_context_window_exceeded") => ReplyOutcome::Truncated,
+        _ => ReplyOutcome::Invalid,
+    }
+}
+
+async fn read_stream(
+    response: &mut Response,
+    stream: &mut MessageStream,
+    on_update: &(dyn Fn(StreamUpdate<'_>) + Sync),
+) -> Result<(), ApiError> {
+    let mut parser = SseParser::default();
+    let mut events = Vec::new();
+    let mut received = 0;
+    while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+        received += chunk.len();
+        if received > MAX_RESPONSE_BYTES {
+            return Err(ApiError::Malformed);
+        }
+        parser.push(&chunk, &mut events)?;
+        for event in events.drain(..) {
+            stream.apply(&event, on_update)?;
+        }
+        if stream.stopped {
+            return Ok(());
+        }
+    }
+    // A stream that ends before `message_stop` was cut off.
+    Err(ApiError::Malformed)
+}
+
+pub(super) async fn stream_message(
+    base_url: &str,
+    key: &ApiKey,
+    model_id: &str,
+    body: &Value,
+    on_update: &(dyn Fn(StreamUpdate<'_>) + Sync),
+) -> Result<StreamedReply, ApiError> {
+    stream_message_within(base_url, key, model_id, body, on_update, MESSAGE_TIMEOUT).await
+}
+
+/// `timeout` bounds the whole call, including the stream, so a stalled stream
+/// ends. As with `send_message_within`, anything that goes wrong after a 2xx
+/// comes back as a reply for the ledger, with the usage read so far.
+pub(super) async fn stream_message_within(
+    base_url: &str,
+    key: &ApiKey,
+    model_id: &str,
+    body: &Value,
+    on_update: &(dyn Fn(StreamUpdate<'_>) + Sync),
+    timeout: Duration,
+) -> Result<StreamedReply, ApiError> {
+    let client = key_client()?;
+    let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
+    let mut response = authorized(client.post(url).timeout(timeout), key)?
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| generation_error(network_error(error)))?;
+    if !response.status().is_success() {
+        return Err(status_error(response).await);
+    }
+    let mut stream = MessageStream::default();
+    let outcome = match read_stream(&mut response, &mut stream, on_update).await {
+        Ok(()) => stream_outcome(stream.stop_reason.as_deref(), stream.tool_use.is_some()),
+        Err(error) => ReplyOutcome::Unreadable(generation_error(error)),
+    };
+    Ok(StreamedReply {
+        reply: MessageReply {
+            model: stream.model.unwrap_or_else(|| model_id.to_string()),
+            usage: stream.usage,
+            stop_category: stream.stop_category,
+            outcome,
+        },
+        text: stream.text,
+        tool_use: stream.tool_use,
+    })
 }

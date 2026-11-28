@@ -1,30 +1,23 @@
 import {
   BOTTOM_PANEL_HEIGHT_KEY,
   clampBottomPanelHeight,
-  clampDailyDescriptionHeight,
   clampGitFileListWidth,
   clampSidebarWidth,
-  DAILY_DESCRIPTION_HEIGHT_KEY,
-  DAILY_DESCRIPTION_LAYOUT_OVERHEAD,
   GIT_FILE_LIST_WIDTH_KEY,
   maxBottomPanelHeight,
-  maxDailyDescriptionHeight,
   maxGitFileListWidth,
   maxSidebarWidth,
   MIN_BOTTOM_PANEL_HEIGHT,
-  MIN_CODE_CARD_HEIGHT,
-  MIN_DAILY_DESCRIPTION_HEIGHT,
   MIN_GIT_FILE_LIST_WIDTH,
   MIN_SIDEBAR_WIDTH,
   readBottomPanelHeight,
-  readDailyDescriptionHeight,
   readGitFileListWidth,
   readSidebarCollapsed,
   readSidebarWidth,
   SIDEBAR_COLLAPSED_KEY,
   SIDEBAR_WIDTH_KEY,
-  windowHeight,
 } from './layout'
+import { TestSplitLayout } from './test-split-layout'
 
 export interface PaneLayoutControllerOptions {
   storage?: Storage
@@ -52,9 +45,7 @@ export class PaneLayoutController {
   private sidebarCollapsedState: boolean
   private sidebarSplitterStartX: number | null = null
   private sidebarSplitterStartWidth: number | null = null
-  private dailyDescriptionHeight: number
-  private dailyDescriptionResizeStartY: number | null = null
-  private dailyDescriptionResizeStartHeight: number | null = null
+  private readonly testSplit: TestSplitLayout
   private destroyed = false
 
   private readonly handlePanelPointerMove = (event: PointerEvent): void => {
@@ -69,7 +60,6 @@ export class PaneLayoutController {
     }
     this.bottomPanelHeight = nextHeight
     this.applyBottomPanelHeight()
-    this.applyDailyDescriptionHeight()
   }
 
   private readonly handlePanelPointerUp = (): void => {
@@ -86,7 +76,7 @@ export class PaneLayoutController {
     this.handlePanelPointerUp()
     this.handleGitSplitterPointerUp()
     this.handleSidebarSplitterPointerUp()
-    this.handleDailyDescriptionResizePointerUp()
+    this.testSplit.endDrag()
   }
 
   private readonly handleWindowResize = (): void => {
@@ -173,49 +163,6 @@ export class PaneLayoutController {
     this.storage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth))
   }
 
-  private readonly handleDailyDescriptionResizePointerMove = (event: PointerEvent): void => {
-    if (this.dailyDescriptionResizeStartY === null || this.dailyDescriptionResizeStartHeight === null) {
-      return
-    }
-    const nextHeight = clampDailyDescriptionHeight(
-      this.dailyDescriptionResizeStartHeight + event.clientY - this.dailyDescriptionResizeStartY,
-      this.dailyDescriptionWorkspaceHeight(),
-    )
-    if (nextHeight === this.dailyDescriptionHeight) {
-      return
-    }
-    this.dailyDescriptionHeight = nextHeight
-    this.applyDailyDescriptionHeight()
-  }
-
-  private readonly handleDailyDescriptionResizePointerUp = (): void => {
-    if (this.dailyDescriptionResizeStartY === null) {
-      return
-    }
-    this.dailyDescriptionResizeStartY = null
-    this.dailyDescriptionResizeStartHeight = null
-    this.root.classList.remove('is-resizing-description')
-    this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
-  }
-
-  private readonly handleDailyDescriptionResizeKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown' && event.key !== 'Home' && event.key !== 'End') {
-      return
-    }
-    event.preventDefault()
-    const nextHeight = event.key === 'Home'
-      ? MIN_DAILY_DESCRIPTION_HEIGHT
-      : event.key === 'End'
-        ? maxDailyDescriptionHeight(this.dailyDescriptionWorkspaceHeight())
-        : this.dailyDescriptionHeight + (event.key === 'ArrowDown' ? 16 : -16)
-    this.dailyDescriptionHeight = clampDailyDescriptionHeight(
-      nextHeight,
-      this.dailyDescriptionWorkspaceHeight(),
-    )
-    this.applyDailyDescriptionHeight()
-    this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
-  }
-
   private readonly handlePanelKeydown = (event: KeyboardEvent): void => {
     const step = event.shiftKey ? 40 : 16
     if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown' && event.key !== 'Home' && event.key !== 'End') {
@@ -229,7 +176,6 @@ export class PaneLayoutController {
         : this.bottomPanelHeight + (event.key === 'ArrowUp' ? step : -step)
     this.bottomPanelHeight = clampBottomPanelHeight(nextHeight)
     this.applyBottomPanelHeight()
-    this.applyDailyDescriptionHeight()
     this.storage?.setItem(BOTTOM_PANEL_HEIGHT_KEY, String(this.bottomPanelHeight))
   }
 
@@ -241,7 +187,7 @@ export class PaneLayoutController {
     this.gitFileListWidth = readGitFileListWidth(this.storage)
     this.sidebarWidth = readSidebarWidth(this.storage)
     this.sidebarCollapsedState = readSidebarCollapsed(this.storage)
-    this.dailyDescriptionHeight = readDailyDescriptionHeight(this.storage)
+    this.testSplit = new TestSplitLayout(root, this.storage, this.window)
     this.bindEvents()
   }
 
@@ -251,6 +197,10 @@ export class PaneLayoutController {
 
   get gitFileListWidthValue(): number {
     return this.gitFileListWidth
+  }
+
+  get testListWidthValue(): number {
+    return this.testSplit.value
   }
 
   get sidebarWidthValue(): number {
@@ -272,16 +222,12 @@ export class PaneLayoutController {
     this.storage?.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? 'collapsed' : 'expanded')
   }
 
-  get dailyDescriptionHeightValue(): number {
-    return this.dailyDescriptionHeight
-  }
-
   /** Apply the current dimensions after a shell or panel render. */
   apply(): void {
     this.applyBottomPanelHeight()
     this.applySidebarWidth()
-    this.applyDailyDescriptionHeight()
     this.applyGitFileListWidth()
+    this.applyTestListWidth()
   }
 
   /** Reclamp dimensions against the current viewport and measurable panes. */
@@ -306,16 +252,7 @@ export class PaneLayoutController {
       this.storage?.setItem(SIDEBAR_WIDTH_KEY, String(this.sidebarWidth))
     }
     this.applySidebarWidth()
-
-    const nextDescriptionHeight = clampDailyDescriptionHeight(
-      this.dailyDescriptionHeight,
-      this.dailyDescriptionWorkspaceHeight(),
-    )
-    if (nextDescriptionHeight !== this.dailyDescriptionHeight) {
-      this.dailyDescriptionHeight = nextDescriptionHeight
-      this.storage?.setItem(DAILY_DESCRIPTION_HEIGHT_KEY, String(this.dailyDescriptionHeight))
-    }
-    this.applyDailyDescriptionHeight()
+    this.testSplit.refresh()
   }
 
   /** Apply only the bottom panel height after a render or a panel drag. */
@@ -338,6 +275,11 @@ export class PaneLayoutController {
     splitter?.setAttribute('aria-valuemax', String(maxGitFileListWidth(this.gitWorkspaceWidth())))
   }
 
+  /** Apply only the test list width after a results render or a tab switch. */
+  applyTestListWidth(): void {
+    this.testSplit.apply()
+  }
+
   /** Apply only the problem-files pane width. */
   applySidebarWidth(): void {
     const width = clampSidebarWidth(this.sidebarWidth, this.sidebarWorkspaceWidth())
@@ -352,21 +294,6 @@ export class PaneLayoutController {
     const sidebar = this.query<HTMLElement>('.sidebar')
     if (sidebar) sidebar.hidden = collapsed
     if (splitter) splitter.hidden = collapsed
-    this.query<HTMLElement>('#sidebar-toggle')?.setAttribute('aria-pressed', String(!collapsed))
-  }
-
-  /** Apply only the daily-problem description height. */
-  applyDailyDescriptionHeight(): void {
-    const height = clampDailyDescriptionHeight(
-      this.dailyDescriptionHeight,
-      this.dailyDescriptionWorkspaceHeight(),
-    )
-    this.dailyDescriptionHeight = height
-    const description = this.query<HTMLElement>('#daily-description')
-    description?.style.setProperty('--daily-description-height', `${height}px`)
-    const handle = this.query<HTMLElement>('#daily-description-resize-handle')
-    handle?.setAttribute('aria-valuenow', String(height))
-    handle?.setAttribute('aria-valuemax', String(maxDailyDescriptionHeight(this.dailyDescriptionWorkspaceHeight())))
   }
 
   destroy(): void {
@@ -375,12 +302,10 @@ export class PaneLayoutController {
     }
     this.destroyed = true
     this.handleWindowBlur()
+    this.testSplit.destroy()
     this.removeElementEvent('#sidebar-splitter', 'pointerdown', this.handleSidebarSplitterPointerDown)
     this.removeElementEvent('#sidebar-splitter', 'keydown', this.handleSidebarSplitterKeydown)
     this.removeElementEvent('#sidebar-splitter', 'lostpointercapture', this.handleSidebarSplitterPointerUp)
-    this.removeElementEvent('#daily-description-resize-handle', 'pointerdown', this.handleDailyDescriptionResizePointerDown)
-    this.removeElementEvent('#daily-description-resize-handle', 'keydown', this.handleDailyDescriptionResizeKeydown)
-    this.removeElementEvent('#daily-description-resize-handle', 'lostpointercapture', this.handleDailyDescriptionResizePointerUp)
     this.removeElementEvent('#git-splitter', 'pointerdown', this.handleGitSplitterPointerDown)
     this.removeElementEvent('#git-splitter', 'keydown', this.handleGitSplitterKeydown)
     this.removeElementEvent('#git-splitter', 'lostpointercapture', this.handleGitSplitterPointerUp)
@@ -399,9 +324,6 @@ export class PaneLayoutController {
     this.window.removeEventListener('pointermove', this.handleSidebarSplitterPointerMove)
     this.window.removeEventListener('pointerup', this.handleSidebarSplitterPointerUp)
     this.window.removeEventListener('pointercancel', this.handleSidebarSplitterPointerUp)
-    this.window.removeEventListener('pointermove', this.handleDailyDescriptionResizePointerMove)
-    this.window.removeEventListener('pointerup', this.handleDailyDescriptionResizePointerUp)
-    this.window.removeEventListener('pointercancel', this.handleDailyDescriptionResizePointerUp)
     this.window.removeEventListener('blur', this.handleWindowBlur)
     this.window.removeEventListener('resize', this.handleWindowResize)
   }
@@ -410,9 +332,6 @@ export class PaneLayoutController {
     this.addElementEvent('#sidebar-splitter', 'pointerdown', this.handleSidebarSplitterPointerDown)
     this.addElementEvent('#sidebar-splitter', 'keydown', this.handleSidebarSplitterKeydown)
     this.addElementEvent('#sidebar-splitter', 'lostpointercapture', this.handleSidebarSplitterPointerUp)
-    this.addElementEvent('#daily-description-resize-handle', 'pointerdown', this.handleDailyDescriptionResizePointerDown)
-    this.addElementEvent('#daily-description-resize-handle', 'keydown', this.handleDailyDescriptionResizeKeydown)
-    this.addElementEvent('#daily-description-resize-handle', 'lostpointercapture', this.handleDailyDescriptionResizePointerUp)
     this.addElementEvent('#git-splitter', 'pointerdown', this.handleGitSplitterPointerDown)
     this.addElementEvent('#git-splitter', 'keydown', this.handleGitSplitterKeydown)
     this.addElementEvent('#git-splitter', 'lostpointercapture', this.handleGitSplitterPointerUp)
@@ -431,9 +350,6 @@ export class PaneLayoutController {
     this.window.addEventListener('pointermove', this.handleSidebarSplitterPointerMove)
     this.window.addEventListener('pointerup', this.handleSidebarSplitterPointerUp)
     this.window.addEventListener('pointercancel', this.handleSidebarSplitterPointerUp)
-    this.window.addEventListener('pointermove', this.handleDailyDescriptionResizePointerMove)
-    this.window.addEventListener('pointerup', this.handleDailyDescriptionResizePointerUp)
-    this.window.addEventListener('pointercancel', this.handleDailyDescriptionResizePointerUp)
     this.window.addEventListener('blur', this.handleWindowBlur)
     this.window.addEventListener('resize', this.handleWindowResize)
   }
@@ -471,18 +387,6 @@ export class PaneLayoutController {
     this.query<HTMLElement>('#sidebar-splitter')?.setPointerCapture?.(event.pointerId)
   }
 
-  private readonly handleDailyDescriptionResizePointerDown = (event: PointerEvent): void => {
-    const handle = this.query<HTMLElement>('#daily-description-resize-handle')
-    if (event.button !== 0 || handle?.hidden) {
-      return
-    }
-    event.preventDefault()
-    this.dailyDescriptionResizeStartY = event.clientY
-    this.dailyDescriptionResizeStartHeight = this.dailyDescriptionHeight
-    this.root.classList.add('is-resizing-description')
-    handle?.setPointerCapture?.(event.pointerId)
-  }
-
   private gitWorkspaceWidth(): number {
     const workspace = this.query<HTMLElement>('.git-workspace')
     return workspace && workspace.clientWidth > 0 ? workspace.clientWidth : 900
@@ -497,19 +401,6 @@ export class PaneLayoutController {
       return this.window.innerWidth
     }
     return 1000
-  }
-
-  private dailyDescriptionWorkspaceHeight(): number {
-    const column = this.query<HTMLElement>('.editor-column')
-    if (column && column.clientHeight > 0) {
-      return column.clientHeight
-    }
-    // jsdom and the initial hidden webview do not expose layout metrics. The
-    // workspace is the viewport minus the app header and bottom panel.
-    return Math.max(
-      MIN_DAILY_DESCRIPTION_HEIGHT + MIN_CODE_CARD_HEIGHT + DAILY_DESCRIPTION_LAYOUT_OVERHEAD,
-      windowHeight() - 44 - this.bottomPanelHeight,
-    )
   }
 
   private query<T extends HTMLElement>(selector: string): T | null {

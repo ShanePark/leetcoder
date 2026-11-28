@@ -59,6 +59,7 @@ function harness(options: {
   renderAll: ReturnType<typeof vi.fn>
   renderResult: ReturnType<typeof vi.fn>
   blocked: boolean[]
+  held: boolean[]
   messages: Array<{ message: string; tone: string }>
   setIssues: ReturnType<typeof vi.fn>
 } {
@@ -84,6 +85,7 @@ function harness(options: {
   const renderAll = vi.fn()
   const renderResult = vi.fn()
   const blocked: boolean[] = []
+  const held: boolean[] = []
   const messages: Array<{ message: string; tone: string }> = []
   const setIssues = vi.fn()
   const context: TestRunControllerContext = {
@@ -96,6 +98,7 @@ function harness(options: {
     flushPendingSave: options.flushPendingSave ?? (() => Promise.resolve(true)),
     setEditorIssues: setIssues,
     setLiveDiagnosticsBlocked: (value) => blocked.push(value),
+    setAutosaveHeld: (value) => held.push(value),
     cancelLiveDiagnostics: vi.fn(),
     clearLiveDiagnosticsError: vi.fn(),
     selectTestsTab: vi.fn(),
@@ -104,7 +107,7 @@ function harness(options: {
     setMessage: (message, tone) => messages.push({ message, tone }),
   }
   const controller = new TestRunController(context)
-  return { controller, state, context, progress, renderAll, renderResult, blocked, messages, setIssues }
+  return { controller, state, context, progress, renderAll, renderResult, blocked, held, messages, setIssues }
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -163,14 +166,14 @@ describe('TestRunController', () => {
     expect(renderAll).toHaveBeenCalledTimes(2)
   })
 
-  it('rejects delayed progress and results after the source changes', async () => {
+  it('rejects delayed progress and results after the open file changes', async () => {
     const run = deferred<TestResult>()
     const { controller, state, context, progress, renderResult, messages, blocked } = harness({ runResult: run.promise })
     const operation = controller.runCurrentTest()
     await flushMicrotasks()
 
     progress.send({ kind: 'log', stream: 'stdout', text: 'stale\n' })
-    state.selectedSource = 'class Q1 { edited(); }'
+    state.selectedPath = 'src/Q2.java'
     await flushMicrotasks()
 
     expect(state.testRun).toBeNull()
@@ -193,9 +196,135 @@ describe('TestRunController', () => {
     expect(controller.resultSource).toBeNull()
   })
 
+  it('keeps running after the source is edited and shows results without editor line markers', async () => {
+    const run = deferred<TestResult>()
+    const { controller, state, context, progress, renderResult, messages, blocked, setIssues } = harness({
+      runResult: run.promise,
+    })
+    const operation = controller.runCurrentTest()
+    await flushMicrotasks()
+
+    progress.send({ kind: 'log', stream: 'stdout', text: 'before\n' })
+    state.selectedSource = 'class Q1 {\n  // reformatted\n}'
+    await flushMicrotasks()
+
+    expect(state.testRun?.status).toBe('running')
+    expect(state.testRun?.stdout).toBe('before\n')
+    expect(renderResult).toHaveBeenCalledTimes(1)
+    expect(context.stopProblemTest).not.toHaveBeenCalled()
+
+    progress.send({ kind: 'testFinished', test: testCase() })
+    await flushMicrotasks()
+    expect(state.testRun?.tests).toEqual([testCase()])
+    expect(renderResult).toHaveBeenCalledTimes(2)
+
+    run.resolve(result({
+      success: false,
+      tests: [testCase({ file: 'src/Q1.java', line: 3 })],
+      summary: { total: 1, passed: 0, failed: 1, skipped: 0, errors: 0 },
+    }))
+    await operation
+
+    expect(state.busy).toBe(false)
+    expect(state.testRun?.status).toBe('completed')
+    expect(state.testResult?.tests).toEqual([testCase({ file: 'src/Q1.java', line: 3 })])
+    expect(state.selectedTestKey).toBe('Q1Test:fails')
+    expect(setIssues).toHaveBeenLastCalledWith([])
+    expect(controller.resultSource?.source).toBe('class Q1 {}')
+    expect(controller.resultSource && controller.isResultSourceCurrent(controller.resultSource)).toBe(false)
+    expect(messages).toEqual([])
+    expect(blocked).toEqual([true, false])
+  })
+
+  it('holds autosave from the pre-run save until the run settles', async () => {
+    const run = deferred<TestResult>()
+    const heldAtSave: boolean[][] = []
+    const { controller, context, held } = harness({
+      flushPendingSave: () => {
+        heldAtSave.push([...held])
+        return Promise.resolve(true)
+      },
+      runResult: run.promise,
+    })
+    const operation = controller.runCurrentTest()
+    await flushMicrotasks()
+
+    // The explicit pre-run save runs under the hold and still writes.
+    expect(heldAtSave).toEqual([[true]])
+    expect(context.runProblemTest).toHaveBeenCalledTimes(1)
+    expect(held).toEqual([true])
+
+    run.resolve(result())
+    await operation
+    expect(held).toEqual([true, false])
+  })
+
+  it('reports a runner failure after the source is edited', async () => {
+    const run = deferred<TestResult>()
+    const { controller, state } = harness({ runResult: run.promise })
+    const operation = controller.runCurrentTest()
+    await flushMicrotasks()
+
+    state.selectedSource = 'class Q1 { edited(); }'
+    run.reject(new Error('runner crashed'))
+    await operation
+
+    expect(state.testRun?.status).toBe('error')
+    expect(state.testRun?.error).toContain('runner crashed')
+    expect(state.busy).toBe(false)
+  })
+
+  it('runs the source written by a pre-run save that absorbed later edits', async () => {
+    const save = deferred<boolean>()
+    const run = deferred<TestResult>()
+    const { controller, state, context, setIssues } = harness({
+      flushPendingSave: () => save.promise,
+      runResult: run.promise,
+    })
+    const operation = controller.runCurrentTest()
+    await flushMicrotasks()
+
+    state.selectedSource = 'class Q1 {\n  int edited;\n}'
+    save.resolve(true)
+    await flushMicrotasks()
+    expect(context.runProblemTest).toHaveBeenCalledTimes(1)
+
+    run.resolve(result({
+      success: false,
+      tests: [testCase({ file: 'src/Q1.java', line: 2 })],
+      summary: { total: 1, passed: 0, failed: 1, skipped: 0, errors: 0 },
+    }))
+    await operation
+
+    expect(state.testRun?.status).toBe('completed')
+    expect(controller.resultSource?.source).toBe('class Q1 {\n  int edited;\n}')
+    expect(setIssues).toHaveBeenLastCalledWith([
+      expect.objectContaining({ file: 'src/Q1.java', line: 2 }),
+    ])
+  })
+
+  it('still stops a run on request after the source is edited', async () => {
+    const run = deferred<TestResult>()
+    const { controller, state, context } = harness({ runResult: run.promise })
+    const operation = controller.runCurrentTest()
+    await flushMicrotasks()
+
+    state.selectedSource = 'class Q1 { edited(); }'
+    await controller.stopCurrentRun()
+    expect(context.stopProblemTest).toHaveBeenCalledWith(1)
+    expect(state.testRun?.stopRequested).toBe(true)
+
+    run.resolve(result({ success: false, phase: 'cancelled' }))
+    await operation
+
+    expect(state.testRun?.phase).toBe('cancelled')
+    expect(state.testResult?.phase).toBe('cancelled')
+    expect(state.busy).toBe(false)
+  })
+
   it('reset invalidates an in-flight run without allowing its completion to repaint state', async () => {
     const run = deferred<TestResult>()
-    const { controller, state, context, renderAll, renderResult, blocked } = harness({ runResult: run.promise })
+    const { controller, state, context, renderAll, renderResult, blocked, held } = harness({ runResult: run.promise })
     const operation = controller.runCurrentTest()
     await flushMicrotasks()
 
@@ -205,6 +334,8 @@ describe('TestRunController', () => {
     expect(state.selectedTestKey).toBeNull()
     expect(state.busy).toBe(true)
     expect(blocked).toEqual([true])
+    // The native process may still compile the file, so edits stay unsaved.
+    expect(held).toEqual([true])
     expect(context.cancelLiveDiagnostics).toHaveBeenCalledTimes(1)
     expect(context.clearLiveDiagnosticsError).toHaveBeenCalledTimes(1)
 
@@ -212,33 +343,7 @@ describe('TestRunController', () => {
     await operation
     expect(state.busy).toBe(false)
     expect(blocked).toEqual([true, false])
-    expect(renderAll).toHaveBeenCalledTimes(2)
-    expect(renderResult).not.toHaveBeenCalled()
-  })
-
-  it('keeps the native lock after direct cancellation until a rejected run settles', async () => {
-    const run = deferred<TestResult>()
-    const { controller, state, context, renderAll, renderResult, blocked, messages } = harness({ runResult: run.promise })
-    const operation = controller.runCurrentTest()
-    await flushMicrotasks()
-
-    controller.cancelCurrentRun()
-    expect(context.stopProblemTest).toHaveBeenCalledWith(1)
-    expect(state.testRun).toBeNull()
-    expect(state.busy).toBe(true)
-    expect(blocked).toEqual([true])
-    expect(messages).toEqual([{ message: 'Run cancelled — file changed', tone: 'info' }])
-
-    const secondRun = controller.runCurrentTest()
-    await secondRun
-    expect(context.runProblemTest).toHaveBeenCalledTimes(1)
-    expect(state.busy).toBe(true)
-
-    run.reject(new Error('late runner failure'))
-    await operation
-    expect(state.testResult).toBeNull()
-    expect(state.busy).toBe(false)
-    expect(blocked).toEqual([true, false])
+    expect(held).toEqual([true, false])
     expect(renderAll).toHaveBeenCalledTimes(2)
     expect(renderResult).not.toHaveBeenCalled()
   })
@@ -300,11 +405,12 @@ describe('TestRunController', () => {
 
   it('disposes safely while the native runner is delayed', async () => {
     const run = deferred<TestResult>()
-    const { controller, state, renderAll, renderResult, blocked, setIssues } = harness({ runResult: run.promise })
+    const { controller, state, renderAll, renderResult, blocked, held, setIssues } = harness({ runResult: run.promise })
     const operation = controller.runCurrentTest()
     await flushMicrotasks()
 
     controller.dispose()
+    expect(held).toEqual([true, false])
     run.resolve(result({ tests: [testCase({ status: 'passed' })] }))
     await operation
 
@@ -327,7 +433,7 @@ describe('TestRunController', () => {
   })
 
   it('turns a failed save into a runner result without starting the backend', async () => {
-    const { controller, state, context, renderAll, blocked } = harness({
+    const { controller, state, context, renderAll, blocked, held } = harness({
       flushPendingSave: () => Promise.resolve(false),
       saveError: 'disk is read-only',
     })
@@ -340,6 +446,7 @@ describe('TestRunController', () => {
     expect(state.testRun?.status).toBe('error')
     expect(state.busy).toBe(false)
     expect(blocked).toEqual([true, false])
+    expect(held).toEqual([true, false])
     expect(renderAll).toHaveBeenCalledTimes(2)
   })
 

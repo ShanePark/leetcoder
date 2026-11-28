@@ -8,11 +8,16 @@ vi.mock('../../../src/icons', () => ({
   },
 }))
 
+vi.mock('../../../src/sanitize', () => ({
+  sanitizeProblemHtml: vi.fn(() => (globalThis.document as unknown as FakeDocument).createElement('div')),
+}))
+
 import {
   createDailyProblemView,
   type DailyProblemViewModel,
 } from '../../../src/app/daily-view'
 import type { DailyProblem, ProblemFileEntry } from '../../../src/backend'
+import { sanitizeProblemHtml } from '../../../src/sanitize'
 
 class FakeClassList {
   private readonly values = new Set<string>()
@@ -51,7 +56,9 @@ class FakeText {
 class FakeElement {
   readonly children: FakeChild[] = []
   readonly attributes = new Map<string, string>()
+  readonly dataset: Record<string, string> = {}
   readonly classList = new FakeClassList()
+  readonly style: Record<string, string> = {}
   readonly listeners = new Map<string, Array<(event: any) => void>>()
   parentElement: FakeElement | null = null
   private rawClassName = ''
@@ -228,6 +235,7 @@ function model(overrides: Partial<DailyProblemViewModel> = {}): DailyProblemView
   return {
     problem,
     existingFile: file,
+    existingFileOpen: false,
     projectValid: true,
     busy: false,
     dailyLoading: false,
@@ -235,7 +243,6 @@ function model(overrides: Partial<DailyProblemViewModel> = {}): DailyProblemView
     problemSelection: 'daily',
     problemUrlDraft: '',
     viewingToday: true,
-    dailyDescriptionOpen: false,
     ...overrides,
   }
 }
@@ -246,15 +253,14 @@ function callbacks() {
     onLookupSubmit: vi.fn(),
     onRetry: vi.fn(),
     onBackToToday: vi.fn(),
-    onToggleDescription: vi.fn(),
     onOpenFile: vi.fn(),
     onCreateFile: vi.fn(),
-    onApplyDescriptionHeight: vi.fn(),
   }
 }
 
 beforeEach(() => {
   installFakeDocument()
+  vi.mocked(sanitizeProblemHtml).mockClear()
 })
 
 afterEach(() => {
@@ -265,10 +271,9 @@ describe('createDailyProblemView', () => {
   it('skips unchanged header DOM while keeping the current file callback', () => {
     const header = new FakeElement()
     const description = new FakeElement()
-    const resizeHandle = new FakeElement()
     const callbacksRef = callbacks()
     const renderer = createDailyProblemView(
-      { header, description, resizeHandle },
+      { header, description },
       callbacksRef,
     )
     renderer(model())
@@ -284,13 +289,38 @@ describe('createDailyProblemView', () => {
     expect(callbacksRef.onOpenFile).toHaveBeenCalledWith(replacement)
   })
 
+  it('shows a disabled Opened button while the problem file is already open', () => {
+    const header = new FakeElement()
+    const description = new FakeElement()
+    const callbacksRef = callbacks()
+    const renderer = createDailyProblemView(
+      { header, description },
+      callbacksRef,
+    )
+    renderer(model({ existingFileOpen: true }))
+
+    const primary = header.querySelector('.daily-primary')!
+    expect(primary.textContent).toBe('Opened')
+    expect(primary.disabled).toBe(true)
+    // Busy-state refreshes re-enable the button unless it carries this marker.
+    expect(primary.dataset.fileOpen).toBe('true')
+
+    renderer(model({ existingFileOpen: false }))
+
+    const reopened = header.querySelector('.daily-primary')!
+    expect(reopened.textContent).toBe('Open file')
+    expect(reopened.disabled).toBe(false)
+    expect(reopened.dataset.fileOpen).toBeUndefined()
+    reopened.dispatch('click')
+    expect(callbacksRef.onOpenFile).toHaveBeenCalledWith(file)
+  })
+
   it('rebuilds when the lookup draft or state changes and preserves focused input selection', () => {
     const header = new FakeElement()
     const description = new FakeElement()
-    const resizeHandle = new FakeElement()
     const firstCallbacks = callbacks()
     const renderer = createDailyProblemView(
-      { header, description, resizeHandle },
+      { header, description },
       firstCallbacks,
     )
     renderer(model())
@@ -313,9 +343,8 @@ describe('createDailyProblemView', () => {
   it('shows the problem number as plain text beside a blank URL input', () => {
     const header = new FakeElement()
     const description = new FakeElement()
-    const resizeHandle = new FakeElement()
     const renderer = createDailyProblemView(
-      { header, description, resizeHandle },
+      { header, description },
       callbacks(),
     )
     renderer(model())
@@ -332,9 +361,8 @@ describe('createDailyProblemView', () => {
   it('shows no number and still offers the URL input while no problem is loaded', () => {
     const header = new FakeElement()
     const description = new FakeElement()
-    const resizeHandle = new FakeElement()
     const renderer = createDailyProblemView(
-      { header, description, resizeHandle },
+      { header, description },
       callbacks(),
     )
     renderer(model({ problem: null, existingFile: null }))
@@ -346,10 +374,9 @@ describe('createDailyProblemView', () => {
   it('submits a pasted URL exactly as it was pasted', () => {
     const header = new FakeElement()
     const description = new FakeElement()
-    const resizeHandle = new FakeElement()
     const callbacksRef = callbacks()
     const renderer = createDailyProblemView(
-      { header, description, resizeHandle },
+      { header, description },
       callbacksRef,
     )
     renderer(model())
@@ -368,10 +395,9 @@ describe('createDailyProblemView', () => {
   it('keeps dynamic input handlers attached to the latest callbacks', () => {
     const header = new FakeElement()
     const description = new FakeElement()
-    const resizeHandle = new FakeElement()
     const firstCallbacks = callbacks()
     const renderer = createDailyProblemView(
-      { header, description, resizeHandle },
+      { header, description },
       firstCallbacks,
     )
     renderer(model())
@@ -380,5 +406,72 @@ describe('createDailyProblemView', () => {
     input.value = 'leetcode.com/problems/42'
     input.dispatch('input')
     expect(firstCallbacks.onLookupInput).toHaveBeenCalledWith('leetcode.com/problems/42')
+  })
+
+  it('renders the sanitized description into the sidebar panel once and reuses it', () => {
+    const header = new FakeElement()
+    const description = new FakeElement()
+    const renderer = createDailyProblemView({ header, description }, callbacks())
+    const content = '<p>Given an array.</p>'
+    renderer(model({ problem: { ...problem, content } }))
+
+    const body = description.children[0] as FakeElement
+    expect(body.classList.contains('daily-description-body')).toBe(true)
+    expect(sanitizeProblemHtml).toHaveBeenCalledTimes(1)
+    // The panel's visibility belongs to the tab strip, not this renderer.
+    expect(description.hidden).toBe(false)
+
+    renderer(model({ problem: { ...problem, content }, existingFileOpen: true }))
+    expect(description.children[0]).toBe(body)
+    expect(sanitizeProblemHtml).toHaveBeenCalledTimes(1)
+
+    renderer(model({ problem: null, existingFile: null, dailyLoading: true }))
+    renderer(model({ problem: { ...problem, content } }))
+    expect(description.children[0]).toBe(body)
+    expect(sanitizeProblemHtml).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a short empty state while the description is unavailable', () => {
+    const header = new FakeElement()
+    const description = new FakeElement()
+    const renderer = createDailyProblemView({ header, description }, callbacks())
+    const emptyText = (): string => {
+      const empty = description.querySelector('.daily-description-empty')
+      expect(empty?.classList.contains('muted-copy')).toBe(true)
+      return empty?.textContent ?? ''
+    }
+
+    renderer(model({ problem: null, existingFile: null, dailyLoading: true }))
+    expect(emptyText()).toBe('Loading description…')
+    renderer(model({ problem: null, existingFile: null, dailyError: 'offline' }))
+    expect(emptyText()).toBe('Couldn’t load this problem')
+    renderer(model({ problem: null, existingFile: null }))
+    expect(emptyText()).toBe('No problem loaded')
+    renderer(model({ problem: { ...problem, content: '   ' } }))
+    expect(emptyText()).toBe('No description available')
+    expect(description.children).toHaveLength(1)
+  })
+
+  it('places the LeetCode link beside the today status and leaves only the primary action at the end', () => {
+    const header = new FakeElement()
+    const description = new FakeElement()
+    const renderer = createDailyProblemView({ header, description }, callbacks())
+    const identityClasses = (): string[] => {
+      const identity = header.querySelector('.daily-problem')!
+      return identity.children.map((child) => (child as FakeElement).className)
+    }
+
+    renderer(model({ problem: { ...problem, content: '<p>Text</p>' } }))
+    expect(identityClasses().slice(-2)).toEqual(['daily-today-status', 'icon-button daily-link'])
+    const link = header.querySelector('.daily-link')!
+    expect(link.href).toBe(problem.url)
+    expect(link.getAttribute('aria-label')).toBe('Open on LeetCode')
+    const actions = header.querySelector('.daily-actions')!
+    expect(actions.children).toHaveLength(1)
+    expect((actions.children[0] as FakeElement).classList.contains('daily-primary')).toBe(true)
+    expect(header.querySelector('.daily-description-toggle')).toBeNull()
+
+    renderer(model({ problem: { ...problem, content: '<p>Text</p>' }, viewingToday: false }))
+    expect(identityClasses().slice(-2)).toEqual(['secondary-button daily-today', 'icon-button daily-link'])
   })
 })

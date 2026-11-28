@@ -415,8 +415,6 @@ describe('shell markup', () => {
       macPlatform: false,
       minSidebarWidth: 0,
       maxSidebarWidth: 0,
-      minDailyDescriptionHeight: 0,
-      maxDailyDescriptionHeight: 0,
       minBottomPanelHeight: 0,
       maxBottomPanelHeight: 0,
       minGitFileListWidth: 0,

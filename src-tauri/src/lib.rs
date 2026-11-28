@@ -89,6 +89,7 @@ pub fn run() {
             ai::ai_list_models,
             ai::ai_generate_tests,
             ai::ai_review_code,
+            ai::ai_review_follow_up,
             ai::ai_usage,
         ])
         .build(tauri::generate_context!())

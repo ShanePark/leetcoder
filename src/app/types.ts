@@ -76,6 +76,8 @@ export interface TestRunSourceSnapshot {
 
 export type BottomPanelTab = 'tests' | 'review' | 'git'
 
+export type SidebarTab = 'problems' | 'description'
+
 export interface CurrentTestSource {
   repoPath: string | null
   filePath: string | null

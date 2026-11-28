@@ -39,7 +39,6 @@ import {
   type UpdateStatusView,
 } from './update-progress'
 import { clearGitProgressOverlay } from './app/git-progress'
-import { syncProgressOverlay } from './app/progress-overlay'
 import { LiveDiagnosticsController } from './app/live-diagnostics-controller'
 
 import {
@@ -62,7 +61,7 @@ import { ProjectContentSearchController } from './app/project-search-controller'
 import { PsLibraryController } from './app/ps-library-controller'
 import { JavaTypeMembersController } from './app/java-type-members-controller'
 import { FileExplorerController } from './app/file-explorer-controller'
-import { BOTTOM_PANEL_TABS, ShellControlsView } from './app/shell-controls-view'
+import { BOTTOM_PANEL_TABS, ShellControlsView, SIDEBAR_TABS } from './app/shell-controls-view'
 import {
   createFileTabsView,
   renderFileHeading as renderFileHeadingView,
@@ -82,6 +81,11 @@ import {
   type StoredAiReview,
 } from './app/ai-controller'
 import { renderAiReviewPanel } from './app/ai-review-view'
+import { AiReviewStreamView } from './app/ai-review-stream-view'
+import { AiUsageMeter, aiMeterState } from './app/ai-usage-meter'
+import { AiFollowUpView } from './app/ai-follow-up-view'
+import { AiEditDiffDialog } from './app/ai-edit-diff-dialog'
+import type { AiReviewFollowUp } from './app/ai-follow-up'
 import { OverlayController } from './app/overlay-controller'
 import {
   renderGitPanel as renderGitPanelView,
@@ -90,14 +94,14 @@ import { findTodayProblemFile } from './app/file-helpers'
 import {
   DEFAULT_GIT_FILE_LIST_WIDTH,
   MAX_BOTTOM_PANEL_HEIGHT,
-  MAX_DAILY_DESCRIPTION_HEIGHT,
   MAX_SIDEBAR_WIDTH,
   MIN_BOTTOM_PANEL_HEIGHT,
-  MIN_DAILY_DESCRIPTION_HEIGHT,
   MIN_GIT_DIFF_WIDTH,
   MIN_GIT_FILE_LIST_WIDTH,
   MIN_SIDEBAR_WIDTH,
+  SIDEBAR_TAB_KEY,
   isMacPlatform,
+  readSidebarTab,
 } from './app/layout'
 import { renderShellView } from './app/shell-view'
 import { renderTestResults } from './app/results-view'
@@ -111,9 +115,9 @@ import type {
   BottomPanelTab,
   DirectoryPicker,
   OpenFileTab,
+  SidebarTab,
 } from './app/types'
 const APP_VERSION = '0.1.0'
-const DAILY_DESCRIPTION_KEY = 'leetcoder.daily-description'
 /** How long the advertised modifier must be held alone before keytips show. */
 const KEYTIP_DELAY_MS = 350
 
@@ -168,6 +172,10 @@ export class LeetcoderApp {
   private readonly aiController: AiController
   private readonly aiCaseDialog: AiCaseDialog
   private readonly aiReviewModelDialog: AiReviewModelDialog
+  private readonly aiFollowUpView: AiFollowUpView
+  private readonly aiEditDiffDialog: AiEditDiffDialog
+  private readonly aiUsageMeter: AiUsageMeter
+  private readonly aiReviewStreamView: AiReviewStreamView
   /** The last review only; a new one replaces it. */
   private aiReview: StoredAiReview | null = null
   private readonly llmSettings: LlmSettingsController
@@ -177,7 +185,7 @@ export class LeetcoderApp {
   private readonly appListeners: Array<() => void> = []
   private destroyed = false
   private keytipTimer: ReturnType<typeof setTimeout> | null = null
-  private dailyDescriptionOpen = false
+  private sidebarTab: SidebarTab = 'problems'
   private readonly gitController: GitController
   private readonly gitCommitDialog: GitCommitDialog
   private readonly paneLayout: PaneLayoutController
@@ -191,9 +199,9 @@ export class LeetcoderApp {
   private readonly fileOperationsController: FileOperationsController
   private readonly projectContentSearchController: ProjectContentSearchController
   private readonly handleGlobalKeydown = (event: KeyboardEvent): void => {
-    if (this.gitCommitDialog.isOpen) return
-    // Both show a blocking progress popup, so nothing behind it may run.
-    if (this.gitController.commitPushInProgress || this.aiController.requestPath !== null) {
+    if (this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) return
+    // A commit and push shows a blocking progress popup, so nothing behind it may run.
+    if (this.gitController.commitPushInProgress) {
       event.preventDefault()
       return
     }
@@ -281,7 +289,7 @@ export class LeetcoderApp {
    * the editor stops propagation of the chords it handles.
    */
   private readonly handleKeytipKeydown = (event: KeyboardEvent): void => {
-    if (this.gitCommitDialog.isOpen) {
+    if (this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) {
       this.hideKeytips()
       return
     }
@@ -350,7 +358,7 @@ export class LeetcoderApp {
   }
 
   private readonly handleContextMenuKeydown = (event: KeyboardEvent): void => {
-    if (this.gitCommitDialog.isOpen) return
+    if (this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) return
     if (this.gitController.commitPushInProgress) {
       event.preventDefault()
       return
@@ -370,7 +378,7 @@ export class LeetcoderApp {
     this.backend = options.backend ?? createBackendClient()
     this.storage = options.storage ?? safeStorage()
     this.requestClose = options.requestClose
-    this.dailyDescriptionOpen = this.storage?.getItem(DAILY_DESCRIPTION_KEY) === 'open'
+    this.sidebarTab = readSidebarTab(this.storage)
     this.gitController = new GitController(this.backend, {
       getContext: () => ({
         repoPath: this.state.repoPath,
@@ -425,7 +433,6 @@ export class LeetcoderApp {
       {
         header: this.element<HTMLElement>('#daily-header'),
         description: this.element<HTMLElement>('#daily-description'),
-        resizeHandle: this.element<HTMLElement>('#daily-description-resize-handle'),
       },
       {
         onLookupInput: (value) => this.problemSelectionController.setProblemUrlDraft(value),
@@ -438,18 +445,16 @@ export class LeetcoderApp {
         onBackToToday: () => {
           this.problemSelectionController.selectToday()
         },
-        onToggleDescription: () => {
-          this.dailyDescriptionOpen = !this.dailyDescriptionOpen
-          this.storage?.setItem(DAILY_DESCRIPTION_KEY, this.dailyDescriptionOpen ? 'open' : 'closed')
-          this.renderDailyProblem()
-        },
         onOpenFile: (file) => {
-          void this.openFile(file)
+          void this.openFile(file).then(() => this.showDescriptionForOpenedFile(file.path))
         },
         onCreateFile: () => {
-          void this.createFileForToday()
+          const problem = this.state.dailyProblem
+          void this.createFileForToday().then(() => {
+            const created = problem ? findTodayProblemFile(this.state.files, problem) : null
+            if (created) this.showDescriptionForOpenedFile(created.path)
+          })
         },
-        onApplyDescriptionHeight: () => this.paneLayout.applyDailyDescriptionHeight(),
       },
     )
     this.updateController = createUpdateController(
@@ -490,6 +495,7 @@ export class LeetcoderApp {
       flushPendingSave: () => this.flushPendingSave(),
       setEditorIssues: (issues) => this.editor.setIssues(issues),
       setLiveDiagnosticsBlocked: (blocked) => this.liveDiagnostics.setBlocked(blocked),
+      setAutosaveHeld: (held) => this.documentController.setAutosaveHeld(held),
       cancelLiveDiagnostics: () => this.liveDiagnostics.cancel(),
       clearLiveDiagnosticsError: () => {
         this.state.liveDiagnosticsError = null
@@ -547,6 +553,9 @@ export class LeetcoderApp {
         void this.testRunController.runCurrentTest(methodName ?? undefined)
         return true
       },
+      onCursorChange: () => {
+        this.controlsView?.updateRunSelectedButton()
+      },
     })
     this.psLibraryController = new PsLibraryController({
       backend: this.backend,
@@ -562,12 +571,15 @@ export class LeetcoderApp {
       editor: this.editor,
       getRepositoryGeneration: () => this.repository.generation,
       resetTestState: () => this.testRunController.resetTestState(),
-      cancelCurrentRun: () => this.testRunController.cancelCurrentRun(),
       renderAll: () => this.renderAll(),
       renderFileHeading: () => this.renderFileHeading(),
       renderFileTabs: () => this.renderFileTabs(),
       updateFileTabState: () => this.updateFileTabState(),
-      updateFileExplorerState: () => this.fileExplorer.updateFileExplorerState(),
+      updateFileExplorerState: () => {
+        this.fileExplorer.updateFileExplorerState()
+        // The daily card's primary button depends on which file is selected.
+        this.renderDailyProblem()
+      },
       updateEditorVisibility: () => this.controlsView.updateEditorVisibility(),
       renderResult: () => this.renderResult(),
       setExpandedGroup: (group, expanded) => this.fileExplorer.setExpandedGroup(group, expanded),
@@ -580,6 +592,8 @@ export class LeetcoderApp {
       renderBusyControls: () => this.controlsView.updateBusyControls(),
       revealSelectedFileInExplorer: () => this.fileExplorer.revealSelectedFileInExplorer(),
       isDestroyed: () => this.destroyed,
+      // The AI controller is built after this one; no document loads before it is.
+      documentLoaded: () => this.aiController?.documentLoaded(),
     })
     this.fileOperationsController = new FileOperationsController({
       state: this.state,
@@ -644,12 +658,26 @@ export class LeetcoderApp {
       openSettings: options.openPermissionSettings ?? (() => tauriInvoke<void>('open_repository_permission_settings')),
       showError: (message, actions, detail) => this.toastController.show(message, 'error', actions, detail),
     })
+    this.aiEditDiffDialog = new AiEditDiffDialog(this.root, currentIsMacPlatform())
+    this.aiUsageMeter = new AiUsageMeter(this.root.ownerDocument)
+    this.aiReviewStreamView = new AiReviewStreamView({
+      body: () => this.element<HTMLElement>('#review-body'),
+      meter: () => this.aiUsageMeter.element,
+    })
+    this.aiFollowUpView = new AiFollowUpView({
+      root: this.root,
+      send: (question) => this.aiReview
+        ? this.aiController.askFollowUp(this.aiReview, question)
+        : Promise.resolve(false),
+      viewProposal: (turn) => this.openProposal(turn),
+    })
     this.aiController = createAiController(
       {
         aiStatus: () => this.backend.aiStatus(),
         aiListModels: (refresh) => this.backend.aiListModels(refresh),
         aiGenerateTests: (request, onProgress) => this.backend.aiGenerateTests(request, onProgress),
-        reviewAiCode: (request, onProgress) => this.backend.reviewAiCode(request, onProgress),
+        reviewAiCode: (request, onProgress, onEvent) => this.backend.reviewAiCode(request, onProgress, onEvent),
+        askAiReviewFollowUp: (request, onEvent) => this.backend.askAiReviewFollowUp(request, onEvent),
         currentTarget: () => ({
           repoPath: this.state.repoPath,
           path: this.state.selectedPath,
@@ -661,11 +689,18 @@ export class LeetcoderApp {
         psSignatures: () => psSignatures(this.psLibraryMetadata),
         applyStatements: (statements) => this.editor.applyAiTests(statements),
         applyCaseStatements: (statements) => this.editor.applyAiCaseTest(statements),
+        fillSource: (kind, source, statements) => this.editor.fillAiTestsInSource(kind, source, statements),
+        rewriteFile: (target, edit) => target.repoPath === null || target.path === null
+          ? Promise.resolve('stale')
+          : this.documentController.rewriteClosedFile(target.repoPath, target.path, target.repositoryGeneration, edit),
+        showPendingTests: (kind, status) => this.editor.showAiPending(kind, status),
+        clearPendingTests: () => this.editor.clearAiPending(),
         focusEditor: () => {
           const button = this.element<HTMLElement>('#ai-generate-tests')
           if (aiFillMayTakeFocus(this.root, button)) this.editor.focus()
         },
         readSource: () => this.state.selectedSource,
+        replaceSource: (code) => this.editor.replaceValue(code),
         reviewTestRun: () => {
           const source = this.testRunController.resultSource
           return aiReviewTestRunSelection(
@@ -678,18 +713,50 @@ export class LeetcoderApp {
         responseLanguage: () => readLlmResponseLanguage(this.storage),
       },
       {
-        requestChanged: () => this.controlsView.updateAiButton(),
+        requestChanged: () => {
+          this.controlsView.updateAiButton()
+          this.updateFollowUpComposer()
+        },
         showMessage: (message, tone) => this.setMessage(message, tone),
         showMissingKey: () => this.overlay.openSettingsDialog('llm'),
         generationFinished: () => this.llmSettings.refreshUsageIfVisible(),
-        showProgress: (state) => syncProgressOverlay(this.root, state),
         caseAdded: () => this.aiCaseDialog.clearDraft(),
         reviewed: (review) => {
           this.aiReview = review
           this.renderReviewPanel()
           this.selectBottomPanelTab('review')
         },
+        reviewStreamChanged: (stream) => {
+          const view = this.aiReviewStreamView
+          if (stream === null) {
+            view.hide()
+            this.renderReviewPanel()
+            this.restoreReviewButtonFocus()
+          } else if (view.stream !== stream) {
+            this.aiUsageMeter.reset()
+            view.show(stream)
+            this.updateUsageMeter()
+            this.selectBottomPanelTab('review')
+          } else {
+            view.update()
+            this.updateUsageMeter()
+          }
+        },
+        usageChanged: () => this.updateUsageMeter(),
         chooseReviewModel: (request) => this.aiReviewModelDialog.show(request),
+        followUpsChanged: () => {
+          const added = this.aiReview?.followUps.at(-1)?.status === 'streaming'
+          this.renderReviewPanel()
+          if (added) this.aiFollowUpView.scrollToEnd()
+        },
+        followUpAnswerChanged: (turn) => {
+          this.aiFollowUpView.updateTurn(turn)
+          this.updateUsageMeter()
+        },
+        proposalArrived: (stored, turn) => {
+          // Another dialog keeps the user's attention; the card's View diff button opens it later.
+          if (stored === this.aiReview && !this.modalOpen()) this.openProposal(turn)
+        },
       },
     )
     this.controlsView = new ShellControlsView({
@@ -700,8 +767,10 @@ export class LeetcoderApp {
       invalidatePendingNavigation: () => this.documentController.invalidatePendingNavigation(),
       aiRequestPath: () => this.aiController.requestPath,
       aiRequestKind: () => this.aiController.requestKind,
+      aiRequestReviewMode: () => this.aiController.reviewMode,
       aiTestStub: () => this.editor.aiTestStub(),
       aiCaseTestAvailable: () => this.editor.aiCaseTestAvailable(),
+      testMethodAtCursor: () => findJavaTestMethodAt(this.editor.view.state),
     })
     this.aiCaseDialog = new AiCaseDialog({
       root: this.root,
@@ -770,6 +839,10 @@ export class LeetcoderApp {
     this.aiController.dispose()
     this.aiCaseDialog.dispose()
     this.aiReviewModelDialog.dispose()
+    this.aiFollowUpView.dispose()
+    this.aiEditDiffDialog.dispose()
+    this.aiReviewStreamView.dispose()
+    this.aiUsageMeter.dispose()
     this.projectContentSearchController.dispose()
     this.psLibraryController.dispose()
     this.javaTypeMembersController.dispose()
@@ -805,8 +878,6 @@ export class LeetcoderApp {
       macPlatform: currentIsMacPlatform(),
       minSidebarWidth: MIN_SIDEBAR_WIDTH,
       maxSidebarWidth: MAX_SIDEBAR_WIDTH,
-      minDailyDescriptionHeight: MIN_DAILY_DESCRIPTION_HEIGHT,
-      maxDailyDescriptionHeight: MAX_DAILY_DESCRIPTION_HEIGHT,
       minBottomPanelHeight: MIN_BOTTOM_PANEL_HEIGHT,
       maxBottomPanelHeight: MAX_BOTTOM_PANEL_HEIGHT,
       minGitFileListWidth: MIN_GIT_FILE_LIST_WIDTH,
@@ -880,6 +951,14 @@ export class LeetcoderApp {
         void this.testRunController.runCurrentTest()
       }
     })
+    this.listen(this.element<HTMLButtonElement>('#run-selected-test'), 'click', () => {
+      // The button is disabled off a test method; re-read the cursor so a
+      // stale enabled state never widens this into an all-tests run.
+      const methodName = findJavaTestMethodAt(this.editor.view.state)
+      if (methodName) {
+        void this.testRunController.runCurrentTest(methodName)
+      }
+    })
     this.listen(this.element<HTMLButtonElement>('#ai-generate-tests'), 'click', () => {
       const mode = aiButtonMode(
         this.state.selectedPath,
@@ -899,6 +978,25 @@ export class LeetcoderApp {
     this.listen(this.element<HTMLButtonElement>('#ai-review-code'), 'click', () => {
       // The controller checks the key and opens the model picker; only the picker sends.
       void this.aiController.review()
+    })
+    SIDEBAR_TABS.forEach((tab, index) => {
+      const button = this.element<HTMLButtonElement>(`#sidebar-${tab}-tab`)
+      this.listen(button, 'click', () => {
+        this.selectSidebarTab(tab)
+      })
+      this.listen(button, 'keydown', (event) => {
+        const last = SIDEBAR_TABS.length - 1
+        const target = event.key === 'ArrowLeft'
+          ? (index + last) % SIDEBAR_TABS.length
+          : event.key === 'ArrowRight'
+            ? (index + 1) % SIDEBAR_TABS.length
+            : event.key === 'Home' ? 0 : event.key === 'End' ? last : null
+        if (target === null) {
+          return
+        }
+        event.preventDefault()
+        this.selectSidebarTab(SIDEBAR_TABS[target], true)
+      })
     })
     BOTTOM_PANEL_TABS.forEach((tab, index) => {
       const button = this.element<HTMLButtonElement>(`#${tab}-tab`)
@@ -943,11 +1041,12 @@ export class LeetcoderApp {
       void this.gitController.commitSelectedFiles(true)
     })
     this.listen(this.element<HTMLButtonElement>('#sidebar-toggle'), 'click', () => {
-      this.toggleSidebar()
+      this.toggleSidebarTab('problems')
     })
     this.fileDialogs.bindEvents()
     this.aiCaseDialog.bindEvents()
     this.aiReviewModelDialog.bindEvents()
+    this.aiFollowUpView.bindEvents()
     this.listen(window, 'pointerdown', this.handleContextMenuOutside)
     this.listen(window, 'keydown', this.handleContextMenuKeydown)
     this.listen(window, 'keydown', this.handleGlobalKeydown)
@@ -1006,6 +1105,8 @@ export class LeetcoderApp {
       // The workspace has just become measurable; reclamp persisted width
       // against its actual client width instead of the hidden-panel fallback.
       this.paneLayout.applyGitFileListWidth()
+    } else if (tab === 'tests') {
+      this.paneLayout.applyTestListWidth()
     }
     if (focus) {
       this.element<HTMLButtonElement>(`#${tab}-tab`).focus()
@@ -1017,12 +1118,15 @@ export class LeetcoderApp {
   }
 
   private runWorkspaceShortcut(id: WorkspaceShortcutId): void {
-    if (this.gitController.commitPushInProgress || this.gitCommitDialog.isOpen) {
+    if (this.gitController.commitPushInProgress || this.gitCommitDialog.isOpen || this.aiEditDiffDialog.isOpen) {
       return
     }
     switch (id) {
-      case 'toggle-sidebar':
-        this.toggleSidebar()
+      case 'show-problems-tab':
+        this.toggleSidebarTab('problems')
+        return
+      case 'show-description-tab':
+        this.toggleSidebarTab('description')
         return
       case 'show-tests-panel':
         this.selectBottomPanelTab('tests')
@@ -1040,39 +1144,79 @@ export class LeetcoderApp {
    * Follow the buttons: when one is enabled (a typed message, or the default
    * message offered as the placeholder), Commit runs from the message field
    * and Commit & Push from anywhere, through the button so its guards apply.
-   * Otherwise both bring the message field forward.
+   * With nothing checked, a shortcut that would commit first checks every
+   * change when they can only mean one commit. Otherwise both bring the
+   * message field forward.
    */
   private commitFromShortcut(push: boolean): void {
     const input = this.element<HTMLInputElement>('#git-commit-message')
     const button = this.element<HTMLButtonElement>(push ? '#git-commit-push' : '#git-commit')
     const inMessageField = input.ownerDocument.activeElement === input
-    if (!button.disabled && (push || inMessageField)) {
-      button.click()
-      return
+    if (push || inMessageField) {
+      // Selecting repaints the panel synchronously, which enables the button.
+      if (button.disabled) this.gitController.selectAllForShortcutCommit()
+      if (!button.disabled) {
+        button.click()
+        return
+      }
     }
     this.selectBottomPanelTab('git')
     input.focus()
   }
 
-  private toggleSidebar(): void {
-    const collapse = !this.paneLayout.sidebarCollapsed
+  /**
+   * A tab's shortcut, and the header toggle for Problems: hide the sidebar
+   * when that tab is already on screen, otherwise show the sidebar on it.
+   */
+  private toggleSidebarTab(tab: SidebarTab): void {
     const active = this.root.ownerDocument.activeElement
-    const focusInSidebar = collapse && active instanceof Node
-      && this.element<HTMLElement>('.sidebar').contains(active)
-    this.paneLayout.setSidebarCollapsed(collapse)
-    if (focusInSidebar) {
+    const focusIn = (selector: string): boolean => active instanceof Node
+      && this.element<HTMLElement>(selector).contains(active)
+    if (this.paneLayout.sidebarCollapsed || this.sidebarTab !== tab) {
       // Hiding the focused control would drop focus to the document body.
+      const focusInHiddenPanel = focusIn(`#sidebar-${this.sidebarTab}-panel`)
+      this.showSidebarTab(tab, focusInHiddenPanel)
+      return
+    }
+    const focusInSidebar = focusIn('.sidebar')
+    this.paneLayout.setSidebarCollapsed(true)
+    this.controlsView.renderSidebarTabs(this.sidebarTab, true)
+    if (focusInSidebar) {
       if (this.state.selectedPath) this.editor.focus()
       else this.element<HTMLButtonElement>('#sidebar-toggle').focus()
     }
   }
 
-  /** The search field lives in the sidebar, so a collapsed sidebar opens first. */
+  /** Opening today's file from the header brings its description forward. */
+  private showDescriptionForOpenedFile(path: string): void {
+    if (this.destroyed || this.state.selectedPath !== path) {
+      return
+    }
+    this.showSidebarTab('description')
+  }
+
+  /** The search field lives on the sidebar's Problems tab, so that opens first. */
   private focusFileSearch(): void {
+    this.showSidebarTab('problems')
+    this.fileExplorer.focusFileSearch()
+  }
+
+  private showSidebarTab(tab: SidebarTab, focus = false): void {
     if (this.paneLayout.sidebarCollapsed) {
       this.paneLayout.setSidebarCollapsed(false)
     }
-    this.fileExplorer.focusFileSearch()
+    this.selectSidebarTab(tab, focus)
+  }
+
+  private selectSidebarTab(tab: SidebarTab, focus = false): void {
+    if (tab !== this.sidebarTab) {
+      this.sidebarTab = tab
+      this.storage?.setItem(SIDEBAR_TAB_KEY, tab)
+    }
+    this.controlsView.renderSidebarTabs(tab, this.paneLayout.sidebarCollapsed)
+    if (focus) {
+      this.element<HTMLButtonElement>(`#sidebar-${tab}-tab`).focus()
+    }
   }
 
   /**
@@ -1135,7 +1279,74 @@ export class LeetcoderApp {
   }
 
   private renderReviewPanel(): void {
-    renderAiReviewPanel(this.element<HTMLElement>('#review-body'), this.aiReview)
+    if (this.aiReviewStreamView.stream) {
+      this.aiReviewStreamView.render()
+    } else {
+      renderAiReviewPanel(
+        this.element<HTMLElement>('#review-body'),
+        this.aiReview,
+        this.aiFollowUpView.renderConversation(this.aiReview?.followUps ?? []),
+        this.aiReview ? this.aiUsageMeter.element : null,
+      )
+    }
+    this.updateUsageMeter()
+    this.updateFollowUpComposer()
+  }
+
+  /** Count the shown conversation, or the review on its way, on the usage meter. */
+  private updateUsageMeter(): void {
+    const state = aiMeterState(this.aiReview, this.aiReviewStreamView.stream)
+    if (state) this.aiUsageMeter.update(state)
+  }
+
+  /**
+   * The review button loses focus while it is disabled for its request. Give
+   * it back once the review ends, unless the user has moved focus elsewhere.
+   */
+  private restoreReviewButtonFocus(): void {
+    const button = this.element<HTMLButtonElement>('#ai-review-code')
+    const { activeElement, body } = this.root.ownerDocument
+    if ((activeElement === null || activeElement === body) && !button.disabled && !button.hidden && !this.modalOpen()) {
+      button.focus()
+    }
+  }
+
+  /** A modal dialog or picker holds the user's attention. */
+  private modalOpen(): boolean {
+    return this.gitCommitDialog.isOpen
+      || this.aiEditDiffDialog.isOpen
+      || this.repository.pickerOpen
+      || this.root.querySelectorAll('.dialog-backdrop:not([hidden])').length > 0
+  }
+
+  /**
+   * Show the change `turn` proposed, with Accept and Reject. A follow-up that
+   * settles with a change opens it at once; the card's View diff button opens
+   * it again until it is decided.
+   */
+  private openProposal(turn: AiReviewFollowUp): void {
+    const stored = this.aiReview
+    if (!stored || !turn.proposal || !stored.followUps.includes(turn)) return
+    const { canAccept, note } = this.aiController.proposalState(stored, turn)
+    this.aiEditDiffDialog.open({ fileName: stored.fileName, proposal: turn.proposal, canAccept, note }, {
+      accept: () => {
+        if (this.aiController.acceptProposal(stored, turn)) {
+          this.editor.focus()
+          return
+        }
+        const blocked = this.aiController.proposalState(stored, turn).note
+        if (blocked) this.setMessage(blocked, 'error')
+      },
+      reject: () => this.aiController.rejectProposal(stored, turn),
+    })
+  }
+
+  private updateFollowUpComposer(): void {
+    this.aiFollowUpView.update({
+      hasReview: this.aiReview !== null,
+      help: this.aiReview?.request.mode === 'help',
+      busy: this.aiController.requestPath !== null,
+    })
   }
 
   private fileTabsModel(): FileTabsViewModel {
@@ -1163,6 +1374,7 @@ export class LeetcoderApp {
     this.renderFileTabs()
     this.renderFileHeading()
     this.renderResult()
+    this.controlsView.renderSidebarTabs(this.sidebarTab, this.paneLayout.sidebarCollapsed)
     this.controlsView.renderBottomPanelTabs()
     this.renderGitPanel()
     this.fileDialogs.renderContextMenu()
@@ -1175,9 +1387,11 @@ export class LeetcoderApp {
 
   private renderDailyProblem(): void {
     const problem = this.state.dailyProblem
+    const existingFile = problem ? findTodayProblemFile(this.state.files, problem) : null
     this.dailyProblemView({
       problem,
-      existingFile: problem ? findTodayProblemFile(this.state.files, problem) : null,
+      existingFile,
+      existingFileOpen: existingFile !== null && existingFile.path === this.state.selectedPath,
       projectValid: this.state.projectValid,
       busy: this.state.busy,
       dailyLoading: this.state.dailyLoading,
@@ -1185,7 +1399,6 @@ export class LeetcoderApp {
       problemSelection: this.state.problemSelection,
       problemUrlDraft: this.problemSelectionController.problemUrlDraft,
       viewingToday: problem ? this.problemSelectionController.isViewingTodayProblem(problem) : false,
-      dailyDescriptionOpen: this.dailyDescriptionOpen,
     })
   }
 
@@ -1282,6 +1495,7 @@ export class LeetcoderApp {
       },
     )
     this.testRunController.acceptRenderedSelection(output.selectedTestKey)
+    this.paneLayout.applyTestListWidth()
   }
 
   private setMessage(message: string, tone: 'info' | 'success' | 'error'): void {
@@ -1408,7 +1622,6 @@ export {
   applyTheme,
   clampBottomPanelHeight,
   clampContextMenuPosition,
-  clampDailyDescriptionHeight,
   clampGitFileListWidth,
   clampSidebarWidth,
   defaultShortcutPlatform,

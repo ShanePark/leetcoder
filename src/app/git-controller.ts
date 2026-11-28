@@ -485,6 +485,28 @@ export class GitController {
     this.updateSelection([])
   }
 
+  /**
+   * Let a commit shortcut proceed with nothing checked when the changes can
+   * only mean one commit: a single file, or files that share a default
+   * message such as a problem and its duplicates. Checks every change and
+   * repaints the panel, so the commit buttons reflect it, and returns whether
+   * it did. Several unrelated files or an existing selection stay untouched.
+   */
+  selectAllForShortcutCommit(): boolean {
+    const { files, selectedPaths } = this.state
+    if (!this.isAlive()
+      || this.hooks.getContext().appBusy
+      || this.state.busy
+      || this.state.loading
+      || selectedPaths.length > 0
+      || files.length === 0
+      || (files.length > 1 && !defaultGitCommitMessage(files))) {
+      return false
+    }
+    this.updateSelection(files.map((file) => file.path))
+    return true
+  }
+
   /** Start an app-level Git operation and return the identity guard for it. */
   startOperation(
     label: string | null = null,

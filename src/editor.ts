@@ -22,6 +22,7 @@ import {
   history,
   historyKeymap,
   indentWithTab,
+  isolateHistory,
   moveLineDown,
   moveLineUp,
   redo,
@@ -90,13 +91,25 @@ import {
   type BareJavaTestLookup,
 } from './editor/test-markers'
 import {
+  AI_TESTS_USER_EVENT,
   applyAiCaseTestStatements,
   applyAiTestStatements,
   findAiCaseTestSlot,
   listJavaMethodHeaders,
+  planAiCaseTestInsertion,
+  planAiTestInsertion,
   type AiCaseTestResult,
   type AiTestResult,
 } from './editor/ai-tests'
+import {
+  aiInsertionEffect,
+  aiPendingEffect,
+  aiPendingExtension,
+  clearAiPendingEffect,
+  readAiPending,
+  type AiPendingKind,
+  type AiPendingStatus,
+} from './editor/ai-pending'
 import {
   buildTestRunMarkers,
   failureDecorations,
@@ -114,6 +127,7 @@ import {
   inlineJavaField,
   formatJavaDocClipboard,
   introduceJavaVariable,
+  lineDocumentChanges,
   planJavaDocInsertion,
   reformatJavaDocument,
   smartBackspaceOnBlankLine,
@@ -204,6 +218,7 @@ export type { JavaStatementCompletion } from './editor/statement-completion'
 export { findJavaTestMethodAt, findJavaTestMethodMarkers }
 export type { JavaTestMethodMarker } from './editor/test-markers'
 export type { AiCaseTestResult, AiTestRejectionReason, AiTestResult } from './editor/ai-tests'
+export type { AiPendingKind, AiPendingStatus } from './editor/ai-pending'
 export type { EditorIssue } from './editor/gutters'
 export { buildTestRunMarkers } from './editor/gutters'
 
@@ -223,6 +238,8 @@ export interface EditorCallbacks {
   onSave?: () => boolean | void
   onRun?: () => boolean | void
   onRunTestAtCursor?: (methodName: string | null) => boolean | void
+  /** Called after the cursor moves or the document changes. */
+  onCursorChange?: () => void
   onShowShortcuts?: () => void
   onShowSettings?: () => void
   onFocusFileSearch?: () => void
@@ -486,9 +503,14 @@ export function isInlineFieldShortcut(event: JavaDocAltShortcutEvent): boolean {
     && (event.metaKey !== event.ctrlKey)
 }
 
-/** Match the Linux Alt+1 form of the Problems sidebar toggle by physical key. */
-export function isToggleSidebarAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+/** Match the Linux Alt+1 form of the Problems tab shortcut by physical key. */
+export function isShowProblemsTabAltShortcut(event: JavaDocAltShortcutEvent): boolean {
   return isPlainAltShortcut(event, 'Digit1')
+}
+
+/** Match the Linux Alt+2 form of the Description tab shortcut by physical key. */
+export function isShowDescriptionTabAltShortcut(event: JavaDocAltShortcutEvent): boolean {
+  return isPlainAltShortcut(event, 'Digit2')
 }
 
 /** Match the Linux Alt+4 form of the Tests panel shortcut by physical key. */
@@ -681,7 +703,8 @@ export class JavaEditor {
         [isSettingsAltShortcut, showSettings],
         [isFileSearchAltShortcut, focusFileSearch],
         [isFindAltShortcut, openFind],
-        [isToggleSidebarAltShortcut, workspaceShortcut('toggle-sidebar')],
+        [isShowProblemsTabAltShortcut, workspaceShortcut('show-problems-tab')],
+        [isShowDescriptionTabAltShortcut, workspaceShortcut('show-description-tab')],
         [isShowTestsPanelAltShortcut, workspaceShortcut('show-tests-panel')],
         [isShowGitPanelAltShortcut, workspaceShortcut('show-git-panel')],
         [isGitCommitAltShortcut, workspaceShortcut('git-commit')],
@@ -692,9 +715,9 @@ export class JavaEditor {
       [isIntroduceVariableShortcut, introduceJavaVariable],
       [isExtractMethodShortcut, extractMethod],
       [isInlineFieldShortcut, inlineField],
-      // The other workspace chords (Cmd+1/4/9/K on macOS) are not in the
+      // The other workspace chords (Cmd+1/2/4/9/K on macOS) are not in the
       // keymap: they reach the app's window handler, which would otherwise
-      // toggle the sidebar a second time. This handler stops propagation.
+      // run them a second time. This handler stops propagation.
       [isGitCommitPushShortcut, workspaceShortcut('git-commit-push')],
     ]
 
@@ -723,6 +746,7 @@ export class JavaEditor {
         testMethodMarkers,
         failureMarkers,
         failureDecorations,
+        aiPendingExtension,
         diagnosticHoverTooltips,
         definitionHover,
         javaSymbolHighlights,
@@ -862,6 +886,9 @@ export class JavaEditor {
           if (update.docChanged) {
             callbacks.onChange?.(update.state.doc.toString())
           }
+          if (update.docChanged || update.selectionSet) {
+            callbacks.onCursorChange?.()
+          }
         }),
         // CodeMirror's built-in keymap contains an Alt+ArrowRight movement
         // command. Run our physical-key fallbacks before that keymap so the
@@ -925,14 +952,17 @@ export class JavaEditor {
     return this.view.state.doc.toString()
   }
 
+  /** Load a document. A waiting AI request's lock belongs to the one before. */
   setValue(source: string): void {
     const current = this.getValue()
     if (source === current) {
+      this.clearAiPending()
       return
     }
     this.view.dispatch({
       changes: { from: 0, to: current.length, insert: source },
       selection: { anchor: 0 },
+      effects: clearAiPendingEffect,
       // Loading a file is an external state replacement, not an edit the
       // user should be able to undo back to the empty bootstrap document.
       annotations: Transaction.addToHistory.of(false),
@@ -959,9 +989,27 @@ export class JavaEditor {
         anchor: Math.min(selection.anchor, source.length),
         head: Math.min(selection.head, source.length),
       },
+      // The lock was placed on the old text; the caller places it again.
+      effects: clearAiPendingEffect,
       annotations: Transaction.addToHistory.of(false),
     })
     this.foldImports()
+  }
+
+  /**
+   * Replace the document with `source` as one undo step. Only the differing
+   * lines change, so the cursor and scroll stay with the code they were on.
+   */
+  replaceValue(source: string): void {
+    const current = this.getValue()
+    if (source === current) {
+      return
+    }
+    this.view.dispatch({
+      changes: lineDocumentChanges(current, source),
+      userEvent: 'input.replace',
+      annotations: isolateHistory.of('full'),
+    })
   }
 
   /** Cheap enough to read on every edit, unlike the full context. */
@@ -983,14 +1031,56 @@ export class JavaEditor {
     }
   }
 
-  /** Fill the bare `test()` stub with generated statements as one undo step. */
+  /**
+   * Fill the bare `test()` stub with generated statements as one undo step,
+   * ending any waiting request's lock and briefly marking the added lines.
+   */
   applyAiTests(statements: readonly string[]): AiTestResult {
-    return applyAiTestStatements(this.view, statements)
+    return applyAiTestStatements(this.view, statements, (inserted) => [aiInsertionEffect(inserted.from, inserted.to)])
   }
 
-  /** Add a new test method holding generated statements as one undo step. */
+  /** Add a new test method holding generated statements as one undo step, as `applyAiTests` does. */
   applyAiCaseTest(statements: readonly string[]): AiCaseTestResult {
-    return applyAiCaseTestStatements(this.view, statements)
+    return applyAiCaseTestStatements(this.view, statements, (inserted) => [aiInsertionEffect(inserted.from, inserted.to)])
+  }
+
+  /**
+   * The text `source` has after the fill `applyAiTests` or `applyAiCaseTest`
+   * would make, imports included, for a file that is not open. The text is
+   * null when the result is rejected.
+   */
+  fillAiTestsInSource(
+    kind: AiPendingKind,
+    source: string,
+    statements: readonly string[],
+  ): { result: AiTestResult | AiCaseTestResult; source: string | null } {
+    const result = kind === 'case' ? planAiCaseTestInsertion(source, statements) : planAiTestInsertion(source, statements)
+    if (!result.ok) return { result, source: null }
+    // The same import rules as the open editor, which depend on the library metadata.
+    const state = EditorState.create({
+      doc: source,
+      extensions: [java(), psLibraryExtension, javaAutoImports],
+    }).update({ effects: setPsLibraryMetadata.of(readPsLibraryMetadata(this.view.state)) }).state
+    const filled = state.update({
+      changes: { from: result.from, to: result.to, insert: result.insert },
+      userEvent: AI_TESTS_USER_EVENT,
+    }).state
+    return { result, source: filled.doc.toString() }
+  }
+
+  /**
+   * Lock the test region a waiting AI request of `kind` will change and show
+   * `status` in it, or move the shown status to its next step. Nothing is
+   * locked when the request could not apply to this document.
+   */
+  showAiPending(kind: AiPendingKind, status: AiPendingStatus): void {
+    const effect = aiPendingEffect(this.view.state, kind, status)
+    if (effect) this.view.dispatch({ effects: effect })
+  }
+
+  /** Unlock the region of a waiting AI request and remove its status. */
+  clearAiPending(): void {
+    if (readAiPending(this.view.state)) this.view.dispatch({ effects: clearAiPendingEffect })
   }
 
   /** Collapse the leading import block, the way an IDE opens a file. */

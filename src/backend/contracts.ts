@@ -308,14 +308,18 @@ export interface AiReviewTestRun {
   diagnostics: string[]
 }
 
+/** `review` reviews the written solution; `help` explains an unimplemented problem with hints. */
+export type AiReviewMode = 'review' | 'help'
+
 export interface AiReviewRequest {
+  mode: AiReviewMode
   selectedModelId: string | null
   problemTitle: string
   problemContent: string
   entryPoint: string | null
   /** The whole open solution file. */
   source: string
-  /** Present only when the last run was made on exactly this source. */
+  /** Present only when the last run was made on exactly this source; always null for help. */
   testRun: AiReviewTestRun | null
   language: AiResponseLanguage
 }
@@ -341,14 +345,108 @@ export interface AiReview {
   improvements: string[]
 }
 
+/** Help for a problem not yet solved; prose is in the requested language. */
+export interface AiProblemHelp {
+  /** The problem restated plainly: what is asked, inputs/outputs, what the examples show. */
+  overview: string
+  /** Constraints, edge cases, and observations that matter for choosing an approach. */
+  keyPoints: string[]
+  /** Progressively more specific hints, first gentlest; no full algorithm, no code. */
+  hints: string[]
+}
+
 export interface AiReviewResult {
   outcome: 'ok' | 'refused' | 'truncated'
-  /** Non-null only when `outcome` is `ok`. */
+  /** Non-null only when `outcome` is `ok` for a review request. */
   review: AiReview | null
+  /** Non-null only when `outcome` is `ok` for a help request. */
+  help: AiProblemHelp | null
   servedModel: string
   /** A pinned model left the list, so the default was used. */
   fellBack: boolean
   /** The request that produced this result. */
+  usage: AiRequestUsage
+}
+
+/** One earlier exchange about a review. */
+export type AiCodeProposalOutcome = 'pending' | 'accepted' | 'rejected'
+
+/** What became of a code change proposed in an earlier turn. */
+export interface AiProposalRecord {
+  summary: string
+  outcome: AiCodeProposalOutcome
+}
+
+export interface AiReviewFollowUpTurn {
+  question: string
+  answer: string
+  /** Present when the answer proposed a code change. */
+  proposal?: AiProposalRecord
+}
+
+/** A question about a shown review, answered against the code as it was reviewed. */
+export interface AiReviewFollowUpRequest {
+  /** The review's served model. */
+  selectedModelId: string
+  /** The original review request, unchanged. */
+  review: AiReviewRequest
+  /** The review the model returned; set exactly when `review.mode` is `review`. */
+  reviewAnswer: AiReview | null
+  /** The help the model returned; set exactly when `review.mode` is `help`. */
+  helpAnswer: AiProblemHelp | null
+  /** Earlier completed turns, oldest first. */
+  history: AiReviewFollowUpTurn[]
+  question: string
+  /**
+   * The reviewed file as the editor holds it now. It reaches the model only when
+   * it differs from `review.source`, and a proposed change is based on it.
+   */
+  currentCode: string
+}
+
+/** A whole-file change the user asked for; nothing is applied until they accept it. */
+export interface AiCodeProposal {
+  summary: string
+  code: string
+  /** The `currentCode` the change was made against. */
+  baseCode: string
+}
+
+/** Token counts reported while a message streams; the cost comes with the result. */
+export interface AiStreamUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+}
+
+/**
+ * One streamed event of a review or a follow-up answer: text (fragments of the
+ * JSON document for a review), thinking with the characters it added (zero
+ * when a block starts or the text is omitted), the start of a proposed change,
+ * or the token counts so far. Usage arrives once when the message starts, with
+ * the input and cache counts, then once with `final` set.
+ */
+export type AiStreamEvent =
+  | { kind: 'text', text: string }
+  | { kind: 'thinking', chars: number }
+  | { kind: 'proposal-started' }
+  | { kind: 'usage', usage: AiStreamUsage, final: boolean }
+
+export type AiStreamHandler = (event: AiStreamEvent) => void
+
+export interface AiReviewFollowUpResult {
+  outcome: 'ok' | 'refused' | 'truncated'
+  /**
+   * The full answer; partial when truncated, and possibly empty when refused. A
+   * started change that could not be offered adds a note at the end.
+   */
+  answer: string
+  /** Only for an `ok` answer that proposed a usable change. */
+  proposal: AiCodeProposal | null
+  servedModel: string
+  /** The requested model left the list, so the default was used. */
+  fellBack: boolean
   usage: AiRequestUsage
 }
 
@@ -461,8 +559,25 @@ export interface BackendClient {
     request: AiGenerateRequest,
     onProgress?: AiProgressHandler,
   ): Promise<AiGenerateResult>
-  /** Rejects when the request is too large or the reply cannot be read. */
-  reviewAiCode(request: AiReviewRequest, onProgress?: AiProgressHandler): Promise<AiReviewResult>
+  /**
+   * `onEvent` receives the review's JSON as it streams; the result is the whole
+   * document, checked. Rejects when the request is too large or the reply cannot
+   * be read.
+   */
+  reviewAiCode(
+    request: AiReviewRequest,
+    onProgress?: AiProgressHandler,
+    onEvent?: AiStreamHandler,
+  ): Promise<AiReviewResult>
+  /**
+   * Ask about a shown review. `onEvent` receives answer text as it streams, the
+   * start of a proposed change, thinking, and usage. Rejects with a readable
+   * message when the request is too large or the reply cannot be read.
+   */
+  askAiReviewFollowUp(
+    request: AiReviewFollowUpRequest,
+    onEvent?: AiStreamHandler,
+  ): Promise<AiReviewFollowUpResult>
   /**
    * Usage per bucket, with one bucket for each ascending start. A bucket runs up
    * to the next start and the last is open-ended; older entries count only toward `allTime`.

@@ -69,7 +69,6 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
   }
   hooks: {
     resetTestState: ReturnType<typeof vi.fn>
-    cancelCurrentRun: ReturnType<typeof vi.fn>
     renderAll: ReturnType<typeof vi.fn>
     renderFileHeading: ReturnType<typeof vi.fn>
     renderFileTabs: ReturnType<typeof vi.fn>
@@ -83,6 +82,7 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
     setSavedSource: ReturnType<typeof vi.fn>
     setMessage: ReturnType<typeof vi.fn>
     renderBusyControls: ReturnType<typeof vi.fn>
+    documentLoaded: ReturnType<typeof vi.fn>
   }
   setGeneration: (generation: number) => void
 } {
@@ -109,7 +109,6 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
   }
   const hooks = {
     resetTestState: vi.fn(),
-    cancelCurrentRun: vi.fn(),
     renderAll: vi.fn(),
     renderFileHeading: vi.fn(),
     renderFileTabs: vi.fn(),
@@ -123,6 +122,7 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
     setSavedSource: vi.fn(),
     setMessage: vi.fn(),
     renderBusyControls: vi.fn(),
+    documentLoaded: vi.fn(),
   }
   let generation = 0
   const context: DocumentControllerContext = {
@@ -131,7 +131,6 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
     editor,
     getRepositoryGeneration: () => generation,
     resetTestState: hooks.resetTestState,
-    cancelCurrentRun: hooks.cancelCurrentRun,
     renderAll: hooks.renderAll,
     renderFileHeading: hooks.renderFileHeading,
     renderFileTabs: hooks.renderFileTabs,
@@ -145,6 +144,7 @@ function createHarness(overrides: Partial<DocumentControllerState> = {}): {
     setSavedSource: hooks.setSavedSource,
     setMessage: hooks.setMessage,
     renderBusyControls: hooks.renderBusyControls,
+    documentLoaded: hooks.documentLoaded,
   }
   const controller = new DocumentController(context)
   return {
@@ -507,7 +507,7 @@ describe('DocumentController', () => {
     controller.dispose()
   })
 
-  it('retains a native test lock on edit and suppresses autosave during Git discard', async () => {
+  it('keeps a running test run on edit and suppresses autosave during Git discard', async () => {
     const { controller, state, backend, hooks } = createHarness({
       openTabs: [{ id: 1, ...fileA }],
       activeTabId: 1,
@@ -534,7 +534,7 @@ describe('DocumentController', () => {
     controller.onEditorChange('class A { int changed = 1; }')
     await controller.flushPendingSave()
 
-    expect(hooks.cancelCurrentRun).toHaveBeenCalledOnce()
+    expect(state.testRun?.status).toBe('running')
     expect(state.busy).toBe(true)
     expect(backend.saveProblemFile).not.toHaveBeenCalled()
 
@@ -546,6 +546,70 @@ describe('DocumentController', () => {
       fileA.path,
       'class A { int changed = 2; }',
     )
+    controller.dispose()
+  })
+
+  it('keeps edits unsaved while autosave is held and saves them after release', async () => {
+    vi.useFakeTimers()
+    const { controller, state, backend } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+
+    controller.setAutosaveHeld(true)
+    controller.onEditorChange('class A { int held; }')
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(backend.saveProblemFile).not.toHaveBeenCalled()
+    expect(state.dirty).toBe(true)
+    expect(controller.hasPendingChanges).toBe(true)
+
+    controller.setAutosaveHeld(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(backend.saveProblemFile).toHaveBeenCalledTimes(1)
+    expect(backend.saveProblemFile).toHaveBeenCalledWith('/repo', fileA.path, 'class A { int held; }')
+    expect(state.dirty).toBe(false)
+    controller.dispose()
+  })
+
+  it('writes an explicit flush immediately while autosave is held', async () => {
+    vi.useFakeTimers()
+    const { controller, state, backend } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+
+    controller.setAutosaveHeld(true)
+    controller.onEditorChange('class A { int flushed; }')
+    await expect(controller.flushPendingSave()).resolves.toBe(true)
+    expect(backend.saveProblemFile).toHaveBeenCalledWith('/repo', fileA.path, 'class A { int flushed; }')
+    expect(state.dirty).toBe(false)
+
+    controller.setAutosaveHeld(false)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(backend.saveProblemFile).toHaveBeenCalledTimes(1)
+    controller.dispose()
+  })
+
+  it('does not save on release when no edit was made while held', async () => {
+    vi.useFakeTimers()
+    const { controller, backend } = createHarness({
+      openTabs: [{ id: 1, ...fileA }],
+      activeTabId: 1,
+      selectedPath: fileA.path,
+      selectedSource: 'class A {}',
+      savedSource: 'class A {}',
+    })
+
+    controller.setAutosaveHeld(true)
+    controller.setAutosaveHeld(false)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(backend.saveProblemFile).not.toHaveBeenCalled()
     controller.dispose()
   })
 
@@ -653,5 +717,125 @@ describe('DocumentController', () => {
       'Could not save the file: late disk failure',
       'error',
     )
+  })
+})
+
+describe('DocumentController closed-file rewrites', () => {
+  /** Files on a fake disk that reads return and saves change. */
+  function diskHarness(): ReturnType<typeof createHarness> & { disk: Map<string, string> } {
+    const harness = createHarness()
+    const disk = new Map([[fileA.path, 'class A {}'], [fileB.path, 'class B {}']])
+    harness.backend.readProblemFile.mockImplementation(async (_repoPath, path) => {
+      const source = disk.get(path)
+      if (source === undefined) throw new Error('missing')
+      return source
+    })
+    harness.backend.saveProblemFile.mockImplementation(async (_repoPath, path, source) => {
+      disk.set(path, source)
+    })
+    return { ...harness, disk }
+  }
+
+  const addField = (source: string): string => source.replace('{}', '{ int added; }')
+
+  it('rewrites a file that is not open on disk and leaves the editor alone', async () => {
+    const { controller, editor, hooks, disk } = diskHarness()
+    await controller.openFile(fileA)
+    hooks.markGitStale.mockClear()
+
+    await expect(controller.rewriteClosedFile('/repo', fileB.path, 0, addField)).resolves.toBe('written')
+
+    expect(disk.get(fileB.path)).toBe('class B { int added; }')
+    expect(editor.value).toBe('class A {}')
+    expect(hooks.markGitStale).toHaveBeenCalledOnce()
+    controller.dispose()
+  })
+
+  it('refuses the open file, a changed repository, and a file that is gone', async () => {
+    const { controller, backend, disk, setGeneration } = diskHarness()
+    await controller.openFile(fileA)
+    backend.readProblemFile.mockClear()
+
+    await expect(controller.rewriteClosedFile('/repo', fileA.path, 0, addField)).resolves.toBe('open')
+    await expect(controller.rewriteClosedFile('/repo', 'src/main/java/easy/Q3Gone.java', 0, addField))
+      .resolves.toBe('missing')
+    expect(backend.readProblemFile).not.toHaveBeenCalled()
+
+    disk.delete(fileB.path)
+    await expect(controller.rewriteClosedFile('/repo', fileB.path, 0, addField)).resolves.toBe('missing')
+
+    setGeneration(1)
+    await expect(controller.rewriteClosedFile('/repo', fileB.path, 0, addField)).resolves.toBe('stale')
+    expect(backend.saveProblemFile).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  it('saves nothing when the edit leaves the file alone', async () => {
+    const { controller, backend } = diskHarness()
+    await controller.openFile(fileA)
+
+    await expect(controller.rewriteClosedFile('/repo', fileB.path, 0, () => null)).resolves.toBe('unchanged')
+
+    expect(backend.saveProblemFile).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  it('rejects when the save fails', async () => {
+    const { controller, backend } = diskHarness()
+    await controller.openFile(fileA)
+    backend.saveProblemFile.mockRejectedValueOnce(new Error('disk full'))
+
+    await expect(controller.rewriteClosedFile('/repo', fileB.path, 0, addField)).rejects.toThrow('disk full')
+    controller.dispose()
+  })
+
+  it('opens a file being rewritten only once the rewrite is saved', async () => {
+    const { controller, backend, editor, state, disk } = diskHarness()
+    await controller.openFile(fileA)
+    const save = deferred<void>()
+    backend.saveProblemFile.mockImplementationOnce(async (_repoPath, path, source) => {
+      await save.promise
+      disk.set(path, source)
+    })
+
+    const rewriting = controller.rewriteClosedFile('/repo', fileB.path, 0, addField)
+    const opening = controller.openFile(fileB)
+    await new Promise((resolve) => setTimeout(resolve))
+    expect(state.selectedPath).toBe(fileA.path)
+
+    save.resolve()
+    await expect(rewriting).resolves.toBe('written')
+    await opening
+    expect(state.selectedPath).toBe(fileB.path)
+    expect(editor.value).toBe('class B { int added; }')
+    controller.dispose()
+  })
+
+  it('reads again when a rewrite starts while the file is being opened', async () => {
+    const { controller, backend, editor, disk } = diskHarness()
+    await controller.openFile(fileA)
+    const firstRead = deferred<string>()
+    backend.readProblemFile.mockImplementationOnce(() => firstRead.promise)
+
+    const opening = controller.openFile(fileB)
+    await new Promise((resolve) => setTimeout(resolve))
+    await expect(controller.rewriteClosedFile('/repo', fileB.path, 0, addField)).resolves.toBe('written')
+    firstRead.resolve('class B {}')
+    await opening
+
+    expect(disk.get(fileB.path)).toBe('class B { int added; }')
+    expect(editor.value).toBe('class B { int added; }')
+    controller.dispose()
+  })
+
+  it('reports each document it loads into the editor', async () => {
+    const { controller, hooks, disk } = diskHarness()
+    await controller.openFile(fileA)
+    expect(hooks.documentLoaded).toHaveBeenCalledOnce()
+
+    disk.set(fileA.path, 'class A { int external; }')
+    await controller.reloadOpenFileFromDisk(fileA.path)
+    expect(hooks.documentLoaded).toHaveBeenCalledTimes(2)
+    controller.dispose()
   })
 })
